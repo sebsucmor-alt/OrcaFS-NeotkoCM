@@ -103,6 +103,9 @@ protected:
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
     // Shape mask preview fill in the selected filament colour.
     ColorRGBA get_shape_fill_color() const override;
+    // Colour of a filament id, and the filament closest to an SVG colour.
+    ColorRGBA get_state_color(int state) const override;
+    int       svg_default_state(uint32_t rgb) const override;
 
     std::string get_gizmo_entering_text() const override { return "Entering color painting"; }
     std::string get_gizmo_leaving_text() const override { return "Leaving color painting"; }
@@ -127,6 +130,32 @@ protected:
 
     bool                              m_rectangle_mask_active = false;
     bool                              m_polygon_mask_active = false;
+
+    // The panel has two modes. Brush: Orca's tools (brushes, fill, height range) and the
+    // rectangle mask. Vector: shapes drawn on screen and SVG decals. Keys B / V.
+    enum class PaintMode { Brush, Vector };
+    PaintMode m_paint_mode     = PaintMode::Brush;
+    bool shape_draw_needs_arming() const override { return m_paint_mode == PaintMode::Vector; }
+    bool m_show_decals_in_brush = false;
+    int  selected_decal_index() const override { return m_selected_decal; }
+    PaintDecal m_decal_ts_start;          // the decal when a Turn / Size slider was grabbed
+    float      m_decal_turn_ui = 0.f;     // relative to that start, reset on release
+    float      m_decal_size_ui = 100.f;
+    bool show_decal_cards_while_brushing() const override { return m_paint_mode == PaintMode::Brush && m_show_decals_in_brush; }
+    int       m_selected_decal = -1;   // decal row picked in the Vector panel's layer list
+    float     m_colour_row_w   = 0.f;  // measured width of one SVG colour row (0 until drawn once)
+    void set_paint_mode(PaintMode mode);
+    void render_vector_panel();
+    // One SVG colour row: its colour, the filament it paints with (combo) and its eye.
+    // Returns true when the filament or the eye changed.
+    bool render_svg_colour_row(int id, uint32_t rgb, bool grad, int &state, bool &hidden);
+    // Parts of the SVG on screen: pick on the canvas, the selection's filament and eye, and the
+    // list. True when the paint groups changed (masks to rebuild).
+    bool render_svg_parts();
+    void render_mirror_centre_controls();
+    // Filament combo with a first entry "Colour" (state -1 = follow the colour of the part).
+    bool render_part_filament_combo(const char *id, int &state);
+    int  m_svg_parts_filter = 0;   // list shows: 0 = changed and selected, 1 = all
 
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 

@@ -13,6 +13,10 @@
 #include <GL/glew.h>
 
 #include <memory>
+#include <map>
+#include <set>   // selected SVG parts
+#include <functional>
+#include <unordered_map>
 
 
 namespace Slic3r::GUI {
@@ -304,7 +308,9 @@ protected:
         bool  smooth = false;
         bool  is_curved() const { return !in.isZero() || !out.isZero(); }
     };
-    enum class ShapeDrag { None, NewNodeHandle, Node, HandleIn, HandleOut };
+    enum class ShapeDrag { None, NewNodeHandle, Node, HandleIn, HandleOut, Move, Corner };
+    // Last mouse position while dragging a whole closed shape (ShapeDrag::Move).
+    Vec2d m_shape_move_last = Vec2d::Zero();
     std::vector<ShapeNode> m_shape_nodes;
     bool      m_shape_closed           = false;
     bool      m_shape_view_lock        = true;
@@ -326,10 +332,192 @@ protected:
     std::vector<Vec2d> shape_flatten(bool closed) const;
     // Camera input is swallowed while drawing a shape with Lock view on.
     bool shape_view_locked() const { return m_tool_type == ToolType::POLYGON && m_shape_view_lock; }
+    // Where the right button went down: a right CLICK cancels a drawn shape, a right DRAG pans.
+    Vec2d m_shape_right_down_pos = Vec2d::Zero();
     // Paints the closed shape with new_state as a single undo step.
     void shape_apply(EnforcerBlockerType new_state, const std::string &snapshot_name);
+    // SVG shapes. The SVG is cleaned (CSS classes, background, transparencies, SvgPaint), split into its colour ZONES, and each zone paints with the
+    // filament the user picks for it. Moved, scaled and rotated as a whole, painted with
+    // Apply/Erase; points are not edited. Returns false and fills m_shape_svg_error when the
+    // file gives no shape.
+    bool shape_load_svg(const std::string &path);
+    std::string m_shape_svg_error;
+    // One outline of the SVG: an outer contour or a hole of one zone's area.
+    struct SvgRing
+    {
+        std::vector<Vec2d> pts;
+        bool               hole = false;
+        int                zone = -1;
+    };
+    // One colour of the SVG (SvgPaint::zones) and the filament it paints with.
+    struct SvgZone
+    {
+        uint32_t rgb    = 0;      // 0xRRGGBB as in the SVG (mean colour for a gradient)
+        bool     grad   = false;
+        int      state  = 1;      // filament / Mixed Filament id = EnforcerBlockerType value
+        bool     hidden = false;  // eye off: transparent, not painted, shows what is under it
+    };
+    std::string          m_svg_data;          // the cleaned SVG text
+    std::vector<SvgZone> m_svg_zones;
+    // Parts: the shapes set apart from their colour (own filament or off),
+    // stored as in the decal, and the paint groups they give (paint_decal_groups: the colours,
+    // then one group per part with its own filament). SvgRing::zone is a GROUP index.
+    std::vector<PaintDecalPart> m_svg_parts;
+    std::vector<PaintDecalZone> m_svg_groups;
+    // Every shape of the SVG in its own frame (rings, mm, Y up) and its colour, for picking parts
+    // on screen and outlining them. Built with the masks.
+    struct SvgShape { std::vector<std::vector<Vec2d>> rings; int zone = -1; Vec2d lo = Vec2d::Zero(), hi = Vec2d::Zero(); };
+    std::vector<SvgShape> m_svg_shapes;
+    std::set<int>         m_svg_part_sel;          // selected parts (shape indices)
+    int                   m_svg_part_hover  = -1;  // part under the mouse in the list, outlined
+    bool                  m_svg_pick_parts  = false;   // a click on the SVG picks a part
+    // The part override of shape k (nullptr if it follows its colour); `create` adds one.
+    PaintDecalPart *svg_part(int shape, bool create);
+    void            svg_prune_parts();         // drops overrides that change nothing
+    // Topmost shape under a screen point (hidden parts included, so they can be turned back on).
+    int             svg_pick_part(const Vec2d &screen) const;
+    // A hand-drawn shape saved as a decal turned back into points to edit
+    // (only SVGs written by shape_to_svg_session). The SVG session keeps its decal, filament and
+    // mirror, so saving the shape updates the same decal.
+    bool            svg_is_drawn_shape() const;
+    bool            svg_to_shape_nodes();
+    int             m_shape_from_decal       = -1;   // decal the shape on screen came from
+    int             m_shape_from_state       = -1;   // its filament
+    int             m_shape_from_mirror      = 0;
+    bool            m_shape_from_readable    = false;
+    // The decal being edited on screen (as an SVG or as points): its card is not drawn.
+    int             editing_decal() const { return m_svg_edit_decal >= 0 ? m_svg_edit_decal : m_shape_from_decal; }
+    GLModel         m_svg_part_halo_model;
+    GLModel         m_svg_part_core_model;
+    GLModel         m_svg_hover_halo_model;
+    GLModel         m_svg_hover_core_model;
+    // Zone areas in the SVG's own frame (mm, Y up) and the 2D placement that puts them on screen:
+    // screen = m_svg_lin * local + m_svg_off. Hiding a zone rebuilds the areas, the placement stays.
+    std::vector<SvgRing> m_svg_local_rings;
+    Matrix2d             m_svg_lin = Matrix2d::Identity();
+    Vec2d                m_svg_off = Vec2d::Zero();
+    // Corner deform, a homography in the SVG frame applied before the
+    // placement: screen = m_svg_lin * warp(local) + m_svg_off. Identity = not deformed.
+    Matrix3d             m_svg_warp   = Matrix3d::Identity();
+    bool                 m_svg_deform = false;   // corner handles shown and grabbed
+    Vec2d svg_local_to_screen(const Vec2d &local) const;
+    // Puts corner k (0..3 = the SVG box's lo, (hi.x, lo.y), hi, (lo.x, hi.y)) at a screen point;
+    // refused (false) when the box would stop being convex.
+    bool  svg_set_corner(int k, const Vec2d &screen);
+    void  svg_reset_corners() { m_svg_warp = Matrix3d::Identity(); svg_update_screen_rings(); }
+    bool  svg_is_deformed() const { return !m_svg_warp.isIdentity(1e-12); }
+    std::vector<SvgRing> m_svg_rings;          // the same rings on screen (pixels, Y down)
+    // Each zone's area as triangles in the SVG's own frame, for the preview fill (mapped to the
+    // screen through the placement, so it never depends on how the rings turn on screen).
+    std::vector<std::vector<Vec2d>> m_svg_local_tris;
+    // Box of the SVG's areas in its own frame: grabbing anywhere inside it moves the SVG (thin or
+    // holed drawings had almost nothing to click on), and it is drawn as a frame with a move cross.
+    Vec2d                m_svg_local_lo = Vec2d::Zero();
+    Vec2d                m_svg_local_hi = Vec2d::Zero();
+    // The box's corners on screen, in order (bottom-left, bottom-right, top-right, top-left).
+    std::array<Vec2d, 4> svg_screen_box() const;
+    std::vector<GLModel> m_svg_fill_models;    // one preview fill per zone
+    void svg_rebuild_masks();
+    void svg_update_screen_rings();
+    std::string          m_svg_name;           // file stem, becomes the decal's name
+
+    // Paint decals (ModelObject::paint_decals). The SVG on screen is the
+    // editing session: "Pin to this view" turns it into a decal card anchored to the object, and
+    // "Edit" brings a decal back to the screen from its own view. m_svg_edit_decal = the decal
+    // being edited (-1: a new one); m_svg_pending_edit = a decal to load on the next frame, once
+    // the camera matrices of its view are up to date.
+    int  m_svg_edit_decal   = -1;
+    int  m_svg_pending_edit = -1;
+    // Instance transform of the selected object, and every model part's transform (and without
+    // translation), as the masks use them.
+    Transform3d model_part_trafos(std::vector<Transform3d> &trafos, std::vector<Transform3d> &trafos_no_translate) const;
+    bool svg_pin_to_view();
+    // The decal the SVG on screen would become if pinned now (current camera); false if it can't.
+    bool svg_build_decal(PaintDecal &decal);
+    int  m_svg_mirror = 0;
+    bool m_svg_mirror_readable = false;
+    // Vector mode: a click only starts a shape after "Draw shape", so a
+    // plain left drag (on the object or the empty canvas) orbits the camera as usual.
+    bool m_shape_draw_armed = false;
+    virtual bool shape_draw_needs_arming() const { return false; }
+    void svg_edit_decal(int idx);
+    void svg_finish_pending_edit();
+    // Paints decals idxs (in that order) onto the object; erase = remove their paint instead.
+    void decal_apply(const std::vector<size_t> &idxs, bool erase);
+    // Zone areas of a decal in its SVG frame (hidden zones transparent), cached per decal.
+    const std::vector<SvgRing> &decal_rings(size_t idx);
+    // centre of the object's box in the object frame, where the decal mirror planes cross.
+    Vec3d decal_mirror_centre() const;
+    // "Pick centre" armed: the next left click on the object sets the mirror centre there.
+    bool  m_mirror_pick_armed = false;
+    // Decal cards: floating on a sphere, or laid on the surface as they will paint.
+    bool m_decal_on_surface = true;
+    void render_decal_cards(const PaintDecal *on_screen);
+    void render_decal_cards_body(const ModelObject *decal_mo, const PaintDecal *on_screen,
+                                 const std::function<Vec2f(const Vec2d &)> &to_ndc, float cnv_width, float cnv_height);
+    void render_mirror_marker();
+    // Brush symmetry (ModelObject::paint_symmetry.brush): every brush
+    // stroke repeated through the mirror centre, on the surface point nearest to the mirrored one
+    // (skipped where the object has nothing there). Ghost cursors show where the copies land.
+    void brush_paint_mirrored(const std::vector<ProjectedMousePosition> &positions, const Transform3d &src_trafo,
+                              EnforcerBlockerType new_state, const std::vector<Transform3d> &trafos,
+                              const std::vector<Transform3d> &trafos_not_translate);
+    // `eye_obj` (object frame, may be null): the mirrored camera. The point is first looked for along
+    // the mirrored ray, like the stroke itself was found (a clean line on a near-symmetric surface);
+    // the nearest surface point only if that ray misses.
+    bool symmetry_surface_point(const Vec3d &obj_pt, const std::vector<Transform3d> &trafos, const Transform3d &inst,
+                                double max_dist, int &mesh, int &facet, Vec3f &hit_mesh, const Vec3d *eye_obj = nullptr) const;
+    void render_brush_symmetry(const std::vector<Transform3d> &trafos, bool hovering);
+    GLModel m_brush_ghost_model;
+    virtual bool show_decal_cards_while_brushing() const { return false; }
+    // "Move on object" armed: a left drag on the object slides the selected decal over it,
+    // turning it around the object's centre so the grabbed point follows the mouse.
+    bool       m_decal_move_armed = false;
+    int        m_decal_drag       = -1;     // decal being slid, -1 = none
+    PaintDecal m_decal_drag_start;          // its state when the drag began
+    Vec3d      m_decal_drag_anchor = Vec3d::Zero();   // grabbed point, object frame, minus the pivot
+    virtual int selected_decal_index() const { return -1; }
+    // Turn (degrees) and scale a stored decal on its own card, around the centre of its SVG:
+    // d = start turned and scaled (start = the decal before the gesture began).
+    void decal_turn_scale(size_t idx, const PaintDecal &start, double degrees, double factor);
+    bool mouse_on_object(const Vec2d &mouse, Vec3d &obj_pt);   // object-frame hit under the mouse
+    struct SurfaceCard { std::vector<std::vector<Vec3d>> rings; std::vector<std::vector<Vec3d>> tris; };
+    std::map<std::string, SurfaceCard> m_surface_cache;
+    const SurfaceCard &decal_surface(const PaintDecal &d, const std::vector<SvgRing> &rings,
+                                     const std::vector<std::vector<Vec2d>> *tris, bool live);
+    GLModel m_mirror_centre_model;
+    // tris[zone]: that zone's area as triangles (3 points each) in the SVG frame, for the preview fill.
+    struct DecalRingsCache { std::string key; std::vector<SvgRing> rings; std::vector<std::vector<Vec2d>> tris; std::vector<PaintDecalZone> groups; };
+    std::vector<DecalRingsCache> m_decal_rings_cache;
+    GLModel m_decal_halo_model;
+    GLModel m_shape_halo_model;   // dark halo under the drawn shape's outline and handles
+    // turns the closed drawn shape into an SVG on screen (one colour, the
+    // selected filament), exactly where it is, so it can be pinned as a decal like any SVG.
+    bool shape_to_svg_session();
+    GLModel m_decal_core_model;
+    GLModel m_decal_back_halo_model;   // cards facing away from the camera, fainter
+    GLModel m_decal_back_core_model;
+    // the cards filled with their filaments' colours, translucent, to judge
+    // the result before Apply. One model per (card, colour), rebuilt every frame.
+    bool                 m_decal_preview_colours = true;
+    std::vector<GLModel> m_decal_fill_models;
+    // Scale (percent) and rotation (degrees) of the SVG set, as set by the panel sliders.
+    float m_shape_scale_pct  = 100.f;
+    // width / height of the SVG on screen, along its own axes.
+    float m_svg_width_pct    = 100.f;
+    float m_svg_height_pct   = 100.f;
+    void  svg_stretch(int axis, double factor);
+    float m_shape_rotate_deg = 0.f;
+    bool shape_contains(const Vec2d &p) const;
+    void shape_move(const Vec2d &delta);
+    void shape_scale(double factor);
+    void shape_rotate(double degrees);
     // Translucent preview fill of a closed shape; the MMU gizmo uses the selected filament colour.
     virtual ColorRGBA get_shape_fill_color() const { return { 0.0f, 1.0f, 0.3f, 0.25f }; }
+    // Colour of a paint state (filament id) for the SVG zone previews; MMU gizmo: the filament's.
+    virtual ColorRGBA get_state_color(int /*state*/) const { return get_shape_fill_color(); }
+    // Filament an SVG colour starts with when loaded; MMU gizmo: the closest filament colour.
+    virtual int svg_default_state(uint32_t /*rgb*/) const { return int(get_left_button_state_type()); }
 
     bool     m_paint_on_overhangs_only          = false;
     float    m_highlight_by_angle_threshold_deg = 0.f;
@@ -338,11 +526,14 @@ protected:
     Vec2d m_old_center{ Vec2d::Zero() };
     float m_old_cursor_radius{ 0.0f };
     GLModel m_rect_overlay;
-    Vec2d m_old_rect_start_corner = Vec2d::Zero();
-    Vec2d m_old_rect_end_corner   = Vec2d::Zero();
+    Vec2d   m_old_rect_start_corner = Vec2d::Zero();
+    Vec2d   m_old_rect_end_corner   = Vec2d::Zero();
+    // Polygon overlay is rebuilt unconditionally each frame: point count is tiny (a handful of
+    // clicks) and it changes on almost every frame anyway (rubber-band segment follows the mouse).
     GLModel m_polygon_overlay;
     GLModel m_polygon_fill_overlay;
     GLModel m_polygon_handles_overlay;
+
     static constexpr float SmartFillAngleMin  = 0.0f;
     static constexpr float SmartFillAngleMax  = 90.f;
     static constexpr float SmartFillAngleStep = 1.f;
@@ -377,10 +568,23 @@ private:
     std::vector<ProjectedHeightRange> get_projected_height_range(const Vec2d& mouse_position, double resolution, const std::vector<const ModelVolume*>& part_volumes, const std::vector<Transform3d>& trafo_matrices) const;
 
     void apply_rectangle_mask(EnforcerBlockerType new_state);
-    void apply_polygon_mask(EnforcerBlockerType new_state);
-    // Occlusion test for the rectangle/polygon masks on mesh mesh_idx (mesh coords): a ray from
-    // the point towards the camera must not hit any model part of the object. Cached per point.
+    // Applies the POLYGON mask (m_shape_nodes, flattened) to every mesh, called from shape_apply().
+    void apply_polygon_mask(EnforcerBlockerType new_state, const std::vector<Vec2d> &flat);
+    // All rings of an SVG (outers + holes) in one pass per mesh.
+    void apply_polygon_set_mask(EnforcerBlockerType new_state, const std::vector<std::vector<Vec2d>> &rings, const std::vector<bool> &is_hole);
+    // Builds the cursor for one model part: mesh-local camera points, view*projection, viewport,
+    // part transform and clipping plane.
+    using AreaCursorFactory = std::function<std::unique_ptr<TriangleSelector::Cursor>(
+        const Vec3f &, const Vec3f &, const Matrix4d &, const std::array<int, 4> &, const Transform3d &, const TriangleSelector::ClippingPlane &)>;
+    // One select_patch() per model part of the object, with the cursor make_cursor builds.
+    void apply_area_cursor(EnforcerBlockerType new_state, const AreaCursorFactory &make_cursor);
+    // Occlusion test for the rectangle / polygon masks on mesh mesh_idx (mesh coords): a ray from the point towards the camera must
+    // not hit any model part of the object. Results are cached per point.
     TriangleSelector::Cursor::VisibilityTest make_visibility_test(size_t mesh_idx, const std::vector<Transform3d> &trafo_matrices) const;
+    // The same test towards any viewer: rays to eye_world (perspective)
+    // or along to_eye_world (ortho). The camera version above calls it with the camera.
+    TriangleSelector::Cursor::VisibilityTest make_visibility_test_toward(size_t mesh_idx, const std::vector<Transform3d> &trafo_matrices,
+        bool perspective, const Vec3d &eye_world, const Vec3d &to_eye_world) const;
 
     bool is_mesh_point_clipped(const Vec3d& point, const Transform3d& trafo) const;
     void update_raycast_cache(const Vec2d& mouse_position,
