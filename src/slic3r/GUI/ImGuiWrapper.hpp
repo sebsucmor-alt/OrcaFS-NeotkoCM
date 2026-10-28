@@ -14,6 +14,12 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 
+// The Draw shape icon of the multi-material painter, kept out of deps_src/imgui/imconfig.h
+// (a codepoint past Orca's last one).
+namespace ImGui {
+    const wchar_t NeotkoDrawShapeIcon = 0x0870;   // resources/images/neotko_draw_shape.svg
+}
+
 namespace Slic3r {
 namespace Search {
 struct OptionViewParameters;

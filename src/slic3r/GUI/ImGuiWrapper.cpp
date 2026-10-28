@@ -105,6 +105,7 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::CollapseArrowIcon,            "notification_collapse"             },
     {ImGui::ExpandArrowIcon,              "notification_expand"               },
     {ImGui::OpenArrowIcon,                "notification_arrow_open"           },
+    {ImGui::NeotkoDrawShapeIcon,          "neotko_draw_shape"                 },
 };
 static const std::map<const wchar_t, std::string> font_icons_large = {
     {ImGui::CloseNotifButton        , "notification_close"              },
