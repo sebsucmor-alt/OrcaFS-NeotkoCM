@@ -2508,7 +2508,7 @@ void ObjectList::load_shape_object(const std::string &type_name)
 
 // A mesh given in WORLD coordinates becomes a new part of object obj_idx, exactly where it is
 // (used by Align & Construct). Returns the new part, nullptr when nothing was added.
-ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name)
+ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name, bool negative)
 {
     if (m_objects == nullptr || obj_idx < 0 || obj_idx >= (int)m_objects->size() || mesh_world.empty())
         return nullptr;
@@ -2518,12 +2518,13 @@ ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_w
 
     // add_volume() centres the mesh and leaves the centre as the volume's offset, which here is
     // still a WORLD position. Undoing the instance matrix puts the part back where it was drawn.
-    ModelVolume *new_volume = model_object.add_volume(std::move(mesh_world), ModelVolumeType::MODEL_PART);
+    ModelVolume *new_volume = model_object.add_volume(std::move(mesh_world), negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
     const Transform3d placed = model_object.instances.front()->get_matrix().inverse() * new_volume->get_matrix();
     new_volume->set_transformation(placed);
     new_volume->name = name;
     const int extruder_id = model_object.config.has("extruder") ? model_object.config.opt_int("extruder") : 0;
-    new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
+    if (!negative)
+        new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
     new_volume->source.is_from_builtin_objects = true;
     model_object.invalidate_bounding_box();
 

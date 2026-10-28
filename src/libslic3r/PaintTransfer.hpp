@@ -65,7 +65,10 @@ public:
     // which facets of the target are facets of the source: their painting is copied as it is and
     // only the rest is resampled (a cut, where only the facets along the plane are new).
     // FACET_UNPAINTED in the map leaves that facet unpainted without sampling it (the cap of a cut).
-    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map = nullptr);
+    // `reach` (mm): how far the target skin may lie from the sources' and still take their
+    // painting. 0 = a boolean (a few microns). A remesh moves the skin up to about a voxel.
+    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map = nullptr,
+             float reach = 0.f);
 
 private:
     struct Impl;
@@ -76,7 +79,8 @@ private:
 // `target_to_world` maps the target mesh into the same world as the sources. Where the skins of
 // two sources coincide, the one listed first wins. `base_filament` is the filament the target
 // prints with: skin that would be coloured with it is left unpainted.
-Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament);
+Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament,
+               float reach = 0.f);
 
 // Split: a piece cut out of a mesh keeps the very same triangles (same vertices, same corner
 // order), so its painting is copied triangle by triangle, exactly and without any search.
