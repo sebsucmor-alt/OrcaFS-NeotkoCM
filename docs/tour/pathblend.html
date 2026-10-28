@@ -44,6 +44,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour" aria-current="page">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -574,8 +575,8 @@ Tour.demo('pathblend', function (host) {
       body.appendChild(toolRow('Cap filament', function () { return S.capTool; }, function (v) { S.capTool = v; }));
     }
     body.appendChild(Tour.slider({
-      label: 'Ramp filament TD', min: 0.2, max: 8, step: 0.1, value: S.filaments[S.rampTool].td,
-      format: function (v) { return v.toFixed(1); },
+      label: 'Ramp filament TD', min: 0.05, max: 2.5, step: 0.01, value: S.filaments[S.rampTool].td,
+      format: function (v) { return v.toFixed(2); },
       onInput: function (v) { S.filaments[S.rampTool].td = v; redraw(); }
     }));
     if (S.mode === 'full') {

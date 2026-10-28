@@ -137,7 +137,7 @@ bool object_base_bg(const Slic3r::ColorSci::Material mats[4],
     std::vector<Slic3r::ColorSci::Slice> slices;
     slices.push_back({ a, (100 - mix_b) / 100.f });
     slices.push_back({ b, mix_b / 100.f });
-    Slic3r::ColorSci::blend_parallel(slices, mats, bg_rgb);
+    Slic3r::ColorSci::blend_parallel(slices, mats, float(weave_layer_height()), bg_rgb);
     return true;
 }
 
@@ -179,7 +179,7 @@ std::vector<ColorRGBA> slot_colors(const ModelVolume* mv, const ModelObject* own
                     const SurfacePassStack st_top  = SurfacePassStack::from_json(p->stack_top_json);
                     const SurfacePassStack st_penu = SurfacePassStack::from_json(p->stack_penu_json);
                     float out[3] = {0.f, 0.f, 0.f};
-                    Slic3r::ColorSci::sandwich_colour_stacked(st_top, st_penu, mats, bg, out);
+                    Slic3r::ColorSci::sandwich_colour_stacked(st_top, st_penu, mats, bg, weave_layer_height(), out);
                     ebt[s] = ColorRGBA(std::min(1.f, out[0]), std::min(1.f, out[1]),
                                        std::min(1.f, out[2]), 1.f);
                 }
@@ -940,7 +940,7 @@ pathblend_make_weave(const PathBlendPassConfig& pbc,
         Slic3r::ColorSci::Layer bottom;
         bottom.rgb   = mats[tb].rgb;
         bottom.td    = mats[tb].td;
-        bottom.ratio = float(h_ramp / H);
+        bottom.ratio = float(h_ramp);   // 21-oct-2026: en mm (el TD va en mm), no fracción de capa
         layers.push_back(bottom);
         // Half mode has no cap — the area above the ramp is genuinely unfilled
         // (authorized semi-fill, see PathBlendPassConfig comment), not a second
@@ -951,7 +951,7 @@ pathblend_make_weave(const PathBlendPassConfig& pbc,
             Slic3r::ColorSci::Layer cap;
             cap.rgb   = mats[tt].rgb;
             cap.td    = mats[tt].td;
-            cap.ratio = float(h_cap / H);
+            cap.ratio = float(h_cap);   // en mm, ídem
             layers.push_back(cap);
         }
         float rgb[3];
@@ -1040,8 +1040,8 @@ ZAff zaff_of_pass(const SurfacePass& p, bool penu_role, const Slic3r::ColorSci::
     // El rol importa: pass_to_layer busca el patrón de un ColorStitch con las claves del rol.
     const SurfacePassStack& t = penu_role ? none : one;
     const SurfacePassStack& q = penu_role ? one  : none;
-    Slic3r::ColorSci::sandwich_colour_stacked(t, q, mats, k0, o0);
-    Slic3r::ColorSci::sandwich_colour_stacked(t, q, mats, k1, o1);
+    Slic3r::ColorSci::sandwich_colour_stacked(t, q, mats, k0, weave_layer_height(), o0);
+    Slic3r::ColorSci::sandwich_colour_stacked(t, q, mats, k1, weave_layer_height(), o1);
     return zaff_from_black_white(o0, o1);
 }
 
@@ -1091,7 +1091,7 @@ bool zone_field_stripes(const TopZoneRecipe::Field& F,
         w = pathblend_make_weave(F.pbc, mats, bg_rgb, lh, F.theta, pmin, pmax, line_w,
                                  F.fr.anchor_proj, &layers);
         if (!w.on || layers.size() != w.cols.size()) return false;
-        // Las capas de pathblend_make_weave son fracciones de la capa ENTERA; dentro de una
+        // Las capas de pathblend_make_weave van en mm sobre la capa ENTERA (21-oct-2026); dentro de una
         // pila el pase ocupa `ratio` de ella. Con un PathBlend solo (ratio 1) no cambia nada.
         const float r = (F.pass.ratio > 1e-6) ? float(F.pass.ratio) : 1.f;
         for (auto& L : layers) {
@@ -1379,7 +1379,7 @@ void weave_islands_for_volume(const ModelVolume*              mv,
             if (kv.empty() && !is_pathblend) {
                 float outc[3] = {0.f, 0.f, 0.f};
                 Slic3r::ColorSci::sandwich_colour_stacked(stb, Slic3r::SurfacePassStack{},
-                                                          mats, bg_rgb, outc);
+                                                          mats, bg_rgb, weave_layer_height(), outc);
                 WeaveParams flat;
                 flat.on = true; flat.tile = true; flat.angle_rad = 0.f;
                 // Con UNA sola entrada en cols, el tiling devuelve ese color para

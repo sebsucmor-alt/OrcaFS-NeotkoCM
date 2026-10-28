@@ -52,15 +52,16 @@ double ring_visibility(size_t k, double w_mm, double d_mm)
 double delta_e_for_assignment(const std::vector<unsigned int>& assignment,
                               const std::vector<double>&        vis,
                               const Lab&                        target,
-                              const Material                    mats[4])
+                              const Material                    mats[4],
+                              float                             layer_mm)
 {
     float acc[3] = { 0.f, 0.f, 0.f };
     float wsum[3] = { 0.f, 0.f, 0.f };
     for (size_t k = 0; k < assignment.size(); ++k) {
         const Material& m = mats[std::clamp(int(assignment[k]), 0, 3)];
         float op[3];
-        // Optical thickness of the ring = one full reference layer of that material.
-        slice_opacity(m, 1.f, op);
+        // Optical thickness of the ring = one full layer of that material, in mm (TD is in mm).
+        slice_opacity(m, layer_mm, op);
         for (int c = 0; c < 3; ++c) {
             const float w = float(vis[k]) * op[c];
             acc[c] += m.rgb[c] * w;
@@ -80,7 +81,8 @@ PerimeterColorPlan resolve_perimeter_colors(double                            d_
                                             int                               wall_loops,
                                             const Lab&                        target,
                                             const std::vector<unsigned int>&  candidate_tools,
-                                            const Material                    mats[4])
+                                            const Material                    mats[4],
+                                            double                            layer_height_mm)
 {
     PerimeterColorPlan plan;
     if (wall_loops <= 0 || perimeter_width_mm <= 1e-6 || d_mm <= perimeter_width_mm)
@@ -108,7 +110,7 @@ PerimeterColorPlan resolve_perimeter_colors(double                            d_
 
     bool done = false;
     while (!done) {
-        const double de = delta_e_for_assignment(assignment, vis, target, mats);
+        const double de = delta_e_for_assignment(assignment, vis, target, mats, float(std::max(0.01, layer_height_mm)));
         if (de < best_delta_e) {
             best_delta_e = de;
             best_assignment = assignment;

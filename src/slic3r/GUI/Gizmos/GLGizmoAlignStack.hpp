@@ -99,6 +99,7 @@ private:
     int     m_hover_model_facet = -1;// facet the hover model was built for
     GLModel m_picked_face_model;     // green overlay for the confirmed face
     int     m_picked_model_facet = -1;
+    float   m_picked_model_cos   = 0.f;  // NEOTKO_REMESH_TAG: the overlay is rebuilt when the Angle changes
 
     // --- Scene highlight: original GLVolume colors we tinted ---------------
     // Keyed by a stable (object_idx, volume_idx, instance_idx) id so we can
@@ -220,6 +221,35 @@ private:
     bool        m_bool_keep_inputs = false; // false = #1 and #2 are removed after the operation
     std::string m_bool_error;               // last failure, shown under the buttons
     void apply_boolean(const std::string& op, const std::string& suffix);
+
+    // NEOTKO_REMESH_TAG 28-oct — Remesh (voxels): #1 rebuilt as one closed solid (repair), its
+    // surface moved by Offset, optionally hollow with Wall/Smooth and open through the picked face.
+    // Result: Replace #1, a New object, or (hollow only) the inside as a negative part of #1.
+    enum class RemeshOut { Replace, NewObject, NegativePart };
+    enum class RemeshOpening { Face, Angle, Circle };
+    RemeshOpening m_remesh_opening   = RemeshOpening::Face;
+    float       m_remesh_open_angle  = 20.f;  // deg, Angle opening
+    float       m_remesh_hole_d      = 20.f;  // mm, Circle opening
+    float       m_remesh_voxel     = 0.2f;    // mm
+    float       m_remesh_offset    = 0.0f;    // mm, + out / - in
+    bool        m_remesh_hollow    = false;
+    bool        m_remesh_open_face = true;    // only with a picked face
+    float       m_hollow_wall      = 2.0f;    // mm
+    float       m_hollow_smooth    = 3.0f;    // mm: the inside is shrunk this much more and grown back
+    int         m_remesh_max_tris  = 500000;
+    float       m_remesh_adaptive  = 0.1f;   // merges triangles where the surface is flat (0..1)
+    bool        m_remesh_keep_paint = true;
+    bool        m_remesh_drop_bits  = true;   // delete tiny loose shells
+    bool        m_remesh_fast_smooth = true;  // the inside on coarser voxels
+    bool        m_remesh_adv_open   = false;  // the Advanced fold
+    bool        m_remesh_running    = false;  // the worker is busy (the progress window pumps events)
+    RemeshOut   m_remesh_out       = RemeshOut::Replace;
+    std::string m_remesh_error;               // last failure, shown under the button
+    // Surface area of #1 (mm2), for the live estimate; recomputed when #1 changes.
+    double      m_remesh_area      = 0.;
+    const void* m_remesh_area_key  = nullptr;
+    size_t      m_remesh_area_tris = 0;
+    void apply_remesh();
 
     // s363c — extrusion along an editable curve. HIDDEN: only offered in debug mode
     // (NeoDebug::console_enabled()) and deliberately left out of every doc.

@@ -101,6 +101,11 @@ protected:
     bool on_is_activable() const override;
 
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
+    // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F5: shape mask preview fill in the selected filament colour.
+    ColorRGBA get_shape_fill_color() const override;
+    // NEOTKO_SVGDECAL_TAG — F2: colour of a filament id, and the filament closest to an SVG colour.
+    ColorRGBA get_state_color(int state) const override;
+    int       svg_default_state(uint32_t rgb) const override;
 
     std::string get_gizmo_entering_text() const override { return "Entering color painting"; }
     std::string get_gizmo_leaving_text() const override { return "Leaving color painting"; }
@@ -164,6 +169,32 @@ private:
     // (F1), extra walls on painted regions (F2), rectangle/polygon masks (F4).
     // See docs/FUTURE/PAINTER_PROMODE_PLAN.md.
     void render_pro_mode_section(float sliders_left_width, float sliders_width, float slider_icon_width);
+    // NEOTKO_SVGDECAL_TAG — the panel has two modes. Brush: Orca's tools (brushes, fill, height
+    // range) and the rectangle mask. Vector: shapes drawn on screen and SVG decals. Keys B / V.
+    enum class PaintMode { Brush, Vector };
+    PaintMode m_paint_mode     = PaintMode::Brush;
+    bool shape_draw_needs_arming() const override { return m_paint_mode == PaintMode::Vector; }
+    bool m_show_decals_in_brush = false;
+    int  selected_decal_index() const override { return m_selected_decal; }
+    PaintDecal m_decal_ts_start;          // F4b: the decal when a Turn / Size slider was grabbed
+    float      m_decal_turn_ui = 0.f;     // relative to that start, reset on release
+    float      m_decal_size_ui = 100.f;
+    bool show_decal_cards_while_brushing() const override { return m_paint_mode == PaintMode::Brush && m_show_decals_in_brush; }
+    int       m_selected_decal = -1;   // decal row picked in the Vector panel's layer list
+    float     m_colour_row_w   = 0.f;  // measured width of one SVG colour row (0 until drawn once)
+    void set_paint_mode(PaintMode mode);
+    void render_rectangle_mask_option();
+    void render_vector_panel();
+    // One SVG colour row: its colour, the filament it paints with (combo) and its eye.
+    // Returns true when the filament or the eye changed.
+    bool render_svg_colour_row(int id, uint32_t rgb, bool grad, int &state, bool &hidden);
+    // NEOTKO_SVGDECAL_TAG — parts of the SVG on screen: pick on the canvas, the selection's filament
+    // and eye, and the list. True when the paint groups changed (masks to rebuild).
+    bool render_svg_parts();
+    void render_mirror_centre_controls();
+    // Filament combo with a first entry "Colour" (state -1 = follow the colour of the part).
+    bool render_part_filament_combo(const char *id, int &state);
+    int  m_svg_parts_filter = 0;   // list shows: 0 = changed and selected, 1 = all
 
     // NEOTKO_PROFILE_TAG_START — s235 F5b: el sandwich VISIBLE dentro del gizmo de MMU.
     // docs/FUTURE/MMU_SANDWICH_COEXISTENCE_PLAN.md §3 F5b. El bloqueo que documentaba el plan

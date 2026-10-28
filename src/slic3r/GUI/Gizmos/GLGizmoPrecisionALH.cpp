@@ -800,7 +800,7 @@ std::string GLGizmoPrecisionALH::build_slope_recolor_blob() const
             continue; // clean at the committed height — nothing to recolor in this band
 
         const Slic3r::ColorSci::PerimeterColorPlan plan = Slic3r::ColorSci::resolve_perimeter_colors(
-            d_mm, m_perimeter_width_mm, m_wall_loops, target, candidates, ctx.mats);
+            d_mm, m_perimeter_width_mm, m_wall_loops, target, candidates, ctx.mats, h);
         if (plan.tool_per_perimeter.empty())
             continue;
 
@@ -882,7 +882,7 @@ void GLGizmoPrecisionALH::render_slope_recolor_preview(double z_mm, double point
 
     const double d_mm = point_height_mm * tan_alpha;
     const Slic3r::ColorSci::PerimeterColorPlan plan = Slic3r::ColorSci::resolve_perimeter_colors(
-        d_mm, m_perimeter_width_mm, m_wall_loops, target, candidates, ctx.mats);
+        d_mm, m_perimeter_width_mm, m_wall_loops, target, candidates, ctx.mats, point_height_mm);
     if (plan.tool_per_perimeter.empty())
         return;
 

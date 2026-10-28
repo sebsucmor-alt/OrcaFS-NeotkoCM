@@ -49,6 +49,9 @@
 #include <sstream>   // NEOTKO_STICKER_TAG — ostringstream slurp
 #include <boost/nowide/convert.hpp>
 #include <boost/filesystem/path.hpp> // NEOTKO_STICKER_TAG — stem() for the sticker's display name
+#ifdef NEOTKO_PRIVATE_TOWER
+#include "libslic3r/neotko_private/StickerExt.hpp"
+#endif
 
 namespace Slic3r::GUI {
 
@@ -2043,7 +2046,7 @@ static std::vector<Slic3r::ColorSci::ColorRecipe> build_colorstitch_gradient_pal
         ColorSci::ColorRecipe r;
         r.top  = top;
         r.penu = penu;
-        ColorSci::sandwich_colour_stacked(top, penu, mats, opt.bg_rgb, r.rgb.data());
+        ColorSci::sandwich_colour_stacked(top, penu, mats, opt.bg_rgb, opt.layer_height, r.rgb.data());
         char buf[24];
         std::snprintf(buf, sizeof(buf), "%d%%", pct_b);
         r.desc = buf;
@@ -3380,6 +3383,10 @@ using ColorStitchPaintPreview::pathblend_make_weave;
 // contar líneas es la separación (ancho − altura·(1−π/4)); ver weave_top_line_spacing().
 static double GLGizmoColorStitchPainter_top_line_width() { return ColorStitchPaintPreview::weave_top_line_spacing(); }
 static double GLGizmoColorStitchPainter_layer_height()   { return ColorStitchPaintPreview::weave_layer_height(); }
+#ifdef NEOTKO_PRIVATE_TOWER
+static void recompute_depth_recipes(ColorStitchSticker& st, const Slic3r::ColorSci::Material mats[4], int n_fil,
+                                    const float bg[3], double layer_mm);
+#endif
 std::vector<TriangleSelectorPatch::WeaveParams>
 GLGizmoColorStitchPainter::build_ebt_weave_for_volume(const ModelVolume* mv,
                                                    const TriangleSelectorPatch* sel,
@@ -3798,13 +3805,15 @@ static void draw_recipe_texture(ImDrawList* dl, const ImVec2& a, const ImVec2& b
     struct PL { SurfacePassKind kind; std::vector<int> seq; int tool = 0; float r = 0.f; float ca = 1.f, sa = 0.f;
                 int pbb = 0, pbt = -1, ease = 0; };
     std::vector<PL> pls;
+    // 21-oct-2026: grosor en mm (el TD va en mm) = fracción de capa × altura de capa.
+    const float lmm = float(std::max(0.01, ColorStitchPaintPreview::weave_layer_height()));
     auto add_zone = [&](const Slic3r::SurfacePassStack& st, bool is_penu) {
         if (!st.enabled) return;
         int k = 0;
         for (const Slic3r::SurfacePass& p : st.passes) {
             PL l;
             l.kind = p.kind;
-            l.r    = std::max(0.f, float(p.ratio));
+            l.r    = std::max(0.f, float(p.ratio)) * lmm;
             if (l.r < 1e-6f || p.kind == SurfacePassKind::None) continue;
             const float deg = p.angle >= 0 ? float(p.angle) : (is_penu ? 135.f : 45.f) + 90.f * float(k);
             l.ca = std::cos(deg * float(M_PI) / 180.f);
@@ -4046,7 +4055,7 @@ void GLGizmoColorStitchPainter::draw_recipe_card(const SurfacePassStack& st_top,
     uint32_t argb = predict_argb_for(st_top, st_penu);
     if (bot_only) {
         float bc[3] = { 0.f, 0.f, 0.f };
-        CS::sandwich_colour_bottom(st_bot, tm, tbg, bc);
+        CS::sandwich_colour_bottom(st_bot, tm, tbg, ColorStitchPaintPreview::weave_layer_height(), bc);
         CS::ColorRecipe br; br.rgb = { bc[0], bc[1], bc[2] };
         argb = recipe_argb(br);
     }
@@ -4178,7 +4187,7 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     float out[3] = {0.f, 0.f, 0.f};
     float bg[3]  = {0.f, 0.f, 0.f};
     resolve_object_base_bg(mats, bg);
-    CS::sandwich_colour_stacked(m_pro_top, m_pro_penu, mats, bg, out);
+    CS::sandwich_colour_stacked(m_pro_top, m_pro_penu, mats, bg, ColorStitchPaintPreview::weave_layer_height(), out);
 
     // s318 — la CABECERA del Pro: las tres zonas apiladas como están en la pieza (Top, Penu, la
     // pieza, Bottom) y el Result grande con halo. Sustituye a las cajitas Recipe | Result de s230.
@@ -4359,7 +4368,7 @@ void GLGizmoColorStitchPainter::render_pro_mode_panel()
     // s350 — RECALCULAR aquí: `out` se calculó ARRIBA, antes de los mandos de este fotograma, y
     // guardaba el color de ANTES del cambio (preview_argb siempre un cambio por detrás: la vista 3D
     // y el panel de colores del sticker enseñaban el color viejo; el Pro no, porque recalcula).
-    CS::sandwich_colour_stacked(m_pro_top, m_pro_penu, mats, bg, out);
+    CS::sandwich_colour_stacked(m_pro_top, m_pro_penu, mats, bg, ColorStitchPaintPreview::weave_layer_height(), out);
     CS::ColorRecipe recipe;
     recipe.top  = m_pro_top;
     recipe.penu = m_pro_penu;                 // disabled/empty → to_json() == "" (sin penu)
@@ -4510,6 +4519,32 @@ void GLGizmoColorStitchPainter::render_td_grid()
             ImGui::SetTooltip("%s", _u8L("Transmission distance").c_str());
         ImGui::PopID();
     }
+
+#ifdef NEOTKO_PRIVATE_TOWER
+    // 23-oct-2026 — las recetas por profundidad se resuelven con los TD de ese momento y se guardan en el 3mf; al
+    // cambiar un TD no se rehacen solas. Este botón las rehace todas con los TD de ahora.
+    if (ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+        mo && std::any_of(mo->colorstitch_stickers.begin(), mo->colorstitch_stickers.end(),
+                          [](const ColorStitchSticker& st) { return st.depth_mode; })) {
+        if (neo_text_button((_u8L("Recompute sticker TD") + "##td_recompute").c_str(), NeoBtn::Normal)) {
+            Plater::TakeSnapshot snap(wxGetApp().plater(), _u8L("Recompute sticker TD"), UndoRedo::SnapshotType::GizmoAction);
+            Slic3r::ColorSci::Material mats[4];
+            std::vector<std::string> fc;
+            gizmo_materials(mats, fc);
+            float bg[3] = { 1.f, 1.f, 1.f };
+            resolve_object_base_bg(mats, bg);
+            for (ColorStitchSticker& st : mo->colorstitch_stickers)
+                if (st.depth_mode) {
+                    recompute_depth_recipes(st, mats, int(fc.size()), bg, GLGizmoColorStitchPainter_layer_height());
+                    sticker_colours_changed(st);
+                }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Solve the Depth recipe of every sticker again\n"
+                                         "with the TD and filament colours set now.\n"
+                                         "Use it after changing a TD or a filament.").c_str());
+    }
+#endif
 }
 
 // preview_argb (0xAARRGGBB) desde el rgb predicho de una receta.
@@ -5608,7 +5643,7 @@ Slic3r::ColorSci::ColorRecipe GLGizmoColorStitchPainter::solve_sticker_color_bot
         if (bot.passes.empty()) return;
         bot.enabled = true;
         float c[3] = { 0.f, 0.f, 0.f };
-        CS::sandwich_colour_bottom(bot, mats, o.bg_rgb, c);
+        CS::sandwich_colour_bottom(bot, mats, o.bg_rgb, o.layer_height, c);
         const float de = CS::delta_e2000(tlab, CS::rgb_to_lab(c));
         if (de < best.delta_e) { best.bottom = std::move(bot); best.rgb = { c[0], c[1], c[2] }; best.delta_e = de; }
     };
@@ -5664,7 +5699,7 @@ Slic3r::ColorSci::ColorRecipe GLGizmoColorStitchPainter::solve_sticker_color(uin
             const SurfacePassStack no_penu;
             auto predict = [&](const SurfacePassStack& top) {
                 float c[3] = { 0.f, 0.f, 0.f };
-                CS::sandwich_colour_stacked(top, no_penu, mats, o.bg_rgb, c);
+                CS::sandwich_colour_stacked(top, no_penu, mats, o.bg_rgb, o.layer_height, c);
                 return CS::rgb_to_lab(c);
             };
             // Pasada sólida, o mezcla a pct_b (sólo para PREDECIR el medio de una rampa).
@@ -5777,7 +5812,7 @@ Slic3r::ColorSci::ColorRecipe GLGizmoColorStitchPainter::solve_sticker_color(uin
                 r.top.passes.push_back(ramp_pass(bt[0], bt[1], best_ra));
                 r.delta_e = best_err;
                 // s350 — color predicho de la rampa (su media, como la imprime), no el del SVG.
-                CS::sandwich_colour_stacked(r.top, SurfacePassStack{}, mats, o.bg_rgb, r.rgb.data());
+                CS::sandwich_colour_stacked(r.top, SurfacePassStack{}, mats, o.bg_rgb, o.layer_height, r.rgb.data());
                 r.desc = "gradient";
                 return r;
             }
@@ -5792,7 +5827,7 @@ Slic3r::ColorSci::ColorRecipe GLGizmoColorStitchPainter::solve_sticker_color(uin
         // s350 — el color PREDICHO de la receta, no el objetivo: antes se guardaba el color del SVG
         // («el dither no devuelve su rgb») y la vista 3D enseñaba colores imposibles (azules sin
         // filamento azul) y las candidatas decían dE 0.
-        CS::sandwich_colour_stacked(r.top, SurfacePassStack{}, mats, o.bg_rgb, r.rgb.data());
+        CS::sandwich_colour_stacked(r.top, SurfacePassStack{}, mats, o.bg_rgb, o.layer_height, r.rgb.data());
         r.delta_e = CS::delta_e2000(CS::rgb_to_lab(target), CS::rgb_to_lab(r.rgb.data()));
         return r;
     }
@@ -5845,8 +5880,8 @@ std::vector<int> GLGizmoColorStitchPainter::make_band_profiles(uint32_t rgb,
     std::vector<CS::Lab> pred(static_cast<size_t>(K));
     for (int k = 0; k < K; ++k) {
         float c[3] = { 0.f, 0.f, 0.f };
-        if (m_solve_bottom) CS::sandwich_colour_bottom(cand[size_t(k)].bottom, mats, o.bg_rgb, c);   // s350
-        else                CS::sandwich_colour_stacked(cand[size_t(k)].top, cand[size_t(k)].penu, mats, o.bg_rgb, c);
+        if (m_solve_bottom) CS::sandwich_colour_bottom(cand[size_t(k)].bottom, mats, o.bg_rgb, o.layer_height, c);   // s350
+        else                CS::sandwich_colour_stacked(cand[size_t(k)].top, cand[size_t(k)].penu, mats, o.bg_rgb, o.layer_height, c);
         pred[size_t(k)] = CS::rgb_to_lab(c);
     }
     std::vector<std::vector<float>> cost(size_t(N), std::vector<float>(size_t(K), 0.f));
@@ -5997,13 +6032,13 @@ static bool cs_profile_rgb(int pid, float out[3])
     const SurfaceEffectProfile* p = pid ? SurfaceEffectProfileManager::get().find(pid) : nullptr;
     if (!p) return false;
     if (g_stkc_live && p->stack_top_json.empty() && !p->stack_bottom_json.empty()) {   // s350: sólo Bottom
-        Slic3r::ColorSci::sandwich_colour_bottom(SurfacePassStack::from_json(p->stack_bottom_json), g_stkc_mats, g_stkc_bg, out);
+        Slic3r::ColorSci::sandwich_colour_bottom(SurfacePassStack::from_json(p->stack_bottom_json), g_stkc_mats, g_stkc_bg, ColorStitchPaintPreview::weave_layer_height(), out);
         return true;
     }
     if (g_stkc_live && !p->stack_top_json.empty()) {
         Slic3r::ColorSci::sandwich_colour_stacked(SurfacePassStack::from_json(p->stack_top_json),
                                                   SurfacePassStack::from_json(p->stack_penu_json),
-                                                  g_stkc_mats, g_stkc_bg, out);
+                                                  g_stkc_mats, g_stkc_bg, ColorStitchPaintPreview::weave_layer_height(), out);
         return true;
     }
     const ColorRGBA c = color_for_profile(*p);
@@ -6051,7 +6086,7 @@ void GLGizmoColorStitchPainter::edit_profile_in_pro(int pid)
         CS::Material mats[4]; std::vector<std::string> fc; gizmo_materials(mats, fc);
         float bg[3] = { 0.f, 0.f, 0.f }; resolve_object_base_bg(mats, bg);
         float rj[3] = { 0.f, 0.f, 0.f };
-        CS::sandwich_colour_stacked(SurfacePassStack::from_json(top_before), SurfacePassStack::from_json(penu_before), mats, bg, rj);
+        CS::sandwich_colour_stacked(SurfacePassStack::from_json(top_before), SurfacePassStack::from_json(penu_before), mats, bg, ColorStitchPaintPreview::weave_layer_height(), rj);
         // Recetas guardadas con el color viejo (el Pro lo guardaba un cambio por detrás): se corrige.
         if (SurfaceEffectProfile* mp = SurfaceEffectProfileManager::get().find_mut(pid)) {
             const uint32_t fixed = 0xFF000000u | cs_f3_rgb(rj);
@@ -6472,6 +6507,49 @@ void GLGizmoColorStitchPainter::render_sticker_editor()
     } else
         render_sticker_place_body(mo, st, m_stkc_idx);
 }
+
+#ifdef NEOTKO_PRIVATE_TOWER
+// 22-oct-2026 — recetas por profundidad de todos los colores del sticker (extensión opcional). Base = el
+// filamento cuyo color es el del objeto; los demás filamentos cargados son los de color.
+static void recompute_depth_recipes(ColorStitchSticker& st, const Slic3r::ColorSci::Material mats[4], int n_fil,
+                                    const float bg[3], double layer_mm)
+{
+    namespace DR = Slic3r::StickerExt;
+    auto close = [](const std::array<float, 3>& a, const float b[3]) {
+        return std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]) < 0.02f;
+    };
+    DR::Filament base;
+    base.rgb = { bg[0], bg[1], bg[2] };
+    std::vector<DR::Filament> colours;
+    bool base_found = false;
+    for (int i = 0; i < std::min(n_fil, 4); ++i) {
+        if (!base_found && close(mats[i].rgb, bg)) { base.tool = i; base.td_mm = mats[i].td[0]; base_found = true; continue; }
+        colours.push_back({ i, mats[i].rgb, mats[i].td[0] });
+    }
+    DR::Options o;
+    o.layer_mm     = float(layer_mm);
+    o.max_depth_mm = st.depth_max_mm;
+    o.fixed_order  = false;   // la torre no preocupa (Sebas, 22-oct-2026): gana el color
+    auto solve_into = [&](uint32_t rgb, std::vector<ColorStitchDepthBlock>& out, float* de) {
+        const std::array<float, 3> t { ((rgb >> 16) & 0xFF) / 255.f, ((rgb >> 8) & 0xFF) / 255.f, (rgb & 0xFF) / 255.f };
+        const DR::Result r = DR::solve(t, colours, base, o);
+        out.clear();
+        for (const DR::Block& b : r.blocks)
+            out.push_back({ b.tool, float(b.layers) * o.layer_mm });
+        if (de) *de = r.delta_e;
+        std::ostringstream os;
+        for (const DR::Block& b : r.blocks) os << " T" << b.tool << "x" << b.layers;
+        NEOTKO_LOG(PROFILE, "DEPTH_RECIPE sticker='" << st.name << "' rgb=" << std::hex << rgb << std::dec
+            << " dE=" << r.delta_e << " mm=" << r.depth_mm << " base=T" << base.tool
+            << " colours=" << colours.size() << (r.warning.empty() ? "" : " WARN=" + r.warning)
+            << " blocks(abajo->arriba):" << os.str());
+    };
+    if (st.colors.empty())
+        st.depth_blocks.clear();   // sticker de 1 color: sin RGB guardado, de momento sin receta
+    for (ColorStitchStickerColor& c : st.colors)
+        solve_into(c.rgb, c.depth_blocks, &c.depth_de);
+}
+#endif
 
 void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& st)
 {
@@ -6991,6 +7069,7 @@ void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& 
     ImGui::TextDisabled("%s", _u8L("Recompute all:").c_str());
     ImGui::SameLine();
     int mode = -1;
+    bool depth_recompute_all = false;   // 23-oct-2026: Recompute all también rehace las recetas por profundidad
     if (neo_text_button((_u8L("Flat") + "##stkc_flat").c_str(), st.color_mode == 0 ? NeoBtn::Normal : NeoBtn::Ghost)) mode = 0;
     ImGui::SameLine();
     if (neo_text_button((_u8L("ColorStitch") + "##stkc_cs").c_str(), st.color_mode == 1 ? NeoBtn::Normal : NeoBtn::Ghost)) mode = 1;
@@ -6999,12 +7078,75 @@ void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& 
     ImGui::SliderInt("##stkc_gbn", &m_grad_band_count, 4, 32, "%d bands");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", _u8L("Bands per gradient when recomputing\n(neighbours with the same recipe join into one part)").c_str());
+    if (mode >= 0)
+        depth_recompute_all = true;
     if (mode >= 0) {
         snapshot(_u8L("Recompute sticker colours"));
         recompute_sticker_colours(st, mode);
         m_stkc_band = -1;
         changed = true;
     }
+
+#ifdef NEOTKO_PRIVATE_TOWER
+    // 22-oct-2026 — modo profundidad (extensión opcional del build): capas enteras bajo la cara vista.
+    {
+        bool dm = st.depth_mode;
+        auto recompute = [&]() {
+            Slic3r::ColorSci::Material dm_mats[4];
+            std::vector<std::string> dm_fc;
+            gizmo_materials(dm_mats, dm_fc);
+            float dm_bg[3] = { 1.f, 1.f, 1.f };
+            resolve_object_base_bg(dm_mats, dm_bg);
+            recompute_depth_recipes(st, dm_mats, int(dm_fc.size()), dm_bg, GLGizmoColorStitchPainter_layer_height());
+        };
+        if (st.depth_mode && depth_recompute_all) {
+            recompute();
+            changed = true;
+        }
+        if (ImGui::Checkbox((_u8L("Depth recipe") + "##stk_depth").c_str(), &dm)) {
+            snapshot(_u8L("Sticker depth recipe"));
+            st.depth_mode = dm;
+            if (dm) recompute();
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Build each colour from whole layers behind the sticker,\n"
+                                         "as deep as it needs (up to Max depth).\n"
+                                         "The infill behind the sticker turns solid to that depth:\n"
+                                         "downwards for a sticker on top, upwards for one on the bottom.").c_str());
+        if (st.depth_mode) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(6.f * u);
+            float mx = st.depth_max_mm;
+            if (ImGui::InputFloat("##stk_depth_max", &mx, 0.2f, 1.f, "%.1f mm")) {
+                mx = std::clamp(mx, 0.2f, 10.f);
+                if (mx != st.depth_max_mm) {
+                    snapshot(_u8L("Sticker max depth"));
+                    st.depth_max_mm = mx;
+                    recompute();
+                    changed = true;
+                }
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Max depth: the deepest the recipe may go.\n"
+                                             "Never deeper than the material behind the sticker.").c_str());
+        }
+        if (st.depth_mode && !st.colors.empty()) {
+            // Por color: mm usados y ΔE predicho (modelo RealView Ray sin difusión).
+            std::ostringstream os;
+            os.setf(std::ios::fixed);
+            os.precision(1);
+            for (size_t i = 0; i < st.colors.size(); ++i) {
+                float mm = 0.f;
+                for (const ColorStitchDepthBlock& b : st.colors[i].depth_blocks) mm += b.mm;
+                os << (i ? "  " : "") << cs_hex(st.colors[i].rgb) << " " << mm << "mm dE" << st.colors[i].depth_de;
+            }
+            ImGui::PushTextWrapPos(0.f);
+            ImGui::TextDisabled("%s", os.str().c_str());
+            ImGui::PopTextWrapPos();
+        }
+    }
+#endif
 
     if (changed) sticker_colours_changed(st);
 }
@@ -7418,7 +7560,7 @@ uint32_t GLGizmoColorStitchPainter::predict_argb_for(const Slic3r::SurfacePassSt
     float bg[3] = {0.f, 0.f, 0.f};
     resolve_object_base_bg(mats, bg);
     float out[3] = {0.f, 0.f, 0.f};
-    CS::sandwich_colour_stacked(top, penu, mats, bg, out);
+    CS::sandwich_colour_stacked(top, penu, mats, bg, ColorStitchPaintPreview::weave_layer_height(), out);
     return 0xFF000000u
          | ((uint32_t)std::min(255.f, out[0] * 255.f) << 16)
          | ((uint32_t)std::min(255.f, out[1] * 255.f) <<  8)
@@ -8240,7 +8382,7 @@ void GLGizmoColorStitchPainter::render_object_department()
             float bg[3] = {0.f, 0.f, 0.f};
             resolve_object_base_bg(mats, bg);
             float out[3] = {0.f, 0.f, 0.f};
-            CS::sandwich_colour_stacked(st_top, st_penu, mats, bg, out);
+            CS::sandwich_colour_stacked(st_top, st_penu, mats, bg, ColorStitchPaintPreview::weave_layer_height(), out);
             const ImVec2 rp = ImGui::GetCursorScreenPos();
             const float  rh = ImGui::GetTextLineHeight() * 1.6f;
             ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -8453,10 +8595,10 @@ void GLGizmoColorStitchPainter::render_panel_body(float x, float y)
                 if (SurfaceEffectProfile* p = mgr.find_mut(id)) {
                     float out[3] = { 0.f, 0.f, 0.f };
                     if (p->stack_top_json.empty())   // s350: receta sólo Bottom → vista desde la cama
-                        CS::sandwich_colour_bottom(SurfacePassStack::from_json(p->stack_bottom_json), mats, bg, out);
+                        CS::sandwich_colour_bottom(SurfacePassStack::from_json(p->stack_bottom_json), mats, bg, ColorStitchPaintPreview::weave_layer_height(), out);
                     else
                         CS::sandwich_colour_stacked(SurfacePassStack::from_json(p->stack_top_json),
-                                                    SurfacePassStack::from_json(p->stack_penu_json), mats, bg, out);
+                                                    SurfacePassStack::from_json(p->stack_penu_json), mats, bg, ColorStitchPaintPreview::weave_layer_height(), out);
                     CS::ColorRecipe r;
                     r.rgb = { out[0], out[1], out[2] };
                     const uint32_t argb = recipe_argb(r);

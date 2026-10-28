@@ -449,6 +449,16 @@ struct MultiPassSubLayer {
 };
 // NEOTKO_MULTIPASS_TAG_END
 
+// 22-oct-2026 — enchufe de una extensión opcional del build: máscara de sólido extra por capa (índice = capa
+// del objeto) que prepare_infill() aplica como el «Surface depth». Sin la extensión, vacía.
+std::vector<ExPolygons> optional_extra_solid_mask(const PrintObject& po);
+// …y su pareja en el relleno: herramienta (0-based) de la receta de un color del sticker en una capa, o -1;
+// y el paso que mueve el relleno sólido de cada capa a subcapas de su herramienta. Sin la extensión: -1 y nada.
+struct ColorStitchSticker;
+int  optional_depth_tool_at(const PrintObject& po, const ColorStitchSticker& st, int color_idx,
+                            double layer_print_z, double layer_height);
+void optional_extra_sublayers(Layer& layer);
+
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {
 private: // Prevents erroneous use by other classes.
@@ -778,6 +788,9 @@ private:
     // NEOTKO_PAINTERPRO_TAG (Idea A) — force solid infill under/over painted surfaces up to
     // mmu_segmented_region_surface_depth layers, using the mask captured during MMU segmentation.
     void apply_painted_surface_depth();
+    // 22-oct-2026 — lo de dentro de apply_painted_surface_depth(), reutilizable: por capa, la máscara pasa
+    // stInternal → stInternalSolid (lo ya sólido no se toca). Devuelve cuántas capa×región cambiaron.
+    size_t reclassify_internal_as_solid(const std::vector<ExPolygons>& mask_per_layer);
     void combine_infill();
     void _generate_support_material();
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(

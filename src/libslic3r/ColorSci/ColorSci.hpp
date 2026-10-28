@@ -37,16 +37,17 @@ namespace ColorSci {
 
 // Propiedades ópticas de un tool/filamento (0..3).
 //   rgb : sRGB [0..1] (de `filament_colour`).
-//   td  : transmission distance por canal, en "ratio units" (fracción de
-//         layer height, igual que el TD escalar legacy `neotko_td_N`).
-//         td[c] < ~1e-6 → opaco total en ese canal.
+//   td  : transmission distance por canal, en MILÍMETROS, como HueForge y RealView: a ese
+//         grosor pasa el 10 % de la luz (21-oct-2026; antes, desde s166, en fracción de
+//         capa, y el mismo TD salía 1/altura_de_capa veces más opaco). Todo grosor que se
+//         compare con él va también en mm. td[c] < ~1e-6 → opaco total en ese canal.
 struct Material {
     std::array<float, 3> rgb { 0.5f, 0.5f, 0.5f };
     std::array<float, 3> td  { 0.f, 0.f, 0.f };
 };
 
 // Contribución lado-a-lado dentro de un plano (una "franja" del dither):
-// tool 0..3 + peso/espesor relativo (fracción de layer height).
+// tool 0..3 + peso relativo (fracción de la franja; blend_parallel le da el grosor de una capa).
 struct Slice {
     int   tool  = 0;
     float ratio = 0.f;
@@ -56,7 +57,7 @@ struct Slice {
 struct Layer {
     std::array<float, 3> rgb { 0.f, 0.f, 0.f };
     std::array<float, 3> td  { 0.f, 0.f, 0.f };
-    float                ratio = 0.f;   // fracción de layer height
+    float                ratio = 0.f;   // ESPESOR en mm (21-oct-2026; antes fracción de capa)
 };
 
 struct Lab { float L = 0.f, a = 0.f, b = 0.f; };
@@ -92,14 +93,16 @@ void blend_stacked(const std::vector<Layer>& layers,
 // preservar el peso escalar del código original; el color sí mezcla por
 // canal). out_weight (opcional): Σ opacidades — es el valor que el preview
 // legacy usa como α de la zona top ("transmit=%.2f" en la UI).
+// `layer_mm`: altura de capa en mm; el grosor óptico de cada franja es una capa entera.
 void blend_parallel(const std::vector<Slice>& slices,
                     const Material mats[4],
+                    float layer_mm,
                     float out_rgb[3],
                     float* out_weight = nullptr);
 
-// Opacidad de una franja: 1 - 0.1^(ratio/td), por canal. Expuesta porque
-// StackFlatten y los previews la reutilizan sueltos.
-void slice_opacity(const Material& m, float ratio, float out_op[3]);
+// Opacidad de una franja de grosor `thickness_mm`: 1 - 0.1^(thickness_mm/td), por canal.
+// Expuesta porque StackFlatten y los previews la reutilizan sueltos.
+void slice_opacity(const Material& m, float thickness_mm, float out_op[3]);
 
 // ---------------------------------------------------------------------------
 // Helpers de construcción (sin I/O — la GUI les pasa los strings ya leídos)

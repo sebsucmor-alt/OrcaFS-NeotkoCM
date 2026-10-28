@@ -97,6 +97,7 @@ public:
         HeightAdaptiveEffects, // NEOTKO_HAE_TAG -- Z->value curve editor for pluggable effects, LibreMode-gated
         SupportZones, // NEOTKO_SUPPORTZONES_TAG -- s286 F2.5, the aimed-corridor author, LibreMode-gated
         NeoStroke, // NEOTKO_NEOSTROKE_TAG -- s337, the NeoStroke preview (gated by the NeoStroke lock)
+        PrintOrder, // NEOTKO_PRINTORDER_TAG -- 2_49, Print order (Experimental), LibreMode-gated
         //SlaSupports,
         // BBS
         //FaceRecognition,
@@ -283,6 +284,8 @@ public:
 
     bool is_in_editing_mode(bool error_notification = false) const;
     bool is_hiding_instances() const;
+    // NEOTKO_PAINTERPRO_TAG — the current gizmo wants the camera frozen (GLGizmoBase::locks_camera).
+    bool is_camera_locked() const;
 
     void on_change_color_mode(bool is_dark);
     void render_current_gizmo() const;

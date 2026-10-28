@@ -15,6 +15,7 @@
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
 #include "ShortestPath.hpp"
+#include "GCode/NeotkoPrintOrder.hpp" // NEOTKO_PRINTORDER_TAG 2_49
 #include "MixedFilament.hpp"
 #include "InstanceContact.hpp" // NEOTKO_CONTACT_TAG s224
 #include "Print.hpp"
@@ -2917,7 +2918,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.
         this->set_extruders(tool_ordering.all_extruders());
+        NeotkoPrintOrder::log_header(print); // NEOTKO_PRINTORDER_TAG 2_49 — unconditional
         print_object_instances_ordering =
+            // NEOTKO_PRINTORDER_TAG 2_49 — «Print order (Experimental)»: numbered objects first, in
+            // their order; Free ones after, in the stock nearest order. Off / no numbers => stock.
+            NeotkoPrintOrder::active(print) ? NeotkoPrintOrder::build(print) :
             // By default, order object instances using a nearest neighbor search.
             print.config().print_order == PrintOrder::Default ? chain_print_object_instances(print)
                                                                 // Otherwise same order as the object list
@@ -6658,7 +6663,28 @@ LayerResult GCode::process_layer(const Print& print,
                 return point(0) >= bbox.min(0) && point(0) < bbox.max(0) && point(1) >= bbox.min(1) && point(1) < bbox.max(1) &&
                        layer.lslices[i].contour.contains(point);
             };
-            auto entity_matches_surface = [&point_inside_surface](const size_t i, const ExtrusionEntity& entity) {
+            // NEOTKO_PRINTORDER_TAG 2_49 — when this object has numbered parts, an extrusion goes to
+            // the island that really contains its first point (holes included) before any of the
+            // stock fallbacks get a say. See NeotkoPrintOrder::island_for_point(). Off => stock.
+            const bool _po_strict = NeotkoPrintOrder::object_has_part_ranks(print, layer.object()) ||
+                                    NeotkoPrintOrder::object_has_part_ranks(print, layer_to_print.original_object);
+            // cache for the island loop of one entity (same address AND same first point: temporaries
+            // can reuse an address)
+            const ExtrusionEntity* _po_last_entity = nullptr;
+            Point                  _po_last_point;
+            int                    _po_last_island = -1;
+            auto entity_matches_surface = [&point_inside_surface, &layer, &slices_test_order, _po_strict, &_po_last_entity,
+                                           &_po_last_point, &_po_last_island](const size_t i, const ExtrusionEntity& entity) {
+                if (_po_strict) {
+                    const Point fp = entity.first_point();
+                    if (&entity != _po_last_entity || fp != _po_last_point) {
+                        _po_last_entity = &entity;
+                        _po_last_point  = fp;
+                        _po_last_island = NeotkoPrintOrder::island_for_point(layer, slices_test_order, fp);
+                    }
+                    if (_po_last_island >= 0)
+                        return int(i) == _po_last_island;
+                }
                 if (point_inside_surface(i, entity.first_point()))
                     return true;
 
@@ -7180,7 +7206,12 @@ LayerResult GCode::process_layer(const Print& print,
                 m_last_obj_copy = this_object_copy;
                 this->set_origin(unscale(offset));
 
-                for (ObjectByExtruder::Island& island : instance_to_print.object_by_extruder.islands) {
+                // NEOTKO_PRINTORDER_TAG 2_49 — same island order as the main path below.
+                const std::vector<size_t> _po_island_order = NeotkoPrintOrder::island_order(
+                    print, instance_to_print.print_object, layer_to_print.object_layer,
+                    instance_to_print.object_by_extruder.islands.size());
+                for (size_t _po_i : _po_island_order) {
+                    ObjectByExtruder::Island& island = instance_to_print.object_by_extruder.islands[_po_i];
                     gcode += this->extrude_perimeters(print, island.by_region, first_layer, false);
                     gcode += this->extrude_infill(print, island.by_region, false);
                     gcode += this->extrude_perimeters(print, island.by_region, first_layer, true);
@@ -7806,7 +7837,10 @@ LayerResult GCode::process_layer(const Print& print,
         std::vector<InstanceToPrint> instances_to_print;
         bool                         has_prime_tower = print.config().enable_prime_tower && print.extruders().size() > 1 &&
                                ((print.config().print_sequence == PrintSequence::ByLayer &&
-                                 print.config().print_order == PrintOrder::Default) ||
+                                 print.config().print_order == PrintOrder::Default &&
+                                 // NEOTKO_PRINTORDER_TAG 2_49 — with a manual order the per-pass
+                                 // re-chain from the tower would throw the user's order away.
+                                 !NeotkoPrintOrder::active(print)) ||
                                 (print.config().print_sequence == PrintSequence::ByObject && print.objects().size() == 1));
         if (has_prime_tower) {
             int   plate_idx = print.get_plate_index();
@@ -7828,6 +7862,23 @@ LayerResult GCode::process_layer(const Print& print,
                                                              single_object_instance_idx);
         } else {
             instances_to_print = sort_print_object_instances(objects_by_extruder_it->second, layers, ordering, single_object_instance_idx);
+        }
+        // NEOTKO_PRINTORDER_TAG 2_49 — what this tool pass really emits, in order. Written for the
+        // stock order too, so a plate can be read before and after giving numbers.
+        if (NeoDebug::enabled(NeoDebug::PRINTORDER)) {
+            std::string _po = "[PO] z=" + std::to_string(print_z) + " T" + std::to_string(extruder_id) +
+                              (has_prime_tower ? " (tower re-chain)" : "") + " : ";
+            std::vector<const PrintInstance*> _seq;
+            for (const InstanceToPrint& itp : instances_to_print) {
+                // Only what really prints in this pass: floating objects (LibreMode) reach the
+                // lower layers with empty islands and would be listed without emitting anything.
+                const ObjectByExtruder& obe = itp.object_by_extruder;
+                if (obe.islands.empty() && (obe.support == nullptr || obe.support->empty()))
+                    continue;
+                _seq.push_back(&itp.print_object.instances()[itp.instance_id]);
+            }
+            _po += NeotkoPrintOrder::describe(print, _seq);
+            NeoDebug::write(NeoDebug::PRINTORDER, _po);
         }
 
         // BBS
@@ -7990,7 +8041,13 @@ LayerResult GCode::process_layer(const Print& print,
                 }
                 // FIXME order islands?
                 //  Sequential tool path ordering of multiple parts within the same object, aka. perimeter tracking (#5511)
-                for (ObjectByExtruder::Island& island : instance_to_print.object_by_extruder.islands) {
+                // NEOTKO_PRINTORDER_TAG 2_49 — «Print order» inside the object: islands follow the
+                // numbers of the parts they come from. Identity unless parts are numbered.
+                const std::vector<size_t> _po_island_order = NeotkoPrintOrder::island_order(
+                    print, instance_to_print.print_object, layers[instance_to_print.layer_id].object_layer,
+                    instance_to_print.object_by_extruder.islands.size());
+                for (size_t _po_i : _po_island_order) {
+                    ObjectByExtruder::Island& island = instance_to_print.object_by_extruder.islands[_po_i];
                     const auto& by_region_specific = is_anything_overridden ?
                                                          island.by_region_per_copy(by_region_per_copy_cache,
                                                                                    static_cast<unsigned int>(instance_to_print.instance_id),

@@ -1273,6 +1273,12 @@ void GCodeViewer::load(const GCodeProcessorResult& gcode_result, const Print& pr
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": finished, m_buffers size %1%!")%m_buffers.size();
 }
 
+// NEOTKO 20-oct-2026: con un G-code abierto suelto (m_only_gcode) el perfil editado es el del ÚLTIMO
+// proyecto, no el de ese G-code (Sebas: el Cube_PLA de 0,1 mm se pesaba con los 0,12 de la babosa). En
+// ese caso refresh() deja aquí el alto de capa típico del propio G-code (mediana de los saltos de Z); 0 =
+// usar el perfil, como siempre.
+static double s_realcolor_gcode_layer_height = 0.0;
+
 void GCodeViewer::refresh(const GCodeProcessorResult& gcode_result, const std::vector<std::string>& str_tool_colors)
 {
 #if ENABLE_GCODE_VIEWER_STATISTICS
@@ -1330,7 +1336,25 @@ void GCodeViewer::refresh(const GCodeProcessorResult& gcode_result, const std::v
 
     // NEOTKO_REALCOLOR_TAG: rebuild the TD/rgb LUT from raw (non gamma-adjusted) filament colors,
     // so M4's Beer-Lambert math matches Sandwich Editor/Painter's preview exactly.
+    s_realcolor_gcode_layer_height = 0.0;
+    if (wxGetApp().plater() != nullptr && wxGetApp().plater()->only_gcode_mode() && m_layers.get_zs().size() > 2) {
+        const std::vector<double>& zs = m_layers.get_zs();
+        std::vector<double> dz;
+        dz.reserve(zs.size());
+        for (size_t i = 1; i < zs.size(); ++i)
+            if (zs[i] - zs[i - 1] > 0.005)
+                dz.push_back(zs[i] - zs[i - 1]);
+        if (!dz.empty()) {
+            std::nth_element(dz.begin(), dz.begin() + dz.size() / 2, dz.end());
+            s_realcolor_gcode_layer_height = dz[dz.size() / 2];
+        }
+    }
     refresh_realcolor_materials(str_tool_colors);
+    // NEOTKO 20-oct-2026: str_tool_colors trae detrás los colores de los filamentos MEZCLADOS (Color
+    // Mixing), que en el G-code no son herramientas (se imprimen alternando las físicas). Sin esto la
+    // ventana Filament finish enseñaba Filament 5, 6, 7… que RealColor nunca usa.
+    if (gcode_result.extruders_count > 0)
+        m_realcolor_tool_count = std::clamp(std::min(m_realcolor_tool_count, (int)gcode_result.extruders_count), 1, REALCOLOR_MAX_TOOLS);
 
     // update ranges for coloring / legend
     m_extrusions.reset_ranges();
@@ -1390,6 +1414,11 @@ m_extrusions.ranges.layer_duration_log.update_from(curr.layer_duration);
 // clamped [0.01,10.0]. rgb comes from the raw filament hex (str_tool_colors), NOT the
 // gamma/shell-adjusted m_tools.m_tool_colors, so M4's Beer-Lambert math matches the
 // Sandwich Editor/Painter preview exactly.
+//
+// 🚨 21-oct-2026: REVERTIDO. El TD va en MM en todo el fork (como HueForge y RealView, y como dice
+// el tooltip «Transmission distance, in mm»). Multiplicarlo por la altura de capa hacía el
+// filamento 1/altura_de_capa veces más opaco que en RealView (TD 5 a 0,2 mm = 1 mm). Lo que
+// sigue es la historia de s166, que fue en la dirección contraria:
 //
 // UNIT FIX (s166): neotko_td_N is defined everywhere ELSE in ratio-units — a fraction of
 // ONE nominal layer height, per ColorSci.hpp's own doc comment and confirmed by every other
@@ -1484,6 +1513,8 @@ static int realcolor_finish_match_preset(const std::array<float, 3>& v)
 // mostraría un TD distinto del que se acaba de guardar.
 static double realcolor_nominal_layer_height()
 {
+    if (s_realcolor_gcode_layer_height > 0.001)
+        return s_realcolor_gcode_layer_height;
     double h = 0.2;
     if (wxGetApp().preset_bundle != nullptr) {
         if (auto* o = wxGetApp().preset_bundle->prints.get_edited_preset()
@@ -1503,8 +1534,6 @@ void GCodeViewer::refresh_realcolor_materials(const std::vector<std::string>& st
     // Cuántos hay de verdad, antes de rellenar: es lo que la ventana de materiales enseñará.
     m_realcolor_tool_count = std::clamp((int)hex.size(), 1, REALCOLOR_MAX_TOOLS);
     while ((int)hex.size() < REALCOLOR_MAX_TOOLS) hex.push_back("#808080");
-
-    const double nominal_layer_height = realcolor_nominal_layer_height();
 
     auto* ac = wxGetApp().app_config;
     for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
@@ -1528,7 +1557,8 @@ void GCodeViewer::refresh_realcolor_materials(const std::vector<std::string>& st
         else
             m_realcolor_td_edit[t] = td; // espejo limpio, listo para cuando se abra la ventana
 
-        m_realcolor_materials.td[t] = td * (float)nominal_layer_height;
+        // 21-oct-2026: el TD va en mm, como HueForge y RealView (ver el aviso de arriba).
+        m_realcolor_materials.td[t] = td;
 
         // NEOTKO_REALCOLOR_TAG s251b: acabado óptico del slot. Mismo sitio y misma forma que el TD
         // de arriba (app_config, por slot, clave numerada) porque es la misma clase de dato: una
@@ -5095,6 +5125,7 @@ GCodeViewer::RealColorFingerprint GCodeViewer::compute_realcolor_fingerprint(int
     }
     fp.canvas_w = canvas_width;
     fp.canvas_h = canvas_height;
+    fp.role_flags = m_extrusions.role_visibility_flags;
     fp.td = m_realcolor_materials.td;
     fp.rgb = m_realcolor_materials.rgb;
     // NEOTKO_REALCOLOR_TAG s251b: sin esto la ventana de materiales parecería rota — ver el
@@ -5122,8 +5153,10 @@ bool GCodeViewer::ensure_realcolor_fbos(int w, int h)
     if (w <= 0 || h <= 0)
         return false;
 
-    if (m_realcolor_cache.gl_objects_created() && m_realcolor_cache.tex_w == w && m_realcolor_cache.tex_h == h)
+    if (m_realcolor_cache.gl_objects_created() && m_realcolor_cache.tex_w == w && m_realcolor_cache.tex_h == h
+        && m_realcolor_fbo_ss == realcolor_supersample())
         return true;
+    m_realcolor_fbo_ss = realcolor_supersample();
 
     // NEOTKO_REALCOLOR_TAG: peel_fbo/accum_fbo are created at REALCOLOR_SUPERSAMPLE x linear
     // resolution (see the constant's comment) — only the final present pass downsamples back
@@ -5589,7 +5622,7 @@ void GCodeViewer::render_realcolor_materials_panel()
             // El preview sí se actualiza al instante — ese es el punto de poder calibrar en vivo.
             // Y basta con tocar m_realcolor_materials.td[]: ya está dentro del fingerprint desde
             // s163, así que el composite se recalcula solo.
-            m_realcolor_materials.td[t] = m_realcolor_td_edit[t] * (float)realcolor_nominal_layer_height();
+            m_realcolor_materials.td[t] = m_realcolor_td_edit[t];   // mm (21-oct-2026)
             m_realcolor_td_dirty = true;
             changed = true;
         }
@@ -5644,7 +5677,6 @@ void GCodeViewer::render_realcolor_materials_panel()
             // se llama a refresh_realcolor_materials(): esa función además re-deriva los colores
             // desde la lista de filamentos, que aquí no tenemos a mano y que además no ha cambiado.
             // Descartar una edición de TD tiene que revertir el TD y nada más.
-            const float h = (float)realcolor_nominal_layer_height();
             auto* ac = wxGetApp().app_config;
             for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
                 float td = 1.0f;
@@ -5654,7 +5686,7 @@ void GCodeViewer::render_realcolor_materials_panel()
                 }
                 td = std::max(0.01f, std::min(10.0f, td));
                 m_realcolor_td_edit[t] = td;
-                m_realcolor_materials.td[t] = td * h;
+                m_realcolor_materials.td[t] = td;   // mm (21-oct-2026)
             }
             m_realcolor_td_dirty = false;
             changed = true;
@@ -7129,8 +7161,18 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         // generation as a side effect of this without confirming first.
         const float min_layer_h = (m_extrusions.ranges.height.min > 0.0f && m_extrusions.ranges.height.min < FLT_MAX)
             ? std::max(m_extrusions.ranges.height.min, 0.05f) : 0.1f;
-        const int n_max = std::clamp((int)std::ceil((max_td / std::max(min_layer_h, 0.01f)) * 1.8f), 1, REALCOLOR_N_MAX);
-        NEOTKO_LOG(REALCOLOR, "render_toolpaths_realcolor: peel budget n_max=" << n_max << " (max_td=" << max_td << " min_layer_h=" << min_layer_h << ")");
+        // NEOTKO 20-oct-2026: el presupuesto sale del alto de capa NOMINAL, no del más fino. Con subcapas de
+        // 0,05 (PathBlend, Sandwich) la babosa pelaba 22 veces toda la pieza (log de Sebas). Ya no hace falta
+        // tanto: en la última pasada lo que aún pasa se lo lleva el cordón (u_last_pass, §7.4.2 de
+        // docs/WIP/REALCOLOR_LESSONS_FROM_REALVIEW.md), así que con menos capas no salen fantasmas.
+        const float nominal_h = std::max((float)realcolor_nominal_layer_height(), min_layer_h);
+        int n_max = std::clamp((int)std::ceil((max_td / std::max(nominal_h, 0.01f)) * 1.8f), 1, REALCOLOR_N_MAX);
+        // Draft: como la vista de RealView (K = 6). La foto nunca va en draft.
+        if (m_realcolor_draft && !m_realcolor_export)
+            n_max = std::min(n_max, 6);
+        NEOTKO_LOG(REALCOLOR, "render_toolpaths_realcolor: peel budget n_max=" << n_max << " (max_td=" << max_td << " min_layer_h=" << min_layer_h
+                   << " nominal_h=" << nominal_h << " draft=" << (m_realcolor_draft ? 1 : 0) << " ss=" << realcolor_supersample() << ")");
+        const auto rc_t0 = std::chrono::steady_clock::now();
 
         // NEOTKO_PHOTOMODE_TAG s253 — MAPA DE SOMBRAS, LLENADO CON LAS SHELLS.
         //
@@ -7414,10 +7456,19 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             accum_shader->start_using();
             accum_shader->set_uniform("u_beer_lambert", true);
             accum_shader->set_uniform("u_flat_alpha", 0.5f); // unused when u_beer_lambert==true
+            // NEOTKO_REALCOLOR_TAG s20oct: el modelo de RealView (docs/WIP/REALCOLOR_LESSONS_FROM_REALVIEW.md
+            // §7.3). El color de cada filamento para el TD con color, la difusión según el TD (1 = encendida,
+            // como RealView) y la última pasada, en la que lo que aún pasa se lo lleva el cordón (§7.4.2).
+            for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
+                const ColorRGB& c = m_realcolor_materials.rgb[t];
+                accum_shader->set_uniform(("u_material_rgb[" + std::to_string(t) + "]").c_str(), std::array<float, 3>{ c.r(), c.g(), c.b() });
+            }
+            accum_shader->set_uniform("u_diffusion", 1.0f);
+            accum_shader->set_uniform("u_last_pass", pass == n_max - 1);
             // NEOTKO_REALCOLOR_TAG: global TD multiplier, live-tunable (RealColorTuning.td_scale)
             // — scales every material's TD together instead of only touching lighting terms.
             // s166: m_realcolor_materials.td[] is already baked to mm (nominal layer height ×
-            // ratio-units td, see refresh_realcolor_materials UNIT FIX), so 1.0 is now the
+            // ratio-units td — REVERTED 21-oct-2026: td is plain mm now), so 1.0 is now the
             // physically-grounded default — this is no longer standing in for the missing
             // layer-height conversion (that's how s165 was using it, empirically converging on
             // ~layer_height as the "correct" value, which is exactly the bug this fixes). Left
@@ -7457,7 +7508,9 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         m_realcolor_cache.accum_write_slot = accum_src;
         m_realcolor_cache.valid = true;
         m_realcolor_cache.fingerprint = fp;
-        NEOTKO_LOG(REALCOLOR, "render_toolpaths_realcolor: recompute done, accum_write_slot=" << accum_src);
+        glsafe(::glFinish()); // solo para que el tiempo del log sea el de la GPU, no el de encolar
+        NEOTKO_LOG(REALCOLOR, "render_toolpaths_realcolor: recompute done, accum_write_slot=" << accum_src << " en "
+                   << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - rc_t0).count() << " ms");
     } else {
         NEOTKO_LOG(REALCOLOR, "render_toolpaths_realcolor: using cached composite (fingerprint unchanged)");
     }
@@ -9183,7 +9236,14 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
         // NEOTKO_REALCOLOR_TAG: M6 — set expectations, this is an approximate optical
         // simulation (depth-peeled Beer-Lambert), not a guarantee of the final print color.
         if (m_view_type == EViewType::RealColor) {
-            imgui.text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), _u8L("Approximated optical simulation — not a guarantee of the final print color"));
+            // NEOTKO 21-oct-2026: todo el bloque de RealColor va sangrado como las filas de filamentos
+            // (la leyenda no tiene margen propio: WindowPadding 0) y con margen a la derecha, y cada
+            // control con su etiqueta en una columna fija («Quality:», «Show:»), para que no quede
+            // pegado al borde ni bailando (Sebas).
+            const float rc_indent = window_padding * 3.0f;
+            ImGui::Indent(rc_indent);
+            imgui.text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), _u8L("Approximated optical simulation —\nnot a guarantee of the final print color"));
+            ImGui::Dummy({ 1.0f, 2.0f * m_scale });
             // NEOTKO_REALCOLOR_TAG s251b: puerta de entrada a la ventana de acabado por filamento.
             // Vive AQUÍ, en la leyenda de RealColor, por dos razones: sólo tiene sentido con esta
             // vista puesta (es lo único que lo consume), y esta leyenda ya es la lista de filamentos
@@ -9207,6 +9267,81 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 if (ImGui::Button((in_photo ? _u8L("Exit photo mode") : _u8L("Photo mode...")).c_str()))
                     wxGetApp().plater()->set_photo_mode(!in_photo, PhotoOwner::Preview);
             }
+            ImGui::SameLine();
+            ImGui::Dummy({ window_padding, 1.0f });   // margen derecho
+
+            // Columna de etiquetas: lo que mida la más ancha, para que los controles empiecen alineados.
+            const std::string lbl_quality = _u8L("Quality:");
+            const std::string lbl_show    = _u8L("Show:");
+            // (posición dentro de la ventana: ya incluye el sangrado)
+            const float ctl_x = rc_indent
+                + std::max(ImGui::CalcTextSize(lbl_quality.c_str()).x, ImGui::CalcTextSize(lbl_show.c_str()).x)
+                + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+            auto label_cell = [&](const std::string& lbl) {
+                ImGui::AlignTextToFramePadding();
+                imgui.text(lbl);
+                ImGui::SameLine(ctl_x);
+            };
+
+            // NEOTKO 20/21-oct-2026: Draft (ver m_realcolor_draft), POR DEFECTO desde el 21-oct: con el TD
+            // en mm, la vista entera pela hasta ~75 capas y tarda 15–20 s por vista (log de Sebas); Draft,
+            // 6 capas y sin supersample, ~1 s y casi el mismo color. Al cambiar se tira la caché para que
+            // la vista se rehaga con la calidad nueva. La foto (Photo mode) va siempre entera.
+            ImGui::Dummy({ 1.0f, 2.0f * m_scale });
+            label_cell(lbl_quality);
+            bool want_draft = m_realcolor_draft;
+            if (ImGui::RadioButton(_u8L("Draft").c_str(), want_draft)) want_draft = true;
+            if (ImGui::IsItemHovered())
+                imgui.tooltip(_u8L("Fast: about a second per view.\n"
+                                   "Looks only a few layers deep, so thick\n"
+                                   "translucent areas can look a bit off.\n"
+                                   "Good to find angles and check colours.").c_str(), ImGui::GetFontSize() * 20.0f);
+            ImGui::SameLine();
+            if (ImGui::RadioButton(_u8L("Full").c_str(), !want_draft)) want_draft = false;
+            if (ImGui::IsItemHovered())
+                imgui.tooltip(_u8L("Looks all the way through the plastic.\n"
+                                   "Very demanding: can take 15-20 seconds\n"
+                                   "every time the view changes.").c_str(), ImGui::GetFontSize() * 20.0f);
+            ImGui::SameLine();
+            ImGui::Dummy({ window_padding, 1.0f });   // margen derecho
+            if (want_draft != m_realcolor_draft) {
+                m_realcolor_draft = want_draft;
+                m_realcolor_cache.valid = false;
+            }
+            // La línea de debajo dice qué estás viendo, sin tener que pasar el ratón por encima.
+            ImGui::SetCursorPosX(ctl_x);
+            imgui.text_colored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f),
+                               m_realcolor_draft ? _u8L("Fast preview, a few layers deep") : _u8L("Full depth, slow on every view"));
+
+            // NEOTKO 21-oct-2026: quitar torre y soportes para ver solo la pieza impresa (como «ocultar
+            // torre / soportes» de RealView). Son los mismos interruptores por tipo de línea que la leyenda
+            // de Line Type, así que lo que se oculte aquí también se oculta allí, y al revés. La huella de
+            // RealColor lleva esos interruptores (role_flags), así que se recalcula sola.
+            // NEOTKO 21-oct-2026: van en su propia línea («Show:»), no detrás de Draft: en una sola fila la
+            // leyenda se iba muy a la derecha (Sebas).
+            auto rc_role_toggle = [this](const char* label, std::initializer_list<ExtrusionRole> roles, const std::string& tip) {
+                bool shown = false;
+                for (ExtrusionRole r : roles)
+                    shown = shown || (m_extrusions.role_visibility_flags & (1 << r)) != 0;
+                if (ImGui::Checkbox(label, &shown)) {
+                    for (ExtrusionRole r : roles)
+                        m_extrusions.role_visibility_flags = shown ? (m_extrusions.role_visibility_flags | (1 << r))
+                                                                   : (m_extrusions.role_visibility_flags & ~(1 << r));
+                    refresh_render_paths(false, false);
+                    update_moves_slider();
+                    wxGetApp().plater()->get_current_canvas3D()->set_as_dirty();
+                }
+                if (ImGui::IsItemHovered())
+                    wxGetApp().imgui()->tooltip(tip.c_str(), ImGui::GetFontSize() * 20.0f);
+            };
+            label_cell(lbl_show);
+            rc_role_toggle(_u8L("Wipe tower").c_str(), { erWipeTower }, _u8L("Show the wipe tower.\nUntick to see only the printed part."));
+            ImGui::SameLine();
+            rc_role_toggle(_u8L("Supports").c_str(), { erSupportMaterial, erSupportMaterialInterface, erSupportTransition },
+                           _u8L("Show supports and support interfaces.\nUntick to see only the printed part."));
+            ImGui::SameLine();
+            ImGui::Dummy({ window_padding, 1.0f });   // margen derecho
+            ImGui::Unindent(rc_indent);
         }
         break;
     }

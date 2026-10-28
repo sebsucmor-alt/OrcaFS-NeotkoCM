@@ -716,7 +716,12 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // Without this it falls through to the "unknown option -> invalidate everything" catch-all
         // below and forces a full re-slice for a toggle that never touches geometry.
         "neotko_idle_tool_power_down",
-        "neotko_idle_tool_deep_sleep"
+        "neotko_idle_tool_deep_sleep",
+        // NEOTKO_PRINTORDER_TAG 2_49 — only reorders objects at emission (GCode.cpp). Must be here:
+        // the catch-all below would re-slice the whole plate on every number change.
+        "neotko_print_order_manual",
+        "neotko_print_order_ranks",
+        "neotko_print_order_part_ranks"
     };
 
     // NEOTKO_GCODE_REPROCESSOR: this option is never read by Print/PrintObject/GCodeGenerator —

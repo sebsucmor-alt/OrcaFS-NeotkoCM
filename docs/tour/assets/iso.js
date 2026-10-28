@@ -412,10 +412,10 @@
    * Every figure that depends on them says so.
    */
   var SPOOLS = [
-    { name: 'Dark blue',   hex: '#1b2a63', td: 0.9 },
-    { name: 'Butter',      hex: '#f4e3b0', td: 1.1 },
-    { name: 'Magenta',     hex: '#cf2b7f', td: 1.0 },
-    { name: 'Matte cyan',  hex: '#17a5c4', td: 0.8 }
+    { name: 'Dark blue',   hex: '#1b2a63', td: 0.27 },
+    { name: 'Butter',      hex: '#f4e3b0', td: 0.33 },
+    { name: 'Magenta',     hex: '#cf2b7f', td: 0.3 },
+    { name: 'Matte cyan',  hex: '#17a5c4', td: 0.24 }
   ];
 
   var INK = {

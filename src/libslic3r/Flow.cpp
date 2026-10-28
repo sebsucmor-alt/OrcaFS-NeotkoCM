@@ -3,6 +3,10 @@
 #include "Print.hpp"
 #include "NeoDebug.hpp"   // NEOTKO_BOTTOM_TAG — Fase 0 (WIP): capture negative-spacing aborts
 #include <cmath>
+#ifndef _WIN32
+#include <execinfo.h> // NEOTKO_PAINTERPRO_TAG — call stack on negative-spacing aborts
+#include <cstdlib>
+#endif
 #include <assert.h>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -197,6 +201,19 @@ float Flow::rounded_rectangle_extrusion_spacing(float width, float height)
               + " out=" + std::to_string(out)
               + " k=(1-pi/4)=" + std::to_string(float(1. - 0.25 * PI))
               + "  -> ABORT (height too large for width)");
+#ifndef _WIN32
+        // NEOTKO_PAINTERPRO_TAG — who asked for this flow? The (width,height) pair alone doesn't
+        // say which region/role resolved its width to 0. Failure path only, zero cost otherwise.
+        if (NeoDebug::enabled(NeoDebug::BOTTOM)) {
+            void *frames[24];
+            const int n = backtrace(frames, 24);
+            if (char **names = backtrace_symbols(frames, n)) {
+                for (int i = 1; i < n; ++i)
+                    NeoDebug::write(NeoDebug::BOTTOM, std::string("FLOW_NEG_SPACING  at ") + names[i]);
+                free(names);
+            }
+        }
+#endif
         throw FlowErrorNegativeSpacing();
     }
     return out;

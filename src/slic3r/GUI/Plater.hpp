@@ -745,6 +745,9 @@ public:
     void copy_process_settings(const std::string& category);
     void paste_process_settings();
     bool has_process_settings_clipboard() const;
+    // NEOTKO_PRINTORDER_TAG 2_49 — «Print order (Experimental)»: give the selected objects a
+    // number (1, 2, 3...) or Free (0). clear_all = set every object on the model to Free.
+    void set_print_order_rank(int rank, bool clear_all = false);
     // NEOTKO — high-level manual slice-cache wipe: force the next slice to run fully from scratch.
     void remove_slice_cache();
     // find all empty cells on the plate and won't overlap with exclusion areas

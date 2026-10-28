@@ -1013,6 +1013,23 @@ std::mutex                                     g_cs_local_mtx;
 std::vector<std::shared_ptr<const CsLocalSvg>> g_cs_local;   // las más recientes al final
 }
 
+// NEOTKO_SVGDECAL_TAG — curve tolerance of the SVG tessellation: 0.1 mm, but never more than
+// 1/500 of the drawing's size (min 0.005 mm). A 5 mm SVG enlarged x20 as a decal came out angular
+// (chords of 2 mm on the model); big SVGs keep exactly the old 0.1 mm.
+static double cs_svg_tolerance_mm(const NSVGimage& image)
+{
+    float lo[2] = { std::numeric_limits<float>::max(), std::numeric_limits<float>::max() };
+    float hi[2] = { std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest() };
+    for (const NSVGshape* sh = image.shapes; sh != nullptr; sh = sh->next) {
+        lo[0] = std::min(lo[0], sh->bounds[0]); lo[1] = std::min(lo[1], sh->bounds[1]);
+        hi[0] = std::max(hi[0], sh->bounds[2]); hi[1] = std::max(hi[1], sh->bounds[3]);
+    }
+    const double size = std::max(double(hi[0] - lo[0]), double(hi[1] - lo[1]));
+    if (!(size > 0.))
+        return 0.1;
+    return std::clamp(size / 500., 0.005, 0.1);
+}
+
 static std::shared_ptr<CsLocalSvg> cs_build_local_svg(const std::string& svg_data)
 {
     auto loc = std::make_shared<CsLocalSvg>();
@@ -1026,8 +1043,8 @@ static std::shared_ptr<CsLocalSvg> cs_build_local_svg(const std::string& svg_dat
     }
     using StickerShape = ColorStitch::StickerShape;
     const Transform3d to_target = Transform3d::Identity();
-    // Misma teselación que sticker_rings_in_transform (0.1 mm).
-    const double tol_mm = 0.1;
+    // Misma teselación que sticker_rings_in_transform (0.1 mm, menos en SVG diminutos).
+    const double tol_mm = cs_svg_tolerance_mm(*image);
     NSVGLineParams params{ (tol_mm * tol_mm) / SCALING_FACTOR / SCALING_FACTOR };
     const ExPolygonsWithIds shapes = create_shape_with_ids(*image, params);   // UNA pasada: mismo centrado
     if (shapes.empty()) return loc;
@@ -1180,6 +1197,86 @@ std::vector<int> ColorStitch::sticker_shape_zones(const std::string& svg_data)
 {
     if (svg_data.empty()) return {};
     return cs_local_svg(svg_data)->shape_zone;
+}
+
+// NEOTKO_SVGDECAL_TAG — F2. Same occlusion walk as sticker_color_masks_uncached(), keyed by group
+// instead of by recipe: from the topmost shape down, each one keeps only what is not covered yet.
+std::vector<ExPolygons> ColorStitch::svg_group_masks(const std::string& svg_data, const Transform3d& to_target,
+                                                     const std::vector<int>& shape_group, size_t n_groups)
+{
+    if (svg_data.empty()) return {};
+    const std::shared_ptr<const CsLocalSvg> loc = cs_local_svg(svg_data);
+    const std::vector<StickerShape> shapes = cs_transform_shapes(loc->shapes, to_target);
+    std::vector<ExPolygons> per_group(n_groups);
+    Polygons covered;
+    for (size_t k = shapes.size(); k-- > 0; ) {
+        const int g = (k < shape_group.size()) ? shape_group[k] : -1;
+        if (g < 0 || size_t(g) >= per_group.size())
+            continue;   // transparent: does not cover what is under it
+        const StickerShape& sh = shapes[k];
+        if (sh.rings.empty())
+            continue;
+        ExPolygons piece = covered.empty() ? union_ex(sh.rings) : diff_ex(union_ex(sh.rings), covered);
+        polygons_append(covered, sh.rings);
+        covered = union_(covered);
+        expolygons_append(per_group[size_t(g)], std::move(piece));
+    }
+    for (ExPolygons& e : per_group)
+        if (!e.empty())
+            e = union_ex(e);
+    return per_group;
+}
+
+std::vector<ExPolygons> ColorStitch::svg_zone_masks(const std::string& svg_data, const Transform3d& to_target,
+                                                    const std::vector<bool>& zone_hidden)
+{
+    if (svg_data.empty()) return {};
+    const std::shared_ptr<const CsLocalSvg> loc = cs_local_svg(svg_data);
+    std::vector<int> shape_group = loc->shape_zone;
+    for (int& z : shape_group)
+        if (z >= 0 && size_t(z) < zone_hidden.size() && zone_hidden[size_t(z)])
+            z = -1;
+    return svg_group_masks(svg_data, to_target, shape_group, loc->zones.size());
+}
+
+// NEOTKO_SVGDECAL_TAG — parts (declared in Model.hpp, next to PaintDecalPart).
+PaintDecalGroups paint_decal_groups(const std::string& svg_data, const std::vector<PaintDecalZone>& zones,
+                                    const std::vector<PaintDecalPart>& parts)
+{
+    PaintDecalGroups out;
+    if (svg_data.empty()) return out;
+    const std::shared_ptr<const CsLocalSvg> loc = cs_local_svg(svg_data);
+    const size_t n_zones = loc->zones.size();
+    out.groups.resize(n_zones);
+    for (size_t z = 0; z < n_zones; ++z) {
+        out.groups[z].zone = int(z);
+        out.groups[z].rgb  = loc->zones[z].rgb;
+    }
+    for (const PaintDecalZone& dz : zones)
+        if (dz.zone >= 0 && size_t(dz.zone) < n_zones) {
+            out.groups[size_t(dz.zone)].state  = dz.state;
+            out.groups[size_t(dz.zone)].hidden = dz.hidden;
+        }
+    out.shape_group = loc->shape_zone;
+    for (int& g : out.shape_group)
+        if (g >= 0 && (size_t(g) >= n_zones || out.groups[size_t(g)].hidden))
+            g = -1;
+    for (const PaintDecalPart& p : parts) {
+        if (p.shape < 0 || size_t(p.shape) >= out.shape_group.size())
+            continue;
+        if (p.hidden) {
+            out.shape_group[size_t(p.shape)] = -1;
+        } else if (p.state >= 0) {
+            PaintDecalZone g;
+            g.zone  = int(out.groups.size());
+            const int z = loc->shape_zone[size_t(p.shape)];
+            g.rgb   = (z >= 0 && size_t(z) < n_zones) ? loc->zones[size_t(z)].rgb : 0;
+            g.state = p.state;
+            out.shape_group[size_t(p.shape)] = g.zone;
+            out.groups.push_back(g);
+        }
+    }
+    return out;
 }
 
 Polygons ColorStitch::sticker_rings_in_transform(const ColorStitchSticker& sticker,
@@ -1375,8 +1472,8 @@ std::string ColorStitch::svg_flatten_for_sticker(const std::string& svg, bool ke
     }
     NSVGimage_ptr image = nsvgParse(src, "mm", 96.0f);
     if (image == nullptr || image->shapes == nullptr) return svg;
-    // Misma teselación que el resto de stickers (0.1 mm). Coordenadas: mm escalados, Y invertida.
-    const double tol_mm = 0.1;
+    // Misma teselación que el resto de stickers (0.1 mm, menos en SVG diminutos). Coordenadas: mm escalados, Y invertida.
+    const double tol_mm = cs_svg_tolerance_mm(*image);
     NSVGLineParams params{ (tol_mm * tol_mm) / SCALING_FACTOR / SCALING_FACTOR };
     const ExPolygonsWithIds shapes = create_shape_with_ids(*image, params);
     if (shapes.empty()) return svg;

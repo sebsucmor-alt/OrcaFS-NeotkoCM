@@ -9,6 +9,7 @@
 #pragma warning(disable : 4146)
 #endif // _MSC_VER
 #include <openvdb/openvdb.h>
+#include <functional>
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif // _MSC_VER
@@ -26,12 +27,26 @@ inline Vec3i32 to_vec3i(const openvdb::Vec3I &v) { return Vec3i32{int(v[0]), int
 // achievable through the Transform parameter. (TODO: or is it?)
 // The resulting grid will contain the voxel_scale in its metadata under the
 // "voxel_scale" key to be used in grid_to_mesh function.
+// NEOTKO_HOLLOW_TAG 27-oct — in `flags`: voxelize the mesh in one go instead of shell by shell
+// (a mesh of many open shells otherwise leaves no inside at all).
+constexpr int MeshToGridWhole = 1 << 30;
+
+// NEOTKO_REMESH_TAG 28-oct — lets a long voxel step stop halfway (Remesh > Cancel).
+struct VdbInterrupt
+{
+    std::function<bool()> stop;
+    void start(const char * = nullptr) {}
+    void end() {}
+    bool wasInterrupted(int = -1) { return stop && stop(); }
+};
+
 openvdb::FloatGrid::Ptr mesh_to_grid(const indexed_triangle_set &    mesh,
                                      const openvdb::math::Transform &tr = {},
                                      float voxel_scale                  = 1.f,
                                      float exteriorBandWidth = 3.0f,
                                      float interiorBandWidth = 3.0f,
-                                     int   flags             = 0);
+                                     int   flags             = 0,
+                                     VdbInterrupt *interrupt = nullptr);
 
 indexed_triangle_set grid_to_mesh(const openvdb::FloatGrid &grid,
                                   double                    isovalue   = 0.0,
@@ -41,7 +56,8 @@ indexed_triangle_set grid_to_mesh(const openvdb::FloatGrid &grid,
 openvdb::FloatGrid::Ptr redistance_grid(const openvdb::FloatGrid &grid,
                                         double                    iso,
                                         double ext_range = 3.,
-                                        double int_range = 3.);
+                                        double int_range = 3.,
+                                        VdbInterrupt *interrupt = nullptr);
 
 } // namespace Slic3r
 

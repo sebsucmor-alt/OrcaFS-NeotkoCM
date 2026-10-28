@@ -92,7 +92,8 @@ PerimeterColorPlan resolve_perimeter_colors(double                            d_
                                             int                               wall_loops,
                                             const Lab&                        target,
                                             const std::vector<unsigned int>&  candidate_tools,
-                                            const Material                    mats[4]);
+                                            const Material                    mats[4],
+                                            double                            layer_height_mm);
 
 } // namespace ColorSci
 } // namespace Slic3r

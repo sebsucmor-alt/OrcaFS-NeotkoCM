@@ -84,6 +84,7 @@ bool zone_colour(const SurfacePassStack& st,
                  bool penu,
                  const std::string& fallback_pattern,
                  const Material mats[4],
+                 float layer_mm,
                  float out_rgb[3],
                  float* out_weight)
 {
@@ -92,7 +93,7 @@ bool zone_colour(const SurfacePassStack& st,
         if (out_weight) *out_weight = 0.f;
         return false;
     }
-    blend_parallel(slices, mats, out_rgb, out_weight);
+    blend_parallel(slices, mats, layer_mm, out_rgb, out_weight);
     return true;
 }
 
@@ -101,12 +102,13 @@ bool sandwich_colour_legacy(const SurfacePassStack& top,
                             const std::string& fallback_pattern_top,
                             const std::string& fallback_pattern_penu,
                             const Material mats[4],
+                            float layer_mm,
                             float out_rgb[3])
 {
     // port de stacked_preview_color (Tab.cpp:5455-5466)
     float c_top[3], c_penu[3], w_top = 0.f;
-    const bool has_top  = zone_colour(top,  false, fallback_pattern_top,  mats, c_top, &w_top);
-    const bool has_penu = zone_colour(penu, true,  fallback_pattern_penu, mats, c_penu);
+    const bool has_top  = zone_colour(top,  false, fallback_pattern_top,  mats, layer_mm, c_top, &w_top);
+    const bool has_penu = zone_colour(penu, true,  fallback_pattern_penu, mats, layer_mm, c_penu);
     if (!has_top && !has_penu)
         return false;
     if (!has_top)  { c_top[0]  = c_top[1]  = c_top[2]  = 0.f; w_top = 0.f; }
@@ -171,9 +173,10 @@ float ease(int mode, float t)
     }
 }
 
-bool pass_to_eff(const SurfacePass& p, bool penu, const Material mats[4], Eff& out)
+bool pass_to_eff(const SurfacePass& p, bool penu, const Material mats[4], float layer_mm, Eff& out)
 {
-    const float r = std::max(0.f, (float)p.ratio);
+    // Grosor en mm (el TD va en mm): fracción de capa × altura de capa.
+    const float r = std::max(0.f, (float)p.ratio) * layer_mm;
     if (r < 1e-6f) return false;
     switch (p.kind) {
     case SurfacePassKind::Solid:
@@ -224,9 +227,11 @@ void sandwich_colour_stacked(const SurfacePassStack& top,
                              const SurfacePassStack& penu,
                              const Material mats[4],
                              const float bg_rgb[3],
+                             double layer_mm,
                              float out_rgb[3],
                              float* out_transmit)
 {
+    const float lmm = float(std::max(0.01, layer_mm));
     // penu primero (más profundo), luego top; dentro de cada zona el orden del stack ya es
     // bottom→top (passes[0] = abajo — mismo convenio que el sweep del Designer).
     float acc[3], transmit[3] = { 1.f, 1.f, 1.f };
@@ -235,7 +240,7 @@ void sandwich_colour_stacked(const SurfacePassStack& top,
         if (!st.enabled) return;
         for (const SurfacePass& p : st.passes) {
             Eff e;
-            if (!pass_to_eff(p, is_penu, mats, e)) continue;
+            if (!pass_to_eff(p, is_penu, mats, lmm, e)) continue;
             for (int c = 0; c < 3; ++c) {
                 acc[c]      = e.E[c] + e.T[c] * acc[c];
                 transmit[c] = transmit[c] * e.T[c];
@@ -256,9 +261,9 @@ SurfacePassStack reversed_stack(const SurfacePassStack& st)
 }
 
 void sandwich_colour_bottom(const SurfacePassStack& bottom, const Material mats[4],
-                            const float bg_rgb[3], float out_rgb[3])
+                            const float bg_rgb[3], double layer_mm, float out_rgb[3])
 {
-    sandwich_colour_stacked(reversed_stack(bottom), SurfacePassStack{}, mats, bg_rgb, out_rgb);
+    sandwich_colour_stacked(reversed_stack(bottom), SurfacePassStack{}, mats, bg_rgb, layer_mm, out_rgb);
 }
 
 } // namespace ColorSci

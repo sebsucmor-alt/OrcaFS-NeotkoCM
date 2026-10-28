@@ -81,6 +81,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour" aria-current="page">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -167,7 +168,7 @@
       <div class="demo__head">
         <span class="demo__tag">demo</span>
         <span class="demo__title">One filament over a base</span>
-        <span class="demo__hint">try TD 0.4, then TD 5</span>
+        <span class="demo__hint">try TD 0.1, then TD 1.5</span>
       </div>
       <div class="demo__body" data-demo="td-explorer">
         <noscript><p class="noscript">This demo needs JavaScript. The table below gives the same bands in words.</p></noscript>
@@ -178,7 +179,7 @@
           real algorithm
         </span>
         &nbsp;· <code>ColorSci::blend_stacked</code>, and the same
-        <code>TD_mm = neotko_td_N × layer_height</code> conversion RealColor does at the source.
+        TD in millimetres that RealColor, RealView and the stickers use since 2.4.9.
       </div>
     </div>
 
@@ -195,13 +196,12 @@
     </div>
 
     <div class="note note--key">
-      <span class="note__t">The units are layer heights, not millimetres</span>
+      <span class="note__t">TD is in millimetres</span>
       <p style="margin:0">
-        <code>neotko_td_1..4</code> are stored as a multiple of one nominal layer height, because
-        every consumer except one divides an already-normalised ratio by them and the units
-        cancel. RealColor is the exception: it multiplies TD against a real millimetre thickness,
-        so it converts once at the source. Before that conversion existed every material read as
-        roughly five times more transmissive than intended at 0.2 mm.
+        Since 2.4.9 the TD you type means millimetres everywhere, like in HueForge: the thickness
+        that lets through a tenth of the light. Until 2.4.8 some places read it as a number of
+        layers, so TD 5 with 0.2 mm layers acted like 1 mm, five times more opaque than the
+        filament really is. Your TD values do not change; they just mean what they say now.
       </p>
     </div>
 
@@ -348,7 +348,7 @@
  * ========================================================================= */
 Tour.demo('td-explorer', function (host) {
   var el = Tour.el;
-  var S = { hex: '#d61f5c', td: 2.6, thickness: 0.12, layerH: 0.20, base: '#f2f0eb' };
+  var S = { hex: '#d61f5c', td: 0.78, thickness: 0.12, layerH: 0.20, base: '#f2f0eb' };
   var thickSlider = Tour.slider({
     label: 'Thickness', min: 0.02, max: 0.6, step: 0.01, value: S.thickness,
     format: function (v) { return v.toFixed(2) + ' mm'; },
@@ -435,8 +435,8 @@ Tour.demo('td-explorer', function (host) {
   side.appendChild(el('div.grp', null, [
     el('span.gt', { text: 'The filament' }), colIn,
     Tour.slider({
-      label: 'TD', min: 0.2, max: 10, step: 0.1, value: S.td,
-      format: function (v) { return v.toFixed(1); },
+      label: 'TD', min: 0.05, max: 3, step: 0.01, value: S.td,
+      format: function (v) { return v.toFixed(2); },
       onInput: function (v) { S.td = v; redraw(); }
     }),
     el('p.gt', { 'data-band': true, style: 'margin:0' })
@@ -461,7 +461,7 @@ Tour.demo('td-explorer', function (host) {
     patch.style.background = Optics.linearToCss(rgb);
     read.innerHTML =
       '<b>' + Optics.linearToHex(rgb) + '</b> at ' + S.thickness.toFixed(2) + ' mm<br>' +
-      'TD ' + S.td.toFixed(1) + ' = <b>' + tdmm.toFixed(3) + ' mm</b> of material per decade · ' +
+      'TD ' + S.td.toFixed(2) + ' = <b>' + tdmm.toFixed(3) + ' mm</b> of material per decade · ' +
       '<b>' + (t * 100).toFixed(1) + '%</b> of the base still reaching your eye';
 
     ramp.textContent = '';
@@ -652,11 +652,11 @@ Tour.demo('studio', function (host) {
     bank.textContent = '';
     S.filaments.forEach(function (f) {
       var c = el('input', { type: 'color', value: f.hex, 'aria-label': f.name });
-      var lab = el('span', { text: 'TD ' + f.td.toFixed(1) });
-      var r = el('input', { type: 'range', min: 0.2, max: 8, step: 0.1, value: f.td, 'aria-label': f.name + ' TD' });
+      var lab = el('span', { text: 'TD ' + f.td.toFixed(2) });
+      var r = el('input', { type: 'range', min: 0.05, max: 2.5, step: 0.01, value: f.td, 'aria-label': f.name + ' TD' });
       c.addEventListener('input', function () { f.hex = c.value; redraw(); });
       r.addEventListener('input', function () {
-        f.td = parseFloat(r.value); lab.textContent = 'TD ' + f.td.toFixed(1); redraw();
+        f.td = parseFloat(r.value); lab.textContent = 'TD ' + f.td.toFixed(2); redraw();
       });
       bank.appendChild(el('div.one', null, [
         el('div.top', null, [c, el('b', { text: f.name })]), r, lab

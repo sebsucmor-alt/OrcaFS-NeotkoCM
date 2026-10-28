@@ -106,6 +106,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour" aria-current="page">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -908,13 +909,13 @@ Tour.demo('sandwich-builder', function (host) {
     bank.textContent = '';
     S.filaments.forEach(function (f, i) {
       var swatch = el('input', { type: 'color', value: f.hex, 'aria-label': f.name + ' colour' });
-      var tdLab = el('span.fila__td', { text: 'TD ' + f.td.toFixed(1) + ' · ' + Optics.tdBand(f.td) });
-      var tdIn = el('input', { type: 'range', min: 0.2, max: 8, step: 0.1, value: f.td, 'aria-label': f.name + ' TD' });
+      var tdLab = el('span.fila__td', { text: 'TD ' + f.td.toFixed(2) + ' · ' + Optics.tdBand(f.td) });
+      var tdIn = el('input', { type: 'range', min: 0.05, max: 2.5, step: 0.01, value: f.td, 'aria-label': f.name + ' TD' });
 
       swatch.addEventListener('input', function () { f.hex = swatch.value; rebuild(); });
       tdIn.addEventListener('input', function () {
         f.td = parseFloat(tdIn.value);
-        tdLab.textContent = 'TD ' + f.td.toFixed(1) + ' · ' + Optics.tdBand(f.td);
+        tdLab.textContent = 'TD ' + f.td.toFixed(2) + ' · ' + Optics.tdBand(f.td);
         redraw();
       });
 

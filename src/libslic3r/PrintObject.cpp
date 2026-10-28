@@ -539,6 +539,16 @@ void PrintObject::prepare_infill()
     this->apply_painted_surface_depth();
     m_print->throw_if_canceled();
 
+    // 22-oct-2026 — lo mismo con la máscara de la extensión opcional (vacía sin ella).
+    {
+        const std::vector<ExPolygons> extra = optional_extra_solid_mask(*this);
+        if (!extra.empty()) {
+            const size_t n = this->reclassify_internal_as_solid(extra);
+            NEOTKO_LOG(PROFILE, "extra_solid_mask layers=" << extra.size() << " reclassified_region_layers=" << n);
+        }
+        m_print->throw_if_canceled();
+    }
+
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         for (const Layer *layer : m_layers) {
@@ -4874,13 +4884,22 @@ void PrintObject::apply_painted_surface_depth()
                         [](const ExPolygons &ex) { return !ex.empty(); }))
         return;
 
-    const size_t num_layers = std::min(m_layers.size(), m_painted_depth_solid_mask.size());
+    const size_t reclassified_layers = this->reclassify_internal_as_solid(m_painted_depth_solid_mask);
+    NEOTKO_LOG(PROFILE, "apply_painted_surface_depth depth=" << depth
+        << " mask_layers=" << std::count_if(m_painted_depth_solid_mask.begin(), m_painted_depth_solid_mask.end(),
+                                            [](const ExPolygons &ex) { return !ex.empty(); })
+        << " reclassified_region_layers=" << reclassified_layers);
+} // void PrintObject::apply_painted_surface_depth()
+
+size_t PrintObject::reclassify_internal_as_solid(const std::vector<ExPolygons>& mask_per_layer)
+{
+    const size_t num_layers = std::min(m_layers.size(), mask_per_layer.size());
     std::atomic<size_t> reclassified_layers{0};
     tbb::parallel_for(tbb::blocked_range<size_t>(0, num_layers),
-        [this, &reclassified_layers](const tbb::blocked_range<size_t> &range) {
+        [this, &mask_per_layer, &reclassified_layers](const tbb::blocked_range<size_t> &range) {
             for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
                 m_print->throw_if_canceled();
-                const ExPolygons &mask = m_painted_depth_solid_mask[layer_idx];
+                const ExPolygons &mask = mask_per_layer[layer_idx];
                 if (mask.empty())
                     continue;
                 for (LayerRegion *layerm : m_layers[layer_idx]->regions()) {
@@ -4907,11 +4926,12 @@ void PrintObject::apply_painted_surface_depth()
                 }
             }
         });
-    NEOTKO_LOG(PROFILE, "apply_painted_surface_depth depth=" << depth
-        << " mask_layers=" << std::count_if(m_painted_depth_solid_mask.begin(), m_painted_depth_solid_mask.end(),
-                                            [](const ExPolygons &ex) { return !ex.empty(); })
-        << " reclassified_region_layers=" << reclassified_layers.load());
-} // void PrintObject::apply_painted_surface_depth()
+    return reclassified_layers.load();
+}
+
+#ifndef NEOTKO_PRIVATE_TOWER
+std::vector<ExPolygons> optional_extra_solid_mask(const PrintObject&) { return {}; }
+#endif
 // NEOTKO_PAINTERPRO_TAG_END
 
 // combine fill surfaces across layers to honor the "infill every N layers" option

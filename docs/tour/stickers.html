@@ -32,6 +32,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour" aria-current="page">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -184,7 +185,7 @@
       </div>
       <div class="demo__foot">
         The colours are mixed with the tour's port of the app's optics (<code>ColorSci.cpp</code>,
-        <span class="seal">real algorithm</span>), TD 5 for the three colours, over a white part.
+        <span class="seal">real algorithm</span>), TD 1.5 mm for the three colours, over a white part.
         The search here tries one or two passes of 0.04 to 0.28 mm each; the app's own search tries
         more and can pick a different recipe. The stripe uses the pattern engine
         (<code>SurfaceColorMix.cpp</code>). Drawing: Fluent Emoji, MIT.
@@ -201,6 +202,33 @@
       Pro, the closest other recipes, <b>Edit in Pro</b>, and a cap on how many recipes the sticker
       may use, with <b>Reduce</b> to merge the closest ones. <b>Recompute all</b> redoes every
       recipe as Flat or as ColorStitch, with the number of bands for gradients.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="prediction" data-short="★ Colours that match">The colours match what prints <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.9</span></h2>
+
+    <p>
+      A sticker's colours come from stacking thin passes of your filaments over the part, a little
+      like HueForge does with layers. Since 2.4.9 the colour a recipe predicts uses the same TD, in
+      millimetres, and the same layer thickness as RealColor and RealView. Before, the prediction saw
+      each thin pass as much more opaque than it is, so on a white part it picked plain filament
+      colours and never tried mixes. Now a rainbow sticker on white gets its pinks, oranges and
+      greens, and on a coloured part the base shows through the way it does on the print.
+    </p>
+
+    <div class="note note--key">
+      <span class="note__t">After updating</span>
+      <p style="margin:0">
+        Recipes made before 2.4.9 were found with the old prediction. Open the sticker with the
+        pencil on its layer and press <b>Recompute all</b> in <b>Colours</b>, or place it again, and the
+        recipes are searched again with the new one.
+      </p>
+    </div>
+
+    <p class="small">
+      With only two thin layers on top (Top and Penultimate) there is a limit to how far a colour
+      can move away from the part's colour, more so with a high TD. A thin orange over white looks
+      pale on the print too.
     </p>
 
     <!-- ================================================================= -->
@@ -253,7 +281,7 @@
    switchable to a ColorStitch stripe drawn with the Stitch port. */
 Tour.demo('stickerlab', function (host) {
   var el = Tour.el;
-  var LH = 0.2, TD = 5;
+  var LH = 0.2, TD = 1.5;
   var BASE = '#f2f0eb';
   var FIL = [
     { name: 'white',   hex: '#f2f0eb' },

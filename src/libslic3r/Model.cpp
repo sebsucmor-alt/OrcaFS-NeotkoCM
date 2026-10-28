@@ -1252,8 +1252,11 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
     this->colorstitch_stickers           = rhs.colorstitch_stickers; // NEOTKO_STICKER_TAG
+    this->paint_decals                   = rhs.paint_decals; // NEOTKO_SVGDECAL_TAG
+    this->paint_symmetry                 = rhs.paint_symmetry;
     this->colorstitch_sticker_profiles_fingerprint = rhs.colorstitch_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
     this->texture_bump_plane_transform = rhs.texture_bump_plane_transform; // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
+    this->neotko_print_rank = rhs.neotko_print_rank; // NEOTKO_PRINTORDER_TAG 2_49
     this->cut_id.copy(rhs.cut_id);
     this->copy_transformation_caches(rhs);
 
@@ -1295,8 +1298,11 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
     this->colorstitch_stickers           = std::move(rhs.colorstitch_stickers); // NEOTKO_STICKER_TAG
+    this->paint_decals                   = std::move(rhs.paint_decals); // NEOTKO_SVGDECAL_TAG
+    this->paint_symmetry                 = rhs.paint_symmetry;
     this->colorstitch_sticker_profiles_fingerprint = rhs.colorstitch_sticker_profiles_fingerprint; // NEOTKO_STICKER_TAG
     this->texture_bump_plane_transform = std::move(rhs.texture_bump_plane_transform); // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
+    this->neotko_print_rank = rhs.neotko_print_rank; // NEOTKO_PRINTORDER_TAG 2_49
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
@@ -4280,3 +4286,127 @@ CEREAL_REGISTER_POLYMORPHIC_RELATION(Slic3r::ObjectBase, Slic3r::ModelVolume)
 CEREAL_REGISTER_POLYMORPHIC_RELATION(Slic3r::ObjectBase, Slic3r::ModelInstance)
 CEREAL_REGISTER_POLYMORPHIC_RELATION(Slic3r::ObjectBase, Slic3r::Model)
 #endif
+
+namespace Slic3r {
+
+// NEOTKO_SVGDECAL_TAG — F3. Card frame: right = up × dir, up, forward = -dir (towards the object).
+// Ortho:       U = right·(p - c),        V = up·(p - c),        W = 1.
+// Perspective: U = e · right·(p - E),    V = e · up·(p - E),    W = forward·(p - E), E = c + dir·e
+//              (the ray from the eye through p meets the card plane at (U/W, V/W)).
+// Then svg = lin⁻¹ ((U, V)/W - off), folded into the same rows.
+Matrix4d PaintDecal::object_to_svg() const
+{
+    const Vec3d c(centre[0], centre[1], centre[2]);
+    const Vec3d d = Vec3d(dir[0], dir[1], dir[2]).normalized();
+    const Vec3d u = Vec3d(up[0], up[1], up[2]).normalized();
+    const Vec3d r = u.cross(d).normalized();
+    const Vec3d f = -d;
+
+    auto row = [](const Vec3d& a, double b) { Eigen::Matrix<double, 1, 4> m; m << a.x(), a.y(), a.z(), b; return m; };
+    Eigen::Matrix<double, 1, 4> rU, rV, rW;
+    if (perspective && eye_dist > 0.) {
+        const Vec3d  E = c + d * eye_dist;
+        const double e = eye_dist;
+        rU = row(r * e, -e * r.dot(E));
+        rV = row(u * e, -e * u.dot(E));
+        rW = row(f, -f.dot(E));
+    } else {
+        rU = row(r, -r.dot(c));
+        rV = row(u, -u.dot(c));
+        rW = row(Vec3d::Zero(), 1.);
+    }
+    Matrix2d A;
+    A << lin[0], lin[1], lin[2], lin[3];
+    const Matrix2d inv = A.inverse();
+    const Vec2d    io  = inv * Vec2d(off[0], off[1]);
+    Matrix4d M = Matrix4d::Zero();
+    M.row(0) = inv(0, 0) * rU + inv(0, 1) * rV - io.x() * rW;
+    M.row(1) = inv(1, 0) * rU + inv(1, 1) * rV - io.y() * rW;
+    M.row(3) = rW;
+    // F4: rows 0, 1, 3 give the SVG point as placed (homogeneous); the inverse warp takes it back
+    // to the SVG as drawn. Its w stays > 0 over the SVG while the deformed box is convex.
+    const Matrix3d H = warp_matrix().inverse();
+    Matrix4d out = Matrix4d::Zero();
+    out.row(0) = H(0, 0) * M.row(0) + H(0, 1) * M.row(1) + H(0, 2) * M.row(3);
+    out.row(1) = H(1, 0) * M.row(0) + H(1, 1) * M.row(1) + H(1, 2) * M.row(3);
+    out.row(3) = H(2, 0) * M.row(0) + H(2, 1) * M.row(1) + H(2, 2) * M.row(3);
+    return out;
+}
+
+Matrix3d PaintDecal::warp_matrix() const
+{
+    Matrix3d W;
+    W << warp[0], warp[1], warp[2], warp[3], warp[4], warp[5], warp[6], warp[7], warp[8];
+    return W;
+}
+
+std::vector<PaintDecal> PaintDecal::with_mirror_copies(const Vec3d& mirror_centre) const
+{
+    std::vector<PaintDecal> out { *this };
+    out.front().mirror = 0;
+    for (int m = 1; m < 8; ++m) {
+        if ((m & ~mirror) != 0)
+            continue;
+        const Vec3d s((m & 1) ? -1. : 1., (m & 2) ? -1. : 1., (m & 4) ? -1. : 1.);
+        PaintDecal  c = out.front();
+        for (int k = 0; k < 3; ++k) {
+            c.centre[k] = mirror_centre[k] + s[k] * (centre[k] - mirror_centre[k]);
+            c.dir[k]    = s[k] * dir[k];
+            c.up[k]     = s[k] * up[k];
+        }
+        // right = up x dir picks up the sign of the reflection; flipping the card's U keeps every
+        // SVG point exactly on the reflection of where the original puts it. Keep readable skips
+        // it: the card lands in the mirrored place, its SVG not flipped.
+        if (s.x() * s.y() * s.z() < 0. && !mirror_readable) {
+            c.lin[0] = -c.lin[0];
+            c.lin[1] = -c.lin[1];
+            c.off[0] = -c.off[0];
+        }
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+Matrix3d homography_from_quads(const std::array<Vec2d, 4>& src, const std::array<Vec2d, 4>& dst)
+{
+    // x' = (a x + b y + c) / (g x + h y + 1), y' = (d x + e y + f) / (g x + h y + 1)
+    Eigen::Matrix<double, 8, 8> A;
+    Eigen::Matrix<double, 8, 1> rhs;
+    for (int i = 0; i < 4; ++i) {
+        const double x = src[i].x(), y = src[i].y(), u = dst[i].x(), v = dst[i].y();
+        A.row(2 * i)     << x, y, 1., 0., 0., 0., -u * x, -u * y;
+        A.row(2 * i + 1) << 0., 0., 0., x, y, 1., -v * x, -v * y;
+        rhs(2 * i)     = u;
+        rhs(2 * i + 1) = v;
+    }
+    Matrix3d H = Matrix3d::Identity();
+    Eigen::FullPivLU<Eigen::Matrix<double, 8, 8>> lu(A);
+    if (!lu.isInvertible())
+        return H;
+    const Eigen::Matrix<double, 8, 1> h = lu.solve(rhs);
+    H << h(0), h(1), h(2), h(3), h(4), h(5), h(6), h(7), 1.;
+    return H;
+}
+
+Vec3d PaintDecal::svg_to_object(const Vec2d& svg) const
+{
+    const Vec3d c(centre[0], centre[1], centre[2]);
+    const Vec3d d = Vec3d(dir[0], dir[1], dir[2]).normalized();
+    const Vec3d u = Vec3d(up[0], up[1], up[2]).normalized();
+    const Vec3d r = u.cross(d).normalized();
+    Matrix2d A;
+    A << lin[0], lin[1], lin[2], lin[3];
+    const Vec3d  q  = warp_matrix() * Vec3d(svg.x(), svg.y(), 1.);
+    const Vec2d  placed = std::abs(q.z()) > 1e-12 ? Vec2d(q.x() / q.z(), q.y() / q.z()) : svg;
+    const Vec2d uv = A * placed + Vec2d(off[0], off[1]);
+    return c + r * uv.x() + u * uv.y();
+}
+
+Vec3d PaintDecal::eye_object() const
+{
+    const Vec3d c(centre[0], centre[1], centre[2]);
+    const Vec3d d = Vec3d(dir[0], dir[1], dir[2]).normalized();
+    return c + d * ((perspective && eye_dist > 0.) ? eye_dist : 1e5);
+}
+
+} // namespace Slic3r

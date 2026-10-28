@@ -16,10 +16,8 @@
 // contexto. Toda la física reutiliza slice_opacity de ColorSci — sin matemática
 // nueva, solo su inverso.
 //
-// UNIDADES (crítico, bug s166): Material::td está en "ratio units" = fracción de
-// una altura de referencia. Para convertir a mm hay que multiplicar por esa
-// altura de referencia (td_reference_height_mm). Todo el I/O de este header es
-// en MILÍMETROS; la conversión ratio↔mm ocurre SOLO aquí, explícita.
+// UNIDADES (21-oct-2026): Material::td está en MILÍMETROS, como HueForge y RealView
+// (antes, desde s166, en fracción de capa). Todo el I/O de este header es en mm.
 #ifndef slic3r_ColorSci_ColorHeightEnvelope_hpp_
 #define slic3r_ColorSci_ColorHeightEnvelope_hpp_
 
@@ -41,9 +39,8 @@ struct ColorHeightContext
     // los que aparecen en painted_tools.
     Material             mats[4];
 
-    // Altura de referencia (mm) a la que está definido Material::td (fracción de
-    // layer height). Por defecto la layer height nominal del perfil. Con esto
-    // td_mm[c] = td[c] * td_reference_height_mm.
+    // Altura de capa nominal del perfil (mm). Ya no escala el TD (va en mm desde el
+    // 21-oct-2026); sólo es la altura óptima cuando no hay color.
     double               td_reference_height_mm = 0.2;
 
     // Bounds duros de slicing/nozzle (mm) — el envelope nunca sale de aquí.
@@ -83,13 +80,12 @@ struct ColorHeightEnvelope
 constexpr float kDefaultTargetOpacity = 0.90f;
 
 // Inverso de slice_opacity para un canal: grosor mínimo en mm para que el
-// material `m` alcance `target_opacity` en el canal `c`, dado el reference
-// height. td[c] ~0 → opaco → devuelve 0 (cualquier grosor sirve).
+// material `m` alcance `target_opacity` en el canal `c` (TD en mm). td[c] ~0 → opaco →
+// devuelve 0 (cualquier grosor sirve).
 //   opacidad = 1 - 0.1^(t_mm / td_mm)  ⇒  t_mm = td_mm * log10(1/(1-op))
 double min_thickness_for_opacity_mm(const Material& m,
                                     int             channel,
-                                    float           target_opacity,
-                                    double          td_reference_height_mm);
+                                    float           target_opacity);
 
 // Núcleo. Combina fidelidad (peor canal del tool más translúcido) + techo de
 // patrón/sandwich + top-surface, y clampa a los bounds de nozzle.

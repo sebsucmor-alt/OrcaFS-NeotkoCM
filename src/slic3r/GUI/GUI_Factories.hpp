@@ -144,6 +144,7 @@ private:
     // context menu is per-selection and these settings are not. See GLCanvas3D::_render_snapdrag_panel().
     // NeotkoLIBRE — Copy (by block: Speed/Quality/Strength/All) + Paste Process Settings.
     void append_menu_items_process_clipboard(wxMenu* menu);
+    void append_menu_items_print_order(wxMenu* menu); // NEOTKO_PRINTORDER_TAG 2_49
     // NEOTKO — "Remove Slice Cache": high-level manual full-reslice escape hatch.
     void append_menu_item_remove_slice_cache(wxMenu* menu);
     void        append_menu_item_rename(wxMenu* menu);

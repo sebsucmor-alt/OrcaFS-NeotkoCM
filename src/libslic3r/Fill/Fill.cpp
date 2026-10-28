@@ -2121,6 +2121,24 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         if (!_mixed_p && _fp_sticker_idx >= 0 && _mp_mo
                             && _fp_sticker_idx < (int)_mp_mo->colorstitch_stickers.size()) {
                             const ColorStitchSticker& _stk = _mp_mo->colorstitch_stickers[_fp_sticker_idx];
+                            // 22-oct-2026 — receta por profundidad (extensión opcional): la capa entera con la
+                            // herramienta de esa profundidad, en vez de la receta plana del perfil.
+                            // 22-oct-2026 — también en el bottom (stickers que miran abajo, capa 0 incluida).
+                            const int _dtool = optional_depth_tool_at(*this->object(), _stk, _fp_sticker_c, this->print_z, this->height);
+                            if (_dtool >= 0) {
+                                SurfacePass _dp;
+                                _dp.kind       = SurfacePassKind::Solid;
+                                _dp.ratio      = 1.0;
+                                _dp.solid_tool = _dtool;
+                                SurfacePassStack _dst;
+                                _dst.passes.push_back(_dp);
+                                mp_stack          = std::move(_dst);
+                                is_mp_fill        = true;
+                                _sticker_resolved = true;
+                                NEOTKO_LOG(PROFILE, "STICKER_DEPTH_OVERRIDE layer=" << f->layer_id
+                                    << " z=" << this->print_z << " role=" << (int)_mp_role
+                                    << " sticker='" << _stk.name << "' color=" << _fp_sticker_c << " T" << _dtool);
+                            } else
                             if (const auto* _sp = SurfaceEffectProfileManager::get().find(
                                     ColorStitch::sticker_profile_for(_stk, _fp_sticker_c))) {   // s348
                                 const std::string& _sjs = _mp_is_bottom ? _sp->stack_bottom_json   // s350
@@ -4138,6 +4156,10 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
     	    assert(dynamic_cast<ExtrusionEntityCollection*>(layerm->fills.entities[i]) != nullptr);
 #endif
 
+    // 22-oct-2026 — extensión opcional: mueve parte del relleno sólido de esta capa a subcapas de otra
+    // herramienta (sin la extensión no hace nada). Antes del coalescer, que ya sabe de subcapas.
+    optional_extra_sublayers(*this);
+
     // NEOTKO_SANDWICH_TAG_START — coalesce twin islands at the same Z.
     // A single object with two top/penu surfaces at the EXACT same print_z
     // (e.g. the twin steps of a double staircase modeled as ONE object) emits a
@@ -4570,5 +4592,10 @@ void Layer::make_ironing()
 		i = j;
 	}
 }
+
+#ifndef NEOTKO_PRIVATE_TOWER
+int  optional_depth_tool_at(const PrintObject&, const ColorStitchSticker&, int, double, double) { return -1; }
+void optional_extra_sublayers(Layer&) {}
+#endif
 
 } // namespace Slic3r

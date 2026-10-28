@@ -45,6 +45,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_INFILL",      "INFILL"       }, // NeotkoLIBRE_DBG s133 — folded in s285
         { "ORCA_DEBUG_SUPPORTZONES","SUPPORTZONES" }, // NEOTKO_SUPPORTZONES_TAG s289
         { "ORCA_DEBUG_NEOSTROKE",   "NEOSTROKE"    }, // NEOTKO_NEOSTROKE_TAG s335
+        { "ORCA_DEBUG_PRINTORDER",  "PRINTORDER"   }, // NEOTKO_PRINTORDER_TAG 2_49
     };
 
     const char* channel_name(Channel c) { return k_chans[static_cast<int>(c)].name; }

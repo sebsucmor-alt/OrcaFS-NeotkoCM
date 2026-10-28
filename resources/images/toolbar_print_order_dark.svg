@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
+  <!-- Print order (NEOTKO_PRINTORDER_TAG 2_49): three numbered stops joined by arrows, 1 -> 2 -> 3.
+       Fills only (nanosvg-safe); no pure black (RGB==0 is background for the icon recolor). -->
+  <polygon points="11,13 23,22 21.5,24 9.5,15" style="fill:#c8d0d2"/>
+  <polygon points="23,22 24.5,17.5 26,25.5 18.5,24" style="fill:#c8d0d2"/>
+  <polygon points="27,25 20,31 19,29 26,23" style="fill:#c8d0d2"/>
+  <circle cx="8" cy="10" r="6" style="fill:#009688"/>
+  <circle cx="29" cy="22" r="6" style="fill:#009688"/>
+  <circle cx="13" cy="33" r="6" style="fill:#009688"/>
+  <polygon points="7,7 9,6 9,14 7,14" style="fill:#f2f2f2"/>
+  <polygon points="26.5,19 31.5,19 31.5,20.5 29,23.5 31.5,23.5 31.5,25 26.5,25 26.5,23.8 29.2,20.5 26.5,20.5" style="fill:#f2f2f2"/>
+  <polygon points="10.5,30 15.5,30 15.5,36 10.5,36 10.5,34.6 14,34.6 14,33.6 11.5,33.6 11.5,32.4 14,32.4 14,31.4 10.5,31.4" style="fill:#f2f2f2"/>
+</svg>

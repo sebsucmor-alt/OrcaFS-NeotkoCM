@@ -12068,6 +12068,20 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                     handle_newer_3mf_schema(q, config_loaded);
 
+                    // 23-oct-2026 — restore the project's TD into app_config (where the painter and RealColor read
+                    // them). Only when the 3mf carries non-default values: old files saved 1,1,1,1 and must not wipe
+                    // the TD already set on this computer.
+                    if (const auto* td = config_loaded.option<ConfigOptionFloats>("neotko_td_mirror")) {
+                        bool all_default = true;
+                        for (double v : td->values) if (std::abs(v - 1.0) > 1e-6) all_default = false;
+                        if (!all_default)
+                            for (size_t t = 0; t < std::min<size_t>(4, td->values.size()); ++t) {
+                                char buf[32];
+                                std::snprintf(buf, sizeof(buf), "%g", td->values[t]);
+                                wxGetApp().app_config->set("neotko_td_" + std::to_string(t + 1), buf);
+                            }
+                    }
+
                     auto imported_string_count = [&config_loaded](const char *key) -> size_t {
                         if (const auto *opt = config_loaded.option<ConfigOptionStrings>(key))
                             return opt->values.size();
@@ -14052,6 +14066,24 @@ DynamicPrintConfig Plater::priv::neotko_full_config() const
     // bed/boundary checks (e.g. empty-first-layer for floating objects). Decoupled from
     // bridge-infill: this only sets neotko_libre_mode, no other behaviour.
     cfg.set_key_value("neotko_libre_mode", new ConfigOptionBool(m_neotko_libre_cached));
+    // NEOTKO_PRINTORDER_TAG 2_49 — «Print order (Experimental)»: the numbers live on each
+    // ModelObject; here they are copied, in Model::objects order, into a plate key that only
+    // touches G-code export. Rebuilt on every apply, so deleting or moving objects never leaves a
+    // stale index behind. LibreMode off => manual=false => stock order, numbers kept for later.
+    {
+        std::vector<int> _ranks;
+        _ranks.reserve(model.objects.size());
+        for (const ModelObject* mo : model.objects)
+            _ranks.push_back(mo ? std::max(0, mo->neotko_print_rank) : 0);
+        cfg.set_key_value("neotko_print_order_manual", new ConfigOptionBool(m_neotko_libre_cached));
+        cfg.set_key_value("neotko_print_order_ranks", new ConfigOptionInts(_ranks));
+        std::vector<int> _part_ranks;
+        for (const ModelObject* mo : model.objects)
+            if (mo)
+                for (const ModelVolume* mv : mo->volumes)
+                    _part_ranks.push_back(mv ? std::max(0, mv->neotko_print_rank) : 0);
+        cfg.set_key_value("neotko_print_order_part_ranks", new ConfigOptionInts(_part_ranks));
+    }
     // NEOTKO_GRAVITY_TAG s226 — same pattern, own axis: Gravity is its own toggle, not a
     // sub-state of LibreMode (docs/FUTURE/GRAVITY_MASTER_PLAN.md §6). Read here rather than
     // cached because there is no Gravity SideButton yet (Fase 6); the read is a cheap
@@ -21659,6 +21691,18 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     publish(p->model, strategy);
 
     DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
+    // 23-oct-2026 — the TD values live in app_config; write them into the project so a 3mf opens with the TD
+    // its sticker depth recipes were solved with (the copy used to be the default 1,1,1,1).
+    {
+        std::vector<double> td;
+        for (int t = 0; t < 4; ++t) {
+            float v = 1.f;
+            const std::string sv = wxGetApp().app_config->get("neotko_td_" + std::to_string(t + 1));
+            try { if (!sv.empty()) v = std::stof(sv); } catch (...) {}
+            td.push_back(std::max(0.01f, std::min(10.f, v)));
+        }
+        cfg.set_key_value("neotko_td_mirror", new ConfigOptionFloats(td));
+    }
     const std::string path_u8 = into_u8(path);
     wxBusyCursor wait;
 
@@ -23932,6 +23976,12 @@ std::vector<std::string> Plater::get_extruder_colors_from_plater_config(const GC
 {
     if (wxGetApp().is_gcode_viewer() && result != nullptr)
         return result->extruder_colors;
+    // NEOTKO 20-oct-2026: un G-code abierto suelto en el editor (File > Import G-code, m_only_gcode) se
+    // pintaba con los colores del ÚLTIMO PROYECTO más sus filamentos mezclados, no con los suyos
+    // (Sebas: el Cube_PLA de Discord salía con los colores exactos de la babosa). Los del G-code ya
+    // vienen leídos de su `extruder_colour` / `filament_colour` (GCodeProcessor::apply_config).
+    else if (m_only_gcode && result != nullptr && !result->extruder_colors.empty())
+        return result->extruder_colors;
     else {
         if (wxGetApp().preset_bundle == nullptr)
             return {};
@@ -24250,6 +24300,41 @@ void Plater::priv::paste_process_settings()
 
     q->changed_objects(changed_idxs);
     wxGetApp().params_panel()->notify_object_config_changed();
+}
+
+// NEOTKO_PRINTORDER_TAG 2_49 — «Print order (Experimental)». Temporary entry point (object
+// context menu) until the gizmo exists. Only the G-code is redone: the number reaches the engine
+// through neotko_full_config() -> neotko_print_order_ranks, registered in Print.cpp steps_gcode.
+void Plater::set_print_order_rank(int rank, bool clear_all)
+{
+    auto* ac = wxGetApp().app_config;
+    if (!ac || !ac->get_bool("neotko_libre_mode")) return;
+    rank = std::max(0, rank);
+
+    std::vector<size_t> idxs;
+    if (clear_all) {
+        for (size_t i = 0; i < p->model.objects.size(); ++i)
+            idxs.push_back(i);
+    } else {
+        for (const auto& [obj_idx, inst_idx] : p->get_curr_selection().get_selected_object_instances())
+            if (obj_idx >= 0 && (size_t) obj_idx < p->model.objects.size() &&
+                std::find(idxs.begin(), idxs.end(), (size_t) obj_idx) == idxs.end())
+                idxs.push_back((size_t) obj_idx);
+        if (idxs.empty()) {
+            std::vector<int> obj_idxs, vol_idxs;
+            wxGetApp().obj_list()->get_selection_indexes(obj_idxs, vol_idxs);
+            for (int idx : obj_idxs)
+                if (idx >= 0 && (size_t) idx < p->model.objects.size() &&
+                    std::find(idxs.begin(), idxs.end(), (size_t) idx) == idxs.end())
+                    idxs.push_back((size_t) idx);
+        }
+    }
+    if (idxs.empty()) return;
+
+    take_snapshot(clear_all ? "Print order: all Free" : "Print order");
+    for (size_t i : idxs)
+        p->model.objects[i]->neotko_print_rank = clear_all ? 0 : rank;
+    p->schedule_background_process();
 }
 
 // NeotkoLIBRE — Copy/Paste Process Settings public forwarders.

@@ -2354,6 +2354,9 @@ void GLCanvas3D::ZoomToFit()
 
 void GLCanvas3D::select_view(const std::string& direction)
 {
+    // NEOTKO_PAINTERPRO_TAG — painter Lock view: the view shortcuts and the cube's faces wait too.
+    if (m_gizmos.is_camera_locked())
+        return;
     wxGetApp().plater()->get_camera().select_view(direction);
     // NEOTKO_REALCOLOR_TAG s243 (F7): el cubo de vistas y los atajos 1..6 entran por aqui. El
     // salto de camara es instantaneo, pero el Refresh() de abajo mas el repintado que arrastra
@@ -4727,6 +4730,9 @@ void GLCanvas3D::on_gesture(wxGestureEvent &evt)
 {
     if (!m_initialized || !_set_current())
         return;
+    // NEOTKO_PAINTERPRO_TAG — painter Lock view: trackpad pan/zoom/rotate never reach the gizmo.
+    if (m_gizmos.is_camera_locked())
+        return;
 
     auto & camera = wxGetApp().plater()->get_camera();
     if (evt.GetEventType() == wxEVT_GESTURE_PAN) {
@@ -5563,8 +5569,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         // NEOTKO_ALIGNSTACK_TAG: Align & Stack is usable with an empty selection
         // (the user builds the order by clicking objects), so don't auto-close it
         // just because nothing is selected yet.
+        // NEOTKO_PRINTORDER_TAG 2_49 — same for Print order: you number by clicking, with nothing selected.
         if (m_selection.is_empty() &&
-            m_gizmos.get_current_type() != GLGizmosManager::AlignStack)
+            m_gizmos.get_current_type() != GLGizmosManager::AlignStack &&
+            m_gizmos.get_current_type() != GLGizmosManager::PrintOrder)
             m_gizmos.reset_all_states();
 
         m_dirty = true;
@@ -7000,7 +7008,8 @@ void GLCanvas3D::_render_3d_navigator()
                                                  camDistance, ImVec2(viewManipulateLeft, viewManipulateTop - size), ImVec2(size, size),
                                                  0x00101010);
 
-    if (result.changed) {
+    // NEOTKO_PAINTERPRO_TAG — painter Lock view: dragging the view cube does not turn the camera.
+    if (result.changed && !m_gizmos.is_camera_locked()) {
         for (unsigned int c = 0; c < 4; ++c) {
             for (unsigned int r = 0; r < 4; ++r) {
                 m(r, c) = cameraView[c * 4 + r];

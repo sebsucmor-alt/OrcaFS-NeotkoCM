@@ -2447,7 +2447,7 @@ void ObjectList::load_shape_object(const std::string &type_name)
 }
 
 // NEOTKO_CONSTRUCT_TAG_START s363
-ModelVolume* ObjectList::neotko_add_mesh_part(int obj_idx, TriangleMesh mesh_world, const std::string &name)
+ModelVolume* ObjectList::neotko_add_mesh_part(int obj_idx, TriangleMesh mesh_world, const std::string &name, bool negative)
 {
     if (m_objects == nullptr || obj_idx < 0 || obj_idx >= (int)m_objects->size() || mesh_world.empty())
         return nullptr;
@@ -2457,12 +2457,13 @@ ModelVolume* ObjectList::neotko_add_mesh_part(int obj_idx, TriangleMesh mesh_wor
 
     // add_volume() centres the mesh and leaves the centre as the volume's offset, which here is
     // still a WORLD position. Undoing the instance matrix puts the part back where it was drawn.
-    ModelVolume *new_volume = model_object.add_volume(std::move(mesh_world), ModelVolumeType::MODEL_PART);
+    ModelVolume *new_volume = model_object.add_volume(std::move(mesh_world), negative ? ModelVolumeType::NEGATIVE_VOLUME : ModelVolumeType::MODEL_PART);
     const Transform3d placed = model_object.instances.front()->get_matrix().inverse() * new_volume->get_matrix();
     new_volume->set_transformation(placed);
     new_volume->name = name;
     const int extruder_id = model_object.config.has("extruder") ? model_object.config.opt_int("extruder") : 0;
-    new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
+    if (!negative)
+        new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
     new_volume->source.is_from_builtin_objects = true;
     model_object.invalidate_bounding_box();
 
@@ -4507,8 +4508,49 @@ void ObjectList::remove()
 
         Plater::TakeSnapshot snapshot = Plater::TakeSnapshot(wxGetApp().plater(), "Delete selected");
 
+        // Neotko: when every part of an object is selected, delete the whole object
+        // instead of leaving it with its last part (which cannot be deleted on its own).
+        {
+            wxDataViewItemArray promoted;
+            for (const wxDataViewItem& item : sels) {
+                if (m_objects_model->GetItemType(item) != itVolume)
+                    continue;
+                wxDataViewItem obj_item = m_objects_model->GetObject(item);
+                if (!obj_item || sels.Index(obj_item) != wxNOT_FOUND || promoted.Index(obj_item) != wxNOT_FOUND)
+                    continue;
+                wxDataViewItemArray children;
+                m_objects_model->GetChildren(obj_item, children);
+                bool all_selected = false;
+                for (const wxDataViewItem& child : children) {
+                    if (m_objects_model->GetItemType(child) != itVolume)
+                        continue;
+                    if (sels.Index(child) == wxNOT_FOUND) { all_selected = false; break; }
+                    all_selected = true;
+                }
+                if (all_selected)
+                    promoted.Add(obj_item);
+            }
+            for (const wxDataViewItem& obj_item : promoted)
+                sels.Insert(obj_item, 0); // first, so its parts are skipped as gone
+        }
+
+        // Neotko: deleting the second-to-last volume also frees the last volume's node
+        // (ObjectDataViewModel::Delete), so a later item in sels can be a dangling pointer.
+        // InvalidItem() dereferences it; check that the node is still in the tree first.
+        std::function<bool(const wxDataViewItem&, const wxDataViewItem&)> in_tree =
+            [this, &in_tree](const wxDataViewItem& root, const wxDataViewItem& target) {
+                wxDataViewItemArray children;
+                m_objects_model->GetChildren(root, children);
+                for (const wxDataViewItem& child : children)
+                    if (child == target || in_tree(child, target))
+                        return true;
+                return false;
+            };
+
         for (auto& item : sels)
         {
+            if (!in_tree(wxDataViewItem(nullptr), item))
+                continue;
             if (m_objects_model->InvalidItem(item)) // item can be deleted for this moment (like last 2 Instances or Volumes)
                 continue;
             parent = delete_item(item);
@@ -5864,7 +5906,7 @@ void ObjectList::fix_through_netfabb()
             msg += "\n";
         }
 
-        plater->clear_before_change_mesh(obj_idx);
+        // NEOTKO_PAINTCARRY_TAG — no clear_before_change_mesh(): the repair keeps the painting now.
         std::string res;
         if (!fix_model_by_win10_sdk_gui(*(object(obj_idx)), vol_idx, progress_dlg, msg, res))
             return false;

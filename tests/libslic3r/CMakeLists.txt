@@ -20,6 +20,7 @@ add_executable(${_TEST_NAME}_tests
 	test_slope_perimeter_recolor.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
+	test_polygon_mask_2d.cpp     # NEOTKO_SVGDECAL_TAG F1
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp

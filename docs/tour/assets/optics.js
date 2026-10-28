@@ -10,7 +10,7 @@
  *   docs/REALCOLOR_OPTICS_AND_MATH.md  §3      (the physical model)
  *
  * The model, in three lines:
- *   TD_mm = neotko_td_N * nominal_layer_height     ratio units -> millimetres
+ *   TD is in millimetres, as typed in the app since 2.4.9 (like HueForge)
  *   t(d)  = pow(0.1, d / TD_mm)                    decadic Beer-Lambert
  *   acc_k = c_k*(1 - t_k) + acc_{k-1}*t_k          bottom -> top, print order
  *
@@ -81,13 +81,14 @@
   }
 
   /**
-   * TD as stored in the app (`neotko_td_1..4`, ratio units — a multiple of one
-   * nominal layer height) converted to the millimetres this module works in.
-   * This is the one unit conversion RealColor does at the source; see
-   * REALCOLOR_OPTICS_AND_MATH.md §3.1 for why it exists.
+   * TD in millimetres. Until 2.4.8 the app stored TD as a multiple of one
+   * layer height and this multiplied it out; since 2.4.9 TD means millimetres
+   * everywhere (release notes: "TD means millimetres everywhere"), so it is
+   * passed through. The layer height argument stays so the callers need no change.
    */
-  function tdToMm(tdRatio, layerHeightMm) {
-    return tdRatio * layerHeightMm;
+  function tdToMm(tdMm, layerHeightMm) {
+    void layerHeightMm;
+    return tdMm;
   }
 
   /**
@@ -250,15 +251,14 @@
 
   /**
    * The default four slots every demo starts from. Colours are ordinary
-   * filament colours; TD values are in ratio units (multiples of one nominal
-   * layer height), the same units the `neotko_td_1..4` sliders use, and they
-   * are spread on purpose so that "opaque" and "translucent" both show up.
+   * filament colours; TD values are in millimetres, as typed in the app, and
+   * they are spread on purpose so that "opaque" and "translucent" both show up.
    */
   const DEFAULT_FILAMENTS = [
-    { name: 'T1', hex: '#f2f0eb', td: 0.9 },   // warm white, fairly opaque
-    { name: 'T2', hex: '#1d3f8f', td: 1.4 },   // blue
-    { name: 'T3', hex: '#d61f5c', td: 2.6 },   // magenta, lets a lot through
-    { name: 'T4', hex: '#f2b705', td: 3.4 }    // yellow, translucent
+    { name: 'T1', hex: '#f2f0eb', td: 0.27 },   // warm white, fairly opaque
+    { name: 'T2', hex: '#1d3f8f', td: 0.42 },   // blue
+    { name: 'T3', hex: '#d61f5c', td: 0.78 },   // magenta, lets a lot through
+    { name: 'T4', hex: '#f2b705', td: 1.02 }    // yellow, translucent
   ];
 
   /**
@@ -266,9 +266,9 @@
    * words rather than leaving the visitor to guess what 2.6 means.
    */
   function tdBand(td) {
-    if (td <= 0.5) return 'highly opaque';
-    if (td <= 3.0) return 'opaque–translucent';
-    if (td <= 7.0) return 'translucent';
+    if (td <= 0.15) return 'highly opaque';
+    if (td <= 0.9) return 'opaque–translucent';
+    if (td <= 2.1) return 'translucent';
     return 'highly translucent';
   }
 

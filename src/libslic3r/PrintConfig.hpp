@@ -2073,6 +2073,15 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // again" to "any park long enough that the preheat can bring it back in time". Same mirror,
     // same reason. Requires neotko_idle_tool_power_down to be on.
     ((ConfigOptionBool,               neotko_idle_tool_deep_sleep))
+    // NEOTKO_PRINTORDER_TAG 2_49 — «Print order (Experimental)». Slice-time mirrors written by
+    // Plater::priv::neotko_full_config(), never in a preset. _manual = LibreMode is on; _ranks =
+    // one number per Model::objects index (0 = Free), rebuilt from ModelObject::neotko_print_rank
+    // on every apply. Both only touch G-code export (Print.cpp steps_gcode). No ranks => stock.
+    ((ConfigOptionBool,               neotko_print_order_manual))
+    ((ConfigOptionInts,               neotko_print_order_ranks))
+    // Parts: one number per ModelVolume, objects in Model::objects order, each object's volumes in
+    // their own order, flattened (ModelVolume::neotko_print_rank). 0 = Free.
+    ((ConfigOptionInts,               neotko_print_order_part_ranks))
     ((ConfigOptionInt,                delta_temperature))
     ((ConfigOptionInt,                preheat_steps))
     ((ConfigOptionInts,               nozzle_temperature))

@@ -2,6 +2,8 @@
 #include <optional>
 
 #include <libslic3r/OpenVDBUtils.hpp>
+#include <openvdb/tools/Composite.h> // NEOTKO_REMESH_TAG: csg on the voxels
+#include <openvdb/tools/LevelSetUtil.h> // NEOTKO_REMESH_TAG: segmentSDF
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/TriangleMeshSlicer.hpp>
 #include <libslic3r/SLA/Hollowing.hpp>
@@ -61,7 +63,8 @@ static InteriorPtr generate_interior_verbose(const TriangleMesh & mesh,
                                              const JobController &ctl,
                                              double min_thickness,
                                              double voxel_scale,
-                                             double closing_dist)
+                                             double closing_dist,
+                                             bool whole_mesh = false)
 {
     double offset = voxel_scale * min_thickness;
     double D = voxel_scale * closing_dist;
@@ -71,7 +74,8 @@ static InteriorPtr generate_interior_verbose(const TriangleMesh & mesh,
     if (ctl.stopcondition()) return {};
     else ctl.statuscb(0, L("Hollowing"));
 
-    auto gridptr = mesh_to_grid(mesh.its, {}, voxel_scale, out_range, in_range);
+    auto gridptr = mesh_to_grid(mesh.its, {}, voxel_scale, out_range, in_range,
+                                whole_mesh ? MeshToGridWhole : 0); // NEOTKO_HOLLOW_TAG
 
     assert(gridptr);
 
@@ -108,6 +112,147 @@ static InteriorPtr generate_interior_verbose(const TriangleMesh & mesh,
     return interior;
 }
 
+// NEOTKO_REMESH_TAG 28-oct
+static void neo_face_out(indexed_triangle_set &its)
+{
+    if (!its.indices.empty() && its_volume(its) < 0.)
+        its_flip_triangles(its);
+}
+
+RemeshResult neo_remesh(const indexed_triangle_set &mesh, const RemeshParams &p)
+{
+    RemeshResult res;
+    if (mesh.indices.empty() || p.voxel <= 0.)
+        return res;
+    auto step = [&p, &res](int pct, const char *what) {
+        if (p.cancel && p.cancel()) { res.cancelled = true; return false; }
+        if (p.status) p.status(pct, what);
+        return true;
+    };
+    VdbInterrupt intr { p.cancel };
+    VdbInterrupt *ip = p.cancel ? &intr : nullptr;
+    auto stopped = [&p, &res]() {
+        if (p.cancel && p.cancel()) { res.cancelled = true; return true; }
+        return false;
+    };
+    auto to_mesh = [&p](const openvdb::FloatGrid &g, double iso) {
+        indexed_triangle_set its = grid_to_mesh(g, iso, p.adaptivity);
+        its_merge_vertices(its);
+        neo_face_out(its);
+        return its;
+    };
+
+    // The mesh is scaled up so one voxel is `voxel` mm; distances in the grid are in voxels,
+    // negative inside.
+    const double s   = 1. / p.voxel;
+    const double off = p.offset * s;
+    // Fast smooth: the inside is smoothed anyway, so it gets its own coarser voxels (about a
+    // tenth of Smooth, never coarser than a third of the wall); only the skin uses `voxel`.
+    const double cvox = p.hollow && p.fast_smooth
+                            ? std::max(p.voxel, std::min(p.smooth / 10., p.wall / 3.))
+                            : p.voxel;
+    const bool   coarse = cvox > p.voxel * 1.01;
+
+    // The inside of `g` (voxels of `vox` mm), with its opening: a level set, zero on its skin.
+    auto build_cut = [&](const openvdb::FloatGrid &g, double vox, double nb) -> openvdb::FloatGrid::Ptr {
+        const double sc    = 1. / vox;
+        const double D     = std::max(0., p.smooth) * sc;
+        const double inner = (p.offset - p.wall) * sc;
+        // As the SLA hollowing: shrink to inside - D, grow back by D.
+        if (!step(25, "inside")) return {};
+        openvdb::FloatGrid::Ptr shrunk = redistance_grid(g, inner - D, nb, nb, ip);
+        if (stopped() || !shrunk) return {};
+        if (!step(40, "smooth")) return {};
+        openvdb::FloatGrid::Ptr cut = redistance_grid(*shrunk, D, 3., 3., ip);
+        shrunk.reset();
+        if (stopped() || !cut) return {};
+        for (auto it = cut->cbeginValueOn(); it; ++it)
+            if (*it < 0.f) { res.has_cavity = true; break; }
+        if (!res.has_cavity) return {};
+
+        // The opening: the deep mouth only where the solid is Wall mm in, plus the plug through the face.
+        if (!step(55, "opening")) return {};
+        if (p.mouth != nullptr && p.plug != nullptr && !p.mouth->indices.empty() && !p.plug->indices.empty()) {
+            openvdb::FloatGrid::Ptr body  = redistance_grid(g, inner, 3., 3.);
+            openvdb::FloatGrid::Ptr mouth = mesh_to_grid(*p.mouth, {}, float(sc), 3.f, 3.f, MeshToGridWhole);
+            openvdb::FloatGrid::Ptr plug  = mesh_to_grid(*p.plug, {}, float(sc), 3.f, 3.f, MeshToGridWhole);
+            if (body && mouth && plug) {
+                openvdb::tools::csgIntersection(*mouth, *body);
+                openvdb::tools::csgUnion(*mouth, *plug->deepCopy());
+                // Only the part that grows down from the plug: hidden geometry inside the model (an
+                // eyeball) leaves pockets that are also Wall mm from every skin, and the deep mouth
+                // must not open them.
+                std::vector<openvdb::FloatGrid::Ptr> parts;
+                openvdb::tools::segmentSDF(*mouth, parts);
+                auto touches_plug = [&plug](const openvdb::FloatGrid &pg) {
+                    auto acc = pg.getConstAccessor();
+                    for (auto it = plug->cbeginValueOn(); it; ++it)
+                        if (*it < 0.f && acc.getValue(it.getCoord()) < 0.f)
+                            return true;
+                    return false;
+                };
+                for (openvdb::FloatGrid::Ptr &part : parts)
+                    if (part && touches_plug(*part))
+                        openvdb::tools::csgUnion(*cut, *part);
+            }
+        }
+        return cut;
+    };
+    // The band inside the skin the inside needs, in voxels of `vox` mm.
+    auto inside_band = [&p](double vox) {
+        return 1.1 * (p.wall - p.offset + std::max(0., p.smooth)) / vox + 3.;
+    };
+
+    // The skin's grid only needs a deep inner band when the inside is built on it.
+    const float ext_bw = float(std::max(0., off) + 3.);
+    const float int_bw = float(std::max(std::max(0., -off), p.hollow && !coarse && p.wall > p.offset ? inside_band(p.voxel) : 0.) + 3.);
+    if (!step(0, "voxels")) return res;
+    openvdb::FloatGrid::Ptr grid = mesh_to_grid(mesh, {}, float(s), ext_bw, int_bw, MeshToGridWhole, ip);
+    if (stopped() || !grid)
+        return res;
+    if (!p.hollow) {
+        if (!step(60, "mesh")) return res;
+        res.outer = to_mesh(*grid, off);
+        return res;
+    }
+    if (p.wall <= p.offset)
+        return res;
+
+    openvdb::FloatGrid::Ptr cut;
+    if (coarse) {
+        // Inside on its own coarse grid, then its skin voxelized again at the fine size (a thin
+        // band only) so the fine skin can take it away.
+        const double cnb = inside_band(cvox);
+        openvdb::FloatGrid::Ptr cgrid = mesh_to_grid(mesh, {}, float(1. / cvox), 3.f, float(cnb), MeshToGridWhole, ip);
+        if (stopped() || !cgrid) return res;
+        openvdb::FloatGrid::Ptr ccut = build_cut(*cgrid, cvox, cnb);
+        cgrid.reset();
+        if (!ccut) return res;
+        if (!step(65, "mesh")) return res;
+        indexed_triangle_set cav = to_mesh(*ccut, 0.);
+        if (!p.want_outer) {
+            res.cavity = std::move(cav);
+            return res;
+        }
+        cut = mesh_to_grid(cav, {}, float(s), 3.f, 3.f, MeshToGridWhole, ip);
+        if (stopped() || !cut) return res;
+    } else {
+        cut = build_cut(*grid, p.voxel, double(int_bw));
+        if (!cut) return res;
+        if (!step(65, "mesh")) return res;
+        if (!p.want_outer) {
+            res.cavity = to_mesh(*cut, 0.);
+            return res;
+        }
+    }
+    openvdb::FloatGrid::Ptr solid = redistance_grid(*grid, off, 3., 3.);
+    grid.reset();
+    openvdb::tools::csgDifference(*solid, *cut);
+    if (!step(75, "mesh")) return res;
+    res.outer = to_mesh(*solid, 0.);
+    return res;
+}
+
 InteriorPtr generate_interior(const TriangleMesh &   mesh,
                               const HollowingConfig &hc,
                               const JobController &  ctl)
@@ -126,7 +271,7 @@ InteriorPtr generate_interior(const TriangleMesh &   mesh,
 
     InteriorPtr interior =
         generate_interior_verbose(mesh, ctl, hc.min_thickness, voxel_scale,
-                                  hc.closing_distance);
+                                  hc.closing_distance, hc.whole_mesh);
 
     if (interior && !interior->mesh.empty()) {
 

@@ -9,19 +9,16 @@ namespace ColorSci {
 
 double min_thickness_for_opacity_mm(const Material& m,
                                     int             channel,
-                                    float           target_opacity,
-                                    double          td_reference_height_mm)
+                                    float           target_opacity)
 {
     if (channel < 0 || channel > 2)
         return 0.0;
 
-    const double td_ratio = double(m.td[channel]);
+    // 21-oct-2026: el TD va en mm (como HueForge y RealView), no en fracción de capa.
+    const double td_mm = double(m.td[channel]);
     // TD ~0 → material opaco en ese canal → cualquier grosor rinde el color.
-    if (td_ratio < 1e-6)
+    if (td_mm < 1e-6)
         return 0.0;
-
-    // Convertir TD (fracción de reference height) a mm reales.
-    const double td_mm = td_ratio * std::max(1e-6, td_reference_height_mm);
 
     // Clamp de la opacidad objetivo a un rango invertible: op=1 daría grosor
     // infinito, op<=0 daría grosor 0/negativo.
@@ -61,7 +58,7 @@ ColorHeightEnvelope compute_color_height_envelope(const ColorHeightContext& ctx,
             continue;
         for (int c = 0; c < 3; ++c) {
             const double t = min_thickness_for_opacity_mm(
-                ctx.mats[tool], c, target_opacity, ctx.td_reference_height_mm);
+                ctx.mats[tool], c, target_opacity);
             fidelity_floor = std::max(fidelity_floor, t);
         }
     }

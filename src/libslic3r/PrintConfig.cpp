@@ -5811,6 +5811,27 @@ void PrintConfigDef::init_fff_params()
     // NEOTKO_TOOLSLEEP_TAG s294 — "Extra Energy Save" (slice-time mirror, same as its sibling).
     // Widens the power-down rule to every park, and leans on Orca's own preheat backtrace to undo
     // it whenever the tool comes back too soon to be worth it. comDevelop; default off.
+    // NEOTKO_PRINTORDER_TAG 2_49 — slice-time mirrors of «Print order (Experimental)».
+    // Hidden (comDevelop), never saved in a profile. Default = stock, byte-identical G-code.
+    def = this->add("neotko_print_order_manual", coBool);
+    def->label = L("Manual print order (slice-time)");
+    def->tooltip = L("Internal: true while LibreMode is on, so the numbers given to objects "
+                     "in Print order are followed.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("neotko_print_order_ranks", coInts);
+    def->label = L("Print order numbers (slice-time)");
+    def->tooltip = L("Internal: one number per object, in object list order. 0 = Free.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts());
+
+    def = this->add("neotko_print_order_part_ranks", coInts);
+    def->label = L("Print order part numbers (slice-time)");
+    def->tooltip = L("Internal: one number per part, objects in object list order. 0 = Free.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts());
+
     def = this->add("neotko_idle_tool_deep_sleep", coBool);
     def->label = L("Extra Energy Save mode (slice-time)");
     def->tooltip = L("Internal: true while \"Extra Energy Save\" is active. Every parked tool is set "

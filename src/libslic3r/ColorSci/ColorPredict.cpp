@@ -117,7 +117,7 @@ static void dedup_and_sort(std::vector<ColorRecipe>& v, const PredictOptions& op
 static void predict_recipe_colour(ColorRecipe& r, const Material mats[4],
                                   const PredictOptions& opt)
 {
-    sandwich_colour_stacked(r.top, r.penu, mats, opt.bg_rgb, r.rgb.data());
+    sandwich_colour_stacked(r.top, r.penu, mats, opt.bg_rgb, opt.layer_height, r.rgb.data());
 }
 
 // --- Paletas browse --------------------------------------------------------
@@ -300,7 +300,7 @@ SurfacePassStack suggest_dither_single(const float target_rgb[3],
                 // que aporte color en un bottom — lo de abajo es aire o soporte).
                 const SurfacePassStack no_penu;
                 float rgb[3] = {0.f, 0.f, 0.f};
-                sandwich_colour_stacked(cand, no_penu, mats, opt.bg_rgb, rgb);
+                sandwich_colour_stacked(cand, no_penu, mats, opt.bg_rgb, opt.layer_height, rgb);
                 const float de = delta_e2000(tlab, rgb_to_lab(rgb));
                 if (de < best_de) { best_de = de; best = std::move(cand); }
             }
@@ -335,7 +335,7 @@ std::vector<ColorRecipe> build_palette(PaletteKind kind,
             ColorRecipe r;
             r.top  = g.top;
             r.penu = g.penu;
-            sandwich_colour_stacked(g.top, g.penu, mats, opt.bg_rgb, r.rgb.data());
+            sandwich_colour_stacked(g.top, g.penu, mats, opt.bg_rgb, opt.layer_height, r.rgb.data());
             char buf[48];
             std::snprintf(buf, sizeof(buf), "A %.2f / B %.2f mm", g.a_mm, g.b_mm);
             r.desc = buf;
@@ -365,7 +365,7 @@ ColorRecipe build_mixed_filament_recipe(const MixedFilament& mf,
     slices.push_back({ a, (100 - mix_b) / 100.f });
     slices.push_back({ b, mix_b / 100.f });
     float target_rgb[3];
-    blend_parallel(slices, mats, target_rgb);
+    blend_parallel(slices, mats, float(opt.layer_height), target_rgb);
 
     ColorRecipe best = suggest_flat(target_rgb, mats, opt);
 

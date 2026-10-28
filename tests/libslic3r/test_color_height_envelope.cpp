@@ -30,32 +30,31 @@ TEST_CASE("min_thickness_for_opacity inverts slice_opacity", "[ColorHeightEnvelo
 {
     // Round-trip: pick a TD and a target opacity, compute the required
     // thickness, feed it back through slice_opacity, and expect the target.
-    const double ref_h = 0.2;
     const float  op    = 0.90f;
 
     SECTION("translucent material, mid TD")
     {
-        Material m = mat_with_td(0.5f); // td_mm = 0.5 * 0.2 = 0.10 mm
-        const double t_mm = min_thickness_for_opacity_mm(m, 0, op, ref_h);
+        Material m = mat_with_td(0.5f); // td = 0.5 mm
+        const double t_mm = min_thickness_for_opacity_mm(m, 0, op);
         REQUIRE(t_mm > 0.0);
 
-        // slice_opacity works in ratio units: ratio = t_mm / ref_h.
+        // TD and thickness are both in mm (21-oct-2026).
         float out_op[3];
-        slice_opacity(m, float(t_mm / ref_h), out_op);
+        slice_opacity(m, float(t_mm), out_op);
         REQUIRE_THAT(out_op[0], WithinAbs(op, 1e-4));
     }
 
     SECTION("opaque material (td ~ 0) needs no thickness")
     {
         Material m = mat_with_td(0.f);
-        const double t_mm = min_thickness_for_opacity_mm(m, 0, op, ref_h);
+        const double t_mm = min_thickness_for_opacity_mm(m, 0, op);
         REQUIRE_THAT(t_mm, WithinAbs(0.0, 1e-9));
     }
 
     SECTION("higher TD (more translucent) needs proportionally more thickness")
     {
-        const double t_lo = min_thickness_for_opacity_mm(mat_with_td(0.3f), 0, op, ref_h);
-        const double t_hi = min_thickness_for_opacity_mm(mat_with_td(0.6f), 0, op, ref_h);
+        const double t_lo = min_thickness_for_opacity_mm(mat_with_td(0.3f), 0, op);
+        const double t_hi = min_thickness_for_opacity_mm(mat_with_td(0.6f), 0, op);
         // TD doubled → required thickness doubles (linear in td).
         REQUIRE_THAT(t_hi, WithinRel(2.0 * t_lo, 1e-4));
     }

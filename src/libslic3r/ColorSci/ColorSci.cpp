@@ -154,16 +154,17 @@ void blend_stacked(const std::vector<Layer>& layers,
         *out_transmit = (transmit[0] + transmit[1] + transmit[2]) / 3.f;
 }
 
-void slice_opacity(const Material& m, float ratio, float out_op[3])
+void slice_opacity(const Material& m, float thickness_mm, float out_op[3])
 {
     for (int c = 0; c < 3; ++c)
         out_op[c] = (m.td[c] < 1e-6f)
             ? 1.f
-            : 1.f - std::pow(0.1f, ratio / m.td[c]);
+            : 1.f - std::pow(0.1f, thickness_mm / m.td[c]);
 }
 
 void blend_parallel(const std::vector<Slice>& slices,
                     const Material mats[4],
+                    float layer_mm,
                     float out_rgb[3],
                     float* out_weight)
 {
@@ -175,7 +176,7 @@ void blend_parallel(const std::vector<Slice>& slices,
     for (const Slice& s : slices) {
         const Material& m = mats[std::clamp(s.tool, 0, 3)];
         float op[3];
-        slice_opacity(m, std::max(0.f, s.ratio), op);
+        slice_opacity(m, std::max(0.f, s.ratio) * std::max(0.01f, layer_mm), op);
         const float ow = (op[0] + op[1] + op[2]) / 3.f;
         tr += m.rgb[0] * op[0];
         tg += m.rgb[1] * op[1];

@@ -53,13 +53,23 @@ void append_object_sources(const ModelObject &object, bool cutter, std::vector<S
 
 // The sources prepared once (search trees, painting loaded) for several targets, as when one
 // mesh is split into many pieces.
+// In a facet map of Transfer::to(): a new facet that stays unpainted.
+constexpr int FACET_UNPAINTED = -2;
+
 class Transfer
 {
 public:
     explicit Transfer(std::vector<Source> sources);
     ~Transfer();
-    // See transfer() below.
-    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament);
+    // See transfer() below. With one source, `facet_map` (from FacetMatcher::match()) may say
+    // which facets of the target are facets of the source: their painting is copied as it is and
+    // only the rest is resampled (a cut, where only the facets along the plane are new).
+    // FACET_UNPAINTED in the map leaves that facet unpainted without sampling it (the cap of a cut).
+    // NEOTKO_REMESH_TAG 28-oct — `reach` (mm): how far the target skin may lie from the sources'
+    // and still take their painting. 0 = a boolean (a few microns). A remesh moves the skin up to
+    // about a voxel, so it passes more.
+    Stats to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map = nullptr,
+             float reach = 0.f);
 
 private:
     struct Impl;
@@ -70,7 +80,8 @@ private:
 // `target_to_world` maps the target mesh into the same world as the sources. Where the skins of
 // two sources coincide, the one listed first wins. `base_filament` is the filament the target
 // prints with: skin that would be coloured with it is left unpainted.
-Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament);
+Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Transform3d &target_to_world, int base_filament,
+               float reach = 0.f);
 
 // Split: a piece cut out of a mesh keeps the very same triangles (same vertices, same corner
 // order), so its painting is copied triangle by triangle, exactly and without any search.
@@ -90,6 +101,11 @@ private:
 // Copies the painting of `source` onto `target` through `facet_map` (from FacetMatcher::match() on
 // their meshes). Returns false, without touching `target`, when some facet has no match.
 bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::vector<int> &facet_map);
+
+// Replaces the mesh of `volume` with `mesh` (a repair, which rebuilds the mesh) and keeps its
+// painting: facets the repair left as they were copy theirs, the new ones are resampled from the
+// old mesh. Without painting it is a plain set_mesh().
+void set_mesh_keep_painting(ModelVolume &volume, TriangleMesh &&mesh);
 
 } // namespace PaintTransfer
 } // namespace Slic3r

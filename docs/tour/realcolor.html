@@ -47,6 +47,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour">Colour</a>
       <a href="index.html#output" aria-current="page">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -166,6 +167,39 @@
       <img src="../images/RealColor-Quality.png" width="1776" height="974" alt="A RealColor render at high quality, showing the surface finish and the blended colour of a multi-pass print" loading="lazy">
       <figcaption>What the view looks like once TD is roughly right for the filaments in use.</figcaption>
     </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="realview" data-short="★ The RealView light">The RealView light <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.9</span></h2>
+
+    <p>
+      Since 2.4.9 RealColor uses the same light model as RealView, the fork's raytraced G-code
+      renderer. Each filament lets through the colours it does not absorb, so a thin yellow over
+      blue turns greenish and a deep colour gets more saturated, the way it happens on the printed
+      part. Light also spreads a little inside the plastic, and walls seen at an angle look thicker,
+      as they do in real life.
+    </p>
+
+    <ul>
+      <li><b>Quality › Draft</b> (the default): about a second per view. It only looks a few layers
+        deep, so a thick translucent area can look a bit off, but the colours are the ones you will
+        get. Good for finding angles and checking colours.</li>
+      <li><b>Quality › Full</b>: looks all the way through the plastic. Demanding: with a high TD it
+        can take 15 to 20 s every time the view changes.</li>
+      <li><b>Photo Mode</b> always renders at full quality. <b>Wipe tower</b> and <b>Supports</b> show
+        or hide those in the view.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/RealColor-RealView-model.png" width="1610" height="1291" alt="Top: the sea slug in RealColor before and with the RealView light model. Bottom: RealColor with supports, and with supports hidden" loading="lazy">
+      <figcaption>Top: the sea slug before and with the RealView light. Bottom: with supports, and with supports hidden.</figcaption>
+    </figure>
+
+    <p class="small">
+      Also in 2.4.9: <b>TD means millimetres everywhere</b>, as in HueForge. Some places used to read
+      it as layers, so TD 5 with 0.2 mm layers acted like 1 mm. Your TD values do not change; they
+      just mean what they say now. And opening a G-code file on its own shows the colours written in
+      it, instead of orange or the last project's.
+    </p>
 
     <!-- ================================================================= -->
     <h2 id="photo" data-short="Photo Mode in the viewer">Photo Mode, in the G-code viewer <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.4</span></h2>

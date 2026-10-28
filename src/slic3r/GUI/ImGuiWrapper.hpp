@@ -14,6 +14,12 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 
+// NEOTKO_SVGDECAL_TAG — our own icon glyphs, kept out of deps_src/imgui/imconfig.h (codepoints
+// past Orca's last one, 0x085B).
+namespace ImGui {
+    const wchar_t NeotkoDrawShapeIcon = 0x0870;   // resources/images/neotko_draw_shape.svg
+}
+
 namespace Slic3r {
 namespace Search {
 struct OptionViewParameters;

@@ -42,6 +42,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html" aria-current="page">Playground</a>
@@ -319,7 +320,7 @@
       for (var i = 0; i < 18; i++) {
         var d = 0.02 + (i / 17) * 0.6;
         var c = Optics.blendStacked(
-          [{ colorHex: F[2].hex, thickness: d, tdMm: Optics.tdToMm(2.6, L) }], '#f2f0eb');
+          [{ colorHex: F[2].hex, thickness: d, tdMm: Optics.tdToMm(0.78, L) }], '#f2f0eb');
         ctx.fillStyle = Optics.linearToCss(c);
         ctx.fillRect(i * w / 18, 0, w / 18 + 1, h);
       }

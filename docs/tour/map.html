@@ -54,6 +54,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -233,18 +234,74 @@
           <td>Painter › Stickers (tool + tab)</td>
         </tr>
         <tr data-gate="none" data-mat="print">
-          <td><a href="place.html#alignstack">Align &amp; Construct</a> <span class="muted">§7</span></td>
+          <td><a href="construct.html">Align &amp; Construct</a> <span class="muted">§7</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">print-verified</span></td>
           <td>2.3.4, rebuilt 2.4.8</td>
           <td>Top toolbar › Align &amp; Construct</td>
         </tr>
         <tr data-gate="none" data-mat="beta">
-          <td><a href="place.html#ac-boolean">Booleans and Split keep the painting</a> <span class="muted">§7</span></td>
+          <td><a href="construct.html#ac-boolean">Booleans and Split keep the painting</a> <span class="muted">§7</span></td>
           <td><span class="badge badge--free">none</span></td>
           <td><span class="badge badge--free">shipped</span></td>
           <td>2.4.8</td>
           <td>Mesh boolean, Split, Align &amp; Construct › Boolean</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="construct.html#ac-remesh">Remesh: repair, offset, hollow</a> <span class="muted">§7</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.9</td>
+          <td>Align &amp; Construct › Remesh (voxels)</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="construct.html#keeppaint">Cut keeps the painting</a> <span class="muted">§6</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.9</td>
+          <td>Cut tool (all modes)</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="painter.html#shapemask">Shape mask with curves</a> <span class="muted">§6</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.9</td>
+          <td>Painter › Pro Mode › Shape mask</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="painter.html#vector">Vector mode and SVG decals</a> <span class="muted">§6</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--wip">beta</span></td>
+          <td>2.4.9</td>
+          <td>Multi-material painting › Vector (V)</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="painter.html#vector-mirrorbrush">Mirror brush</a> <span class="muted">§6</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--wip">beta</span></td>
+          <td>2.4.9</td>
+          <td>Multi-material painting › Brush (B) › Mirror brush</td>
+        </tr>
+        <tr data-gate="libre" data-mat="beta">
+          <td><a href="place.html#printorder">Print order</a> <span class="muted">§7</span></td>
+          <td><span class="badge badge--gate">Libre Mode</span></td>
+          <td><span class="badge badge--wip">experimental</span></td>
+          <td>2.4.9</td>
+          <td>Left toolbar › Print order (By layer printing)</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="realcolor.html#realview">RealColor with the RealView light</a> <span class="muted">§20</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.9</td>
+          <td>Preview › RealColor › Quality</td>
+        </tr>
+        <tr data-gate="none" data-mat="beta">
+          <td><a href="stickers.html#prediction">Sticker colours match the print</a> <span class="muted">§6</span></td>
+          <td><span class="badge badge--free">none</span></td>
+          <td><span class="badge badge--free">shipped</span></td>
+          <td>2.4.9</td>
+          <td>Painter › Stickers › Recompute all</td>
         </tr>
         <tr data-gate="libre" data-mat="beta">
           <td><a href="place.html#reallayers">Stacked objects: real layers</a> <span class="muted">§7</span></td>
@@ -554,6 +611,7 @@
       <li><b>2.4.6</b><span>PathBlend follows your lines on any shape. Patterns keep their size in mm. The Sandwich editor goes: a recipe lives where you paint it. The Painter panel is reorganised.</span></li>
       <li><b>2.4.7</b><span>The previews cut the model like the slice does. Support Zones get easier painting and a cut tool. Moved onto Snapmaker Orca 2.4.0.</span></li>
       <li><b>2.4.8</b><span>Stickers get their own tab, with multicolour SVG, gradients and the bottom face. Align &amp; Construct replaces Align &amp; Stack: extrude a face, booleans, parts. Booleans and Split keep the painting. Stacked objects can print with real layers.</span></li>
+      <li><b>2.4.9</b><span>Remesh rebuilds a broken model from voxels, grows it or hollows it, and keeps the painting. Cut keeps the painting. Shape mask with curves, Vector mode with SVG decals and their parts, and Mirror brush in the multi-material painting.</span></li>
     </ul>
 
     <p class="small">

@@ -76,7 +76,9 @@ namespace NeoDebug {
                           // caminos, hueco sin cubrir, solape, y los anchos que salieron), que
                           // hasta s334 se colaba por DISPATCH. Y, además del log, la llave de
                           // depuración del generador: ver la nota de arriba.
-        CH_COUNT    = 23
+        PRINTORDER  = 23, // NEOTKO_PRINTORDER_TAG 2_49 — manual print order: plate order and,
+                          // per layer and tool pass, the order actually emitted.
+        CH_COUNT    = 24
     };
     // NEOTKO_SMOOTHNORMALS_TAG s229 — gate for the on-screen render tuning panels (RealColor and
     // Shading), as opposed to log channels. Deliberately NOT covered by ORCA_DEBUG_ALL: that var

@@ -99,7 +99,7 @@ TEST_CASE("resolve_perimeter_colors is a no-op on a clean layer", "[SlopePerimet
     const Lab target = rgb_to_lab(target_rgb);
 
     // d below the perimeter width: only the external ring shows.
-    const PerimeterColorPlan plan = resolve_perimeter_colors(0.3, 0.45, 3, target, { 0, 1, 2, 3 }, mats);
+    const PerimeterColorPlan plan = resolve_perimeter_colors(0.3, 0.45, 3, target, { 0, 1, 2, 3 }, mats, 0.2);
     REQUIRE(plan.tool_per_perimeter.empty());
     REQUIRE_THAT(plan.delta_e, WithinAbs(0.0, 1e-9));
 }
@@ -114,7 +114,7 @@ TEST_CASE("resolve_perimeter_colors picks the exact matching tool when one exist
     const float target_rgb[3] = { 0.2f, 0.6f, 0.8f };
     const Lab target = rgb_to_lab(target_rgb);
 
-    const PerimeterColorPlan plan = resolve_perimeter_colors(1.5 * 0.45, 0.45, 3, target, { 0, 1, 2, 3 }, mats);
+    const PerimeterColorPlan plan = resolve_perimeter_colors(1.5 * 0.45, 0.45, 3, target, { 0, 1, 2, 3 }, mats, 0.2);
     REQUIRE(plan.tool_per_perimeter.size() == 2);
     REQUIRE(plan.tool_per_perimeter[0] == 0);
     REQUIRE(plan.tool_per_perimeter[1] == 0);
@@ -132,7 +132,7 @@ TEST_CASE("resolve_perimeter_colors mixes two opaque tools by visible area when 
     const float target_rgb[3] = { 0.5f, 0.f, 0.5f };
     const Lab target = rgb_to_lab(target_rgb);
 
-    const PerimeterColorPlan plan = resolve_perimeter_colors(2.0 * 0.45, 0.45, 3, target, { 0, 1 }, mats);
+    const PerimeterColorPlan plan = resolve_perimeter_colors(2.0 * 0.45, 0.45, 3, target, { 0, 1 }, mats, 0.2);
     REQUIRE(plan.tool_per_perimeter.size() == 2);
     REQUIRE(plan.tool_per_perimeter[0] != plan.tool_per_perimeter[1]);
     REQUIRE_THAT(plan.delta_e, WithinAbs(0.0, 1e-2));
@@ -151,7 +151,7 @@ TEST_CASE("a barely-exposed boundary ring cannot skew the chosen colors", "[Slop
     const Lab target = rgb_to_lab(target_rgb);
 
     const double w = 0.45;
-    const PerimeterColorPlan plan = resolve_perimeter_colors(w * 1.02, w, 3, target, { 0, 1 }, mats);
+    const PerimeterColorPlan plan = resolve_perimeter_colors(w * 1.02, w, 3, target, { 0, 1 }, mats, 0.2);
     REQUIRE(plan.tool_per_perimeter.size() == 2);
     REQUIRE(plan.tool_per_perimeter[0] == 0);
     REQUIRE(plan.delta_e < 2.0); // sliver of blue barely moves the blend off pure red
@@ -165,7 +165,7 @@ TEST_CASE("visible ring count is capped by wall_loops", "[SlopePerimeterRecolor]
     const Lab target = rgb_to_lab(target_rgb);
 
     // d spans 5 ring widths but the object only prints 2 walls.
-    const PerimeterColorPlan plan = resolve_perimeter_colors(5.0 * 0.45, 0.45, 2, target, { 0, 1 }, mats);
+    const PerimeterColorPlan plan = resolve_perimeter_colors(5.0 * 0.45, 0.45, 2, target, { 0, 1 }, mats, 0.2);
     REQUIRE(plan.tool_per_perimeter.size() == 2);
 }
 
@@ -176,7 +176,7 @@ TEST_CASE("resolve_perimeter_colors falls back to tool 0 when candidate_tools is
     const float target_rgb[3] = { 0.3f, 0.3f, 0.3f };
     const Lab target = rgb_to_lab(target_rgb);
 
-    const PerimeterColorPlan plan = resolve_perimeter_colors(1.5 * 0.45, 0.45, 3, target, {}, mats);
+    const PerimeterColorPlan plan = resolve_perimeter_colors(1.5 * 0.45, 0.45, 3, target, {}, mats, 0.2);
     REQUIRE(plan.tool_per_perimeter.size() == 2);
     REQUIRE(plan.tool_per_perimeter[0] == 0);
     REQUIRE(plan.tool_per_perimeter[1] == 0);

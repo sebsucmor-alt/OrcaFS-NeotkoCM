@@ -73,6 +73,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour" aria-current="page">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -252,15 +253,15 @@
           real optics
         </span>
         &nbsp;· <code>t(d) = 10^(−d / TD_mm)</code>, with
-        <code>TD_mm = TD × layer height</code>. That conversion is the one everybody forgets.
+        TD in millimetres, as typed in the app since 2.4.9.
       </div>
     </div>
 
     <p>
-      The practical reading: at TD 0.5 the useful range is the first 0.06 mm or so, and a pass any
-      thicker than that is just a solid colour. At TD 4 the whole layer height is useful. Matte PLA
-      lives near the bottom of that scale, which is not a reason to avoid it and is a reason to keep
-      the passes that need to mix genuinely thin.
+      The practical reading: at TD 0.5 a 0.1 mm pass already hides more than a third of what is
+      below, and half a millimetre hides nine tenths. At TD 4 a 0.2 mm pass lets almost nine tenths
+      through, so it tints rather than covers. Matte PLA lives near the bottom of that scale, which
+      is not a reason to avoid it and is a reason to keep the passes that need to mix genuinely thin.
     </p>
 
     <!-- ================================================================= -->
@@ -521,7 +522,7 @@
         var b = el('button', {
           type: 'button', text: shortName(f),
           'aria-pressed': get() === i,
-          title: f.name + ' · TD ' + f.td.toFixed(1)
+          title: f.name + ' · TD ' + f.td.toFixed(2)
         });
         b.style.background = f.hex;
         b.style.color = Optics.inkOn(f.hex);
@@ -616,7 +617,7 @@
         if (!inUse) return;
         tdSlider.appendChild(Tour.slider({
           label: shortName(f) + ' TD',
-          min: 0.2, max: 8, step: 0.1, value: f.td,
+          min: 0.05, max: 2.5, step: 0.01, value: f.td,
           format: function (v) { return v.toFixed(1); },
           onInput: function (v) { f.td = v; redraw(); }
         }));
@@ -747,8 +748,8 @@
     var ctrls = el('div.mx__ctrls', null, [
       mmSlider,
       Tour.slider({
-        label: 'TD of every filament', min: 0.3, max: 6, step: 0.1, value: S.fils[0].td,
-        format: function (v) { return v.toFixed(1); },
+        label: 'TD of every filament', min: 0.05, max: 2.5, step: 0.01, value: S.fils[0].td,
+        format: function (v) { return v.toFixed(2); },
         onInput: function (v) { S.fils.forEach(function (f) { f.td = v; }); redraw(); }
       }),
       Tour.toggle({
@@ -794,10 +795,10 @@
   Tour.demo('td-ladder', function (host) {
     var el = Tour.el;
     var fils = spools();
-    var S = { top: 1, td: 1.0, layerH: LH_DEFAULT, bases: [0, 2, 3] };
+    var S = { top: 1, td: 0.3, layerH: LH_DEFAULT, bases: [0, 2, 3] };
     var tdSlider = Tour.slider({
-      label: 'its TD', min: 0.3, max: 8, step: 0.1, value: S.td,
-      format: function (v) { return v.toFixed(1); },
+      label: 'its TD', min: 0.05, max: 2.5, step: 0.01, value: S.td,
+      format: function (v) { return v.toFixed(2); },
       onInput: function (v) { S.td = v; redraw(); }
     });
     var THICK = [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16, 0.20];
@@ -1028,13 +1029,13 @@
           onInput: function (v) { S.floor = v; redraw(); }
         }),
         Tour.slider({
-          label: 'Ramp TD', min: 0.3, max: 8, step: 0.1, value: fils[S.ramp].td,
-          format: function (v) { return v.toFixed(1); },
+          label: 'Ramp TD', min: 0.05, max: 2.5, step: 0.01, value: fils[S.ramp].td,
+          format: function (v) { return v.toFixed(2); },
           onInput: function (v) { fils[S.ramp].td = v; redraw(); }
         }),
         Tour.slider({
-          label: 'Cap TD', min: 0.3, max: 8, step: 0.1, value: fils[S.cap].td,
-          format: function (v) { return v.toFixed(1); },
+          label: 'Cap TD', min: 0.05, max: 2.5, step: 0.01, value: fils[S.cap].td,
+          format: function (v) { return v.toFixed(2); },
           onInput: function (v) { fils[S.cap].td = v; redraw(); }
         }),
         Tour.slider({

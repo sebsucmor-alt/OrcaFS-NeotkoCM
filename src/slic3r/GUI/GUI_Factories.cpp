@@ -933,6 +933,38 @@ wxMenuItem* MenuFactory::append_menu_item_assemble_boolean(wxMenu* menu)
 // plate column, together with the new "Move selection as one block". See the note at their old
 // call site in create_object_menu() for why a context menu was the wrong home.
 
+// NEOTKO_PRINTORDER_TAG 2_49 — «Print order (Experimental)» submenu, LibreMode only. Temporary
+// home until the gizmo (docs/FUTURE/PRINT_ORDER_GIZMO_2_49.md). Same guard as the clipboard
+// items: the object menu is persistent, so it is appended once.
+void MenuFactory::append_menu_items_print_order(wxMenu* menu)
+{
+    auto* ac = wxGetApp().app_config;
+    if (!ac || !ac->get_bool("neotko_libre_mode"))
+        return;
+    const wxString title = _L("Print order (Experimental, handle with care)");
+    if (menu->FindItem(title) != wxNOT_FOUND)
+        return;
+
+    wxMenu* order_menu = new wxMenu();
+    for (int r = 1; r <= 9; ++r)
+        append_menu_item(order_menu, wxID_ANY, wxString::Format(_L("Print %d"), r), "",
+            [r](wxCommandEvent&) { plater()->set_print_order_rank(r); }, "", menu,
+            []() { return true; }, m_parent);
+    order_menu->AppendSeparator();
+    append_menu_item(order_menu, wxID_ANY, _L("Free (as Orca does)"), "",
+        [](wxCommandEvent&) { plater()->set_print_order_rank(0); }, "", menu,
+        []() { return true; }, m_parent);
+    append_menu_item(order_menu, wxID_ANY, _L("Set every object Free"), "",
+        [](wxCommandEvent&) { plater()->set_print_order_rank(0, true); }, "", menu,
+        []() { return true; }, m_parent);
+    append_submenu(menu, order_menu, wxID_ANY, title,
+                   _L("Experimental. In every layer the numbered objects print in that order,\n"
+                      "skipping the ones that have already finished. Free objects go after them,\n"
+                      "in Orca's usual nearest order. With several filaments each filament is\n"
+                      "printed whole, in this order, before the next one."),
+                   "", []() { return true; }, m_parent);
+}
+
 // NeotkoLIBRE — Copy/Paste Process Settings. "Copy Process Settings" submenu with one entry per
 // block (Speed / Quality / Strength) plus All, and a "Paste Process Settings" item. Appended once
 // (guarded) into the persistent object menu, only while LibreMode is active.
@@ -1917,6 +1949,7 @@ wxMenu* MenuFactory::object_menu()
     append_menu_item_change_filament(&m_object_menu);
     // NeotkoLIBRE — Copy/Paste Process Settings (by block / All)
     append_menu_items_process_clipboard(&m_object_menu);
+    append_menu_items_print_order(&m_object_menu); // NEOTKO_PRINTORDER_TAG 2_49
     // NEOTKO — high-level manual cache wipe (replaces the old "Refresh Part" side button)
     append_menu_item_remove_slice_cache(&m_object_menu);
     return &m_object_menu;
@@ -2032,6 +2065,7 @@ wxMenu* MenuFactory::multi_selection_menu()
     }
     // NeotkoLIBRE — Copy/Paste Process Settings across the selected objects
     append_menu_items_process_clipboard(menu);
+    append_menu_items_print_order(menu); // NEOTKO_PRINTORDER_TAG 2_49
     // NEOTKO — high-level manual cache wipe (replaces the old "Refresh Part" side button)
     append_menu_item_remove_slice_cache(menu);
     return menu;

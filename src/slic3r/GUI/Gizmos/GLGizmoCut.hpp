@@ -292,7 +292,7 @@ protected:
     void reset_cut_plane();
     void set_connectors_editing(bool connectors_editing);
     void flip_cut_plane();
-    void process_contours();
+    void process_contours(const char* caller = __builtin_FUNCTION()); // NEOTKO_PAINTCARRY_TAG probe: caller
     void reset_cut_by_contours();
     void render_flip_plane_button(bool disable_pred = false);
     void add_vertical_scaled_interval(float interval);

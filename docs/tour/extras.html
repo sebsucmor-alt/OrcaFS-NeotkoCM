@@ -36,6 +36,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour">Colour</a>
       <a href="index.html#output" aria-current="page">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -65,6 +66,61 @@
       Three unrelated things that did not deserve pages of their own: a G-code post-processor you
       edit as a chart, real kerning for embossed text, and one number that decides whether a bridge
       starts anchored or starts hanging.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="energy" data-short="★ Hotends switch off">Hotends that finished their work switch off <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.5</span></h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Sidebar</b><span class="sep">›</span><b>Bed and Nozzle Extras</b> (under Bed type), off by default
+    </p>
+
+    <p>
+      On a tool changer a hotend that has done its part stays hot until the print ends. Three tools
+      that finish in the first hour of a twenty hour job sit at temperature for the other nineteen,
+      cooking the filament parked inside them: that is where the scorched first centimetres after a
+      long idle come from. With this on, once the G-code shows a tool has no extrusion left, its
+      standby goes to 0 °C. A tool is only switched off when nothing later in the file uses it again,
+      so a print never waits for a reheat.
+    </p>
+
+    <p>
+      <b>Extra Energy Save</b>, the second checkbox, also switches a tool off <em>while it waits</em>,
+      between one use and the next. It costs no print time: Orca already preheats the next tool ahead
+      of the change and takes a cooldown back out when the tool returns too soon. On the U1 that leaves
+      eight seconds of margin, and <b>Preheat time</b> in Print settings widens it. It needs
+      <b>Ooze prevention</b> on; the dialog says so if your profile has it off.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Measured: Rick and Morty planters, 4 colours, 10.2 h</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>Tools switched off</td><td>860 times, 3 of them for good</td></tr>
+        <tr><td>T1 went cold with</td><td><b>5.5 h of printing still to go</b></td></tr>
+        <tr><td>Time added to the print</td><td>none</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p class="small">
+      These are settings of yours, not of a profile: they live with the application, survive profile
+      updates and never mark a preset as modified. The button says how many extras are on.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="spirallift" data-short="Spiral lift stays on the bed">Spiral lift no longer runs off the bed <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.5</span></h2>
+
+    <p>
+      A spiral lift climbs a small circle set one radius to the side, about 2.4 mm across on the U1
+      defaults. Near the bed edge part of that circle can fall outside the printable area, and the U1
+      halts on any move out of bounds. The check that straightens such a lift is upstream
+      OrcaSlicer's, carried back onto this base. What this fork adds is that it tells you: after a
+      slice you get nothing (no spiral lifts), a confirmation that all of them fit, or a count of how
+      many were straightened and the height of the first, so you can move the part in or lower the hop.
+      Signed off on four 27 cm towers, one per corner: 912 spiral lifts, none outside, the tightest
+      clearing the edge by 0.010 mm.
     </p>
 
     <!-- ================================================================= -->

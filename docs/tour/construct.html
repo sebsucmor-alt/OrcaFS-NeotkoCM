@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build &amp; fix — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Align &amp; Construct: place, extrude a face, booleans between objects or parts, and Remesh to repair, grow or hollow a model. The painting survives every one of them, and cuts too.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .gv { display: grid; grid-template-columns: minmax(0,1fr) 220px; gap: 1.1rem; align-items: start; }
+  @container demo (max-width: 680px) { .gv { grid-template-columns: 1fr; } }
+  .gv__grp {
+    border: 1px solid var(--rule); border-radius: 6px; background: var(--surface-2);
+    padding: .5rem .55rem; display: grid; gap: .45rem;
+  }
+  .gv__gt { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em;
+            text-transform: uppercase; color: var(--ink-faint); }
+  .gv__read { font-family: var(--mono); font-size: .72rem; line-height: 1.55; color: var(--ink-faint); }
+  .gv__read b { color: var(--ink); font-weight: 500; }
+  .gv__read .hit { color: var(--accent); }
+  .gv__read .air { color: var(--alert); }
+  /* Two screenshots side by side (Remesh), one under the other on a narrow screen. */
+  .twoup { display: grid; grid-template-columns: 1fr 1fr; }
+  .twoup img { height: 100%; object-fit: cover; }
+  .twoup img + img { border-left: 1px solid var(--rule); }
+  @media (max-width: 640px) { .twoup { grid-template-columns: 1fr; } .twoup img + img { border-left: 0; border-top: 1px solid var(--rule); } }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#build" aria-current="page">Build &amp; fix</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§7 — Build &amp; fix</p>
+    <h1>Align &amp; Construct: build, combine and repair</h1>
+    <p class="lede">
+      Place one thing exactly against another, grow a face into a new solid, join or carve two
+      objects, and rebuild a broken model from voxels, hollow or fatter. All of it inside the slicer,
+      without going back to a CAD program, and the painting survives every step.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--free">shipped</li>
+      <li class="badge badge--ver badge--plain">2.4.8 · Remesh 2.4.9</li>
+    </ul>
+
+    <h2 id="alignstack" data-short="The tool">The tool</h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Top toolbar</b><span class="sep">›</span><b>Align &amp; Construct</b>
+    </p>
+
+    <p>
+      Snap &amp; Drag is for placing by hand. Align &amp; Construct is for placing exactly, and since
+      2.4.8 it also builds: it extrudes a face into a new solid and runs booleans between two
+      objects, or between two parts of the same object. It used to be called Align &amp; Stack and
+      it used to need Libre Mode. It does not any more: everyone has it.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Job</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Place #2</b></td><td>Puts one object or part against another: next to it, on top, centred, or with an edge lined up.</td></tr>
+        <tr><td><b>Face of #1</b></td><td>Pick a flat face of #1 and drop #2 on it.</td></tr>
+        <tr><td><b>Extrude from the face</b></td><td>Turns any flat face into a new solid, grown or shrunk around its outline.</td></tr>
+        <tr><td><b>Boolean</b></td><td>Union, Difference or Intersection of #1 with #2, without assembling them first.</td></tr>
+        <tr><td><b>Remesh (voxels)</b></td><td>Rebuilds #1 as one closed solid: repairs it, grows or shrinks it, hollows it. The painting stays.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3 id="ac-pick" data-short="Picking">Picking #1 and #2, and parts</h3>
+
+    <p>
+      Click an object and it becomes <strong>#1</strong>, the one that stays. Click another and it
+      is <strong>#2</strong>, the one that moves. <b>Swap</b> trades them. In an assembled object the
+      first click takes the whole object; click it again and you get just the part under the mouse,
+      and the rest of the assembly turns see through so the part stands out. #1 and #2 can be two
+      parts of the same object. What you picked gets a layer of its colour: orange for #1, yellow
+      for #2.
+    </p>
+
+    <h3 id="ac-place" data-short="Place, with ghosts">Place, and see where it lands</h3>
+
+    <p>
+      The pad is the bed seen from above: four arrows that follow the bed axes (red is X, green is
+      Y) and a centre button. Three more buttons handle height: <b>On top</b>, <b>Centre in
+      height</b> and <b>To bed</b>. <b>Next to</b> leaves #2 beside #1, touching it; <b>Align
+      edge</b> lines up the edge on that side.
+    </p>
+
+    <p>
+      <strong>Hover any of those buttons and #2 shows up as a ghost where it would land</strong>,
+      with a dotted line to a target mark. The line and the mark keep their size on screen, so a
+      3 mm part reads as easily as a big one. Click, and it lands exactly there.
+    </p>
+
+    <figure>
+      <img src="../images/Align-Construct.gif" width="400" height="271" alt="Two cubes in Align &amp; Construct: hovering the arrows and the height buttons shows #2 as a ghost where it would land, then Union fuses both into one solid" loading="lazy">
+      <figcaption>Hover a button and #2 appears as a ghost where it would land. At the end, <b>Union</b> fuses both into one solid.</figcaption>
+    </figure>
+
+    <h3 id="ac-extrude" data-short="Extrude a face">Extrude from the face</h3>
+
+    <p>
+      Turn on <b>Pick a face</b> and click a flat face of #1. It lights up whole, holes included.
+      Any flat face works, at any angle, and the new solid grows straight out of it.
+    </p>
+
+    <ul>
+      <li><b>Face</b> extrudes the face as it is. <b>Holes</b> extrudes only its holes, filled: pick
+        the flat face around a screw hole and you get the plug of that hole.</li>
+      <li><b>Height</b> is how thick the new solid is, 5 mm to start. <b>Offset</b> grows its
+        outline, or shrinks it with a negative value.</li>
+      <li><b>Both directions</b> puts half the height out of the face and half into the model, so
+        the new solid passes through the face. Handy as a cutter for a boolean.</li>
+      <li><b>Part</b> keeps it inside the same object, in place. <b>Object</b> makes a separate one.
+        <b>Create</b> does it, and one undo removes it.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/Align-Construct-Extrude.gif" width="400" height="271" alt="Picking the top face of a part, which lights up whole, then Extrude from the face with a Height and a negative Offset, and the new solid sitting on that face" loading="lazy">
+      <figcaption>Pick the top face, set a Height and a negative Offset, and the new solid sits on that face.</figcaption>
+    </figure>
+
+    <p>
+      A real use: a 0.05 mm sheet of white over the stickers of a keyring, to soften very opaque
+      matte colours. It used to mean going back to the CAD program. Now it is a click on the top
+      face. The new solid is a plain mesh, so if you change the model afterwards, make it again.
+    </p>
+
+    <h3 id="ac-boolean" data-short="★ Boolean">Boolean: #1 with #2</h3>
+
+    <p>
+      <b>Union</b> joins them, <b>Difference</b> carves the shape of #2 out of #1, and
+      <b>Intersection</b> keeps only what they share. Two separate objects give a new object in the
+      same place; two parts of the same object give a part of that object, in place, so the
+      assembly stays together. With <b>Keep #1 and #2</b> off, the result replaces both. If they do
+      not overlap, or one is not a closed solid, it tells you and leaves the scene alone.
+    </p>
+
+    <div class="demo bleed" id="boolean-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">Union, Difference, Intersection, and who gives the colour</span>
+        <span class="demo__hint">drag #2, pick an operation</span>
+      </div>
+      <div class="demo__body" data-demo="boolean">
+        <noscript><p class="noscript">This demo needs JavaScript. Union joins the two shapes, Difference carves #2 out of #1 and Intersection keeps the overlap; the inside of the result takes the filament of #1.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A <b>diagram</b> in two dimensions. The real tool runs a mesh boolean on the 3D solids.
+        The colour rules are the ones the app follows: the painting of both stays, unpainted skin
+        keeps the filament of its own part, and the inside takes the filament of #1.
+      </div>
+    </div>
+
+    <p>
+      Since 2.4.8 the result <strong>keeps the painting</strong>, here and in the Mesh boolean tool
+      and in <b>Split › To Parts / To Objects</b>. Every stroke stays where it was (colour, fuzzy
+      skin, support and seam painting), and the skin you never painted keeps the filament of its own
+      part. <b>#1 gives the base filament</b>, the one that fills the inside: in a Union, pick the
+      big part as #1. In a Difference, the walls of the cut take the base filament.
+    </p>
+
+    <figure>
+      <img src="../images/Boolean-keeps-paint.png" width="1516" height="484" alt="Two painted cubes: before, a Union came out plain grey; now it keeps every stroke and the colour of each cube" loading="lazy">
+      <figcaption>Two painted cubes. Before 2.4.8 a Union came out plain grey; now it keeps every stroke and the colour of each cube.</figcaption>
+    </figure>
+
+    <p class="small">
+      On a big painted model it takes a few seconds, and a small window says <b>Keeping the
+      painting...</b> while it works. Measured: a 218k triangle sea slug with all its skin painted
+      merges in about 9 s and slices to the same G-code as the assembled one, 0.06 g apart.
+      ColorStitch recipes, Texture Bump zones and stickers do not carry over yet.
+    </p>
+
+    <h3 id="ac-hole" data-short="★ A looser hole">Example: a looser hole for a screw</h3>
+
+    <p>
+      A downloaded cabinet handle whose screw holes come out too tight. No CAD needed: extrude a
+      wider peg from the floor of the hole, then subtract it.
+    </p>
+
+    <ol>
+      <li>Open <b>Align &amp; Construct</b> and click the handle. It becomes #1.</li>
+      <li>Turn on <b>Pick a face</b> and click the floor of the hole. The rest of the model turns see
+        through, so you can see inside it.</li>
+      <li>In <b>Extrude from the face</b>, set <b>Height</b> 25 and <b>Offset</b> 1, keep
+        <b>Part</b> and press <b>Create</b>. A peg 1 mm wider all round appears inside the hole.</li>
+      <li>Click the handle again to take just its body as #1, then click the peg: #2. Press
+        <b>Difference</b>.</li>
+      <li>The handle comes back as one part with a wider hole, in its place.</li>
+    </ol>
+
+    <figure>
+      <img src="../images/Align-Construct-Hole-Example.jpg" width="2436" height="1464" alt="The cabinet handle example: picking the floor of the screw hole, extruding a wider peg, and the handle after Difference with a wider hole" loading="lazy">
+      <figcaption>The whole example: pick the floor of the hole, extrude a wider peg as a part, subtract it.</figcaption>
+    </figure>
+
+    <div class="demo bleed" id="hole-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">How much looser the hole gets</span>
+        <span class="demo__hint">move Offset and Height</span>
+      </div>
+      <div class="demo__body" data-demo="hole">
+        <noscript><p class="noscript">This demo needs JavaScript. The peg grows its outline by Offset on every side, so the hole after Difference is twice the Offset wider.</p></noscript>
+      </div>
+      <div class="demo__foot">
+        A section through the handle. The arithmetic is the tool's: the peg's outline is the hole's
+        outline grown by <b>Offset</b> on every side, and with <b>Both directions</b> half the Height
+        goes into the model. The handle's shape is drawn, not loaded.
+      </div>
+    </div>
+
+    <figure>
+      <img src="../images/Align-Construct-Hole-Example-Closeup.jpg" width="3356" height="1020" alt="Close up of the handle: the floor of the hole picked, the wider peg inside it, and the wider hole after Difference" loading="lazy">
+      <figcaption>Close up of the three steps on the real handle.</figcaption>
+    </figure>
+
+    <h3 id="ac-remesh" data-short="★ Remesh">Remesh: repair, offset and hollow, with the painting</h3>
+
+    <p>
+      Orca's <b>Fix model</b> only exists on Windows, and the websites that repair a 3MF throw the
+      painting away (and most of them charge for it). <b>Remesh</b> rebuilds #1 from voxels, tiny
+      cubes, as one closed solid. Holes, loose open shells and faces turned inside out are gone, and
+      with <b>Keep painting</b> on, the new mesh is painted like the old one. Every step happens on
+      the voxels, with no mesh boolean, so it copes with meshes that are badly broken.
+    </p>
+
+    <figure>
+      <img src="../images/Remesh-panel.webp" width="1830" height="1106" alt="The Remesh section of Align and Construct on a painted skull, in Draft, with the estimate of triangles and memory next to the voxel size" loading="lazy">
+      <figcaption>The panel on a painted skull. Next to the voxel size, a rough estimate of the triangles and memory, before you press anything.</figcaption>
+    </figure>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><b>Quality</b></td><td><b>Draft</b> 0.5 mm, <b>Normal</b> 0.2, <b>High</b> 0.1, <b>Extreme</b> 0.05, or any <b>Voxel</b> size from 0.02 to 2 mm. Smaller keeps more detail. Details thinner than one voxel are lost and sharp edges round off by half a voxel.</td></tr>
+        <tr><td><b>Offset</b></td><td>Moves the whole surface. Plus makes it fatter, so thin walls get printable; minus makes it thinner, room for a fit. 0 just repairs.</td></tr>
+        <tr><td><b>Hollow</b></td><td>Takes the inside away and leaves walls of <b>Wall</b> mm. <b>Smooth</b> fills the bumps of the inside, so it comes out like a bowl and not a copy of every tooth.</td></tr>
+        <tr><td><b>Open through the picked face</b></td><td><b>Face</b>: the flat face you picked, less one wall all round, so a rim stays. <b>Angle</b>: spreads from where you clicked to every connected bit of skin that faces less than the angle away from it, for curved skins (flat areas open wide, tight curves stop soon, a rough mesh gives an organic edge); the green on the model shows what it takes. <b>Circle</b>: a round hole of <b>Diameter</b> where you clicked, like a drain hole. Without a picked face the hollow stays closed inside, and the panel says so.</td></tr>
+        <tr><td><b>Fast smooth</b></td><td>Builds the inside on coarser voxels. It is smoothed anyway, so it looks the same, and a big Smooth takes seconds instead of minutes.</td></tr>
+        <tr><td><b>Keep painting</b></td><td>Paints the new mesh like #1: colour, fuzzy skin, support and seam painting.</td></tr>
+        <tr><td><b>Result</b></td><td><b>Replace</b> #1, a <b>New object</b> beside it, or <b>Neg. part</b> (below).</td></tr>
+        <tr><td><b>Advanced</b></td><td>Folded, the defaults work. <b>Max triangles</b> (the result is simplified down to this), <b>Adaptive</b> (bigger triangles where the surface is flat: at 0.1 a skull in Draft goes from 570k to 59k triangles and looks the same) and <b>Remove loose bits</b> (deletes tiny leftovers of hidden geometry, so Orca stops flagging the model).</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <figure>
+      <img src="../images/Remesh-keep-painting.webp" width="1824" height="1264" alt="The skull after Remesh in Draft: one closed solid, the yellow and blue painting of the eyes and nose kept" loading="lazy">
+      <figcaption>After Remesh in Draft with Keep painting: one closed solid, and the eyes and nose keep their colours.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="twoup">
+        <img src="../images/Remesh-closeup-draft.webp" width="1882" height="1528" alt="Close up of the teeth after Remesh in Draft: the voxel steps show" loading="lazy">
+        <img src="../images/Remesh-closeup-original.webp" width="1888" height="1508" alt="Close up of the teeth of the original mesh" loading="lazy">
+      </div>
+      <figcaption>Left, Draft (0.5 mm voxels); right, the original. A finer quality keeps the detail.</figcaption>
+    </figure>
+
+    <p>
+      <strong>A piggy bank out of anything, in two or three clicks.</strong> Pick a face, tick
+      <b>Hollow</b> and <b>Open through the picked face</b>, choose <b>Circle</b> and a <b>Diameter</b>,
+      and press Remesh. This skull came out hollow, with a 2 mm wall, a 40 mm round hole in the back
+      and its painting kept. Coins go in, and come out, through the same hole.
+    </p>
+
+    <figure>
+      <img src="../images/Remesh-circle-panel.webp" width="1834" height="896" alt="The Remesh panel with Hollow, Open through the picked face and Circle at 40 mm" loading="lazy">
+      <figcaption>Circle, 40 mm, in High, on the back of the skull.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/Remesh-circle-skull.webp" width="906" height="1002" style="max-width:460px" alt="The skull cut open: hollow inside, 2 mm wall, a round hole in the back and the painting kept" loading="lazy">
+      <figcaption>Hollowed with a 2 mm wall and opened at the back. The painting is still there.</figcaption>
+    </figure>
+
+    <p>
+      <strong>A real repair.</strong> This painted skull bowl came out of a boolean with an eyeball,
+      which lived hidden inside the model, poking through the wall. Remesh in <b>High</b>, Hollow
+      off, <b>Replace</b>: about 10 s of voxel work, and the painting carried over in a few seconds
+      more. The ball is gone; only a thin trace of it stays on the wall.
+    </p>
+
+    <figure>
+      <div class="twoup">
+        <img src="../images/Remesh-fix-before.webp" width="1270" height="1184" alt="Before: the painted bowl with an eyeball poking through the inside" loading="lazy">
+        <img src="../images/Remesh-fix-after.webp" width="1420" height="1454" alt="After Remesh in High: the surface rebuilt and the painting kept" loading="lazy">
+      </div>
+      <figcaption>Before and after Remesh in High, Adaptive 0.1, Replace, Keep painting.</figcaption>
+    </figure>
+
+    <p>
+      <strong>A bowl in one click.</strong> Pick the flat top of the skull with <b>Pick a face</b>,
+      turn on <b>Hollow</b>, and the skull becomes a bowl with a rim of one wall, still painted.
+    </p>
+
+    <figure>
+      <div class="twoup">
+        <img src="../images/Remesh-fast-smooth-on.webp" width="1648" height="1606" alt="The skull bowl in High with Wall 2 and Smooth 10, Fast smooth on" loading="lazy">
+        <img src="../images/Remesh-fast-smooth-off.webp" width="1702" height="1602" alt="The same bowl with Fast smooth off" loading="lazy">
+      </div>
+      <figcaption>High, Wall 2, Smooth 10. Left with <b>Fast smooth</b>, 16 s of voxel work; right without it, 121 s.</figcaption>
+    </figure>
+
+    <p>
+      <strong>Hollow without touching the model.</strong> With <b>Result › Neg. part</b> the inside,
+      opening included, becomes a negative part of #1's object, and the slicer takes it away layer by
+      layer. It takes about 2 s and works on any mesh, however broken. Move it, cut it, or delete it
+      to undo. Happy with it? The <b>Mesh boolean</b> tool (Difference) makes it final, and the
+      skull keeps its painting.
+    </p>
+
+    <figure>
+      <div class="twoup">
+        <img src="../images/Remesh-negpart-boolean.webp" width="1924" height="1858" alt="The Mesh boolean tool subtracting the negative part made by Remesh from the painted skull" loading="lazy">
+        <img src="../images/Remesh-negpart-result.webp" width="1870" height="1550" alt="The result: an open painted bowl" loading="lazy">
+      </div>
+      <figcaption>The negative part made final with the Mesh boolean tool, and the painted bowl it leaves.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/Remesh-sliced-paint.webp" width="1714" height="1224" alt="The remeshed skull sliced: the yellow and blue painting of the eyes in the preview" loading="lazy">
+      <figcaption>Sliced: the painting of the remeshed skull in the preview. The slicer has an easier time with one clean solid than with the original.</figcaption>
+    </figure>
+
+    <p class="small">
+      How long, on a painted skull of 850k triangles: Draft about 4 s, Normal with a hollow about
+      23 s, High with Smooth 10 about 24 s, painting included. While it works, a window lists every
+      step of the run, ticks the ones done and has <b>Cancel</b>, which stops within a few seconds.
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Changed from Align &amp; Stack</th><th>Now</th></tr></thead>
+      <tbody>
+        <tr><td>To bed</td><td>Drops #2 only. It used to drop every object you had picked.</td></tr>
+        <tr><td>Centre</td><td>Centres #2 on #1 in X and Y together.</td></tr>
+        <tr><td>On top</td><td>Leaves #1 where it is. The "#1 to bed first" checkbox is gone.</td></tr>
+        <tr><td>Libre Mode</td><td>Not needed. A whole object you lift up still drops to the bed without it, as everywhere else in Orca; a part moves inside its own object.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note note--good">
+      <span class="note__t">Meant to be used with Gravity</span>
+      <p style="margin:0">
+        Align &amp; Construct places the pieces exactly. <b>Gravity</b> is what then makes the
+        slicer treat the touching face honestly instead of as a false bridge.
+      </p>
+    </div>
+
+
+    <!-- ================================================================= -->
+    <h2 id="keeppaint" data-short="★ The painting survives">The painting survives every edit</h2>
+
+    <p>
+      Painting a model and then editing it used to throw the painting away. Now these keep every
+      stroke (colour, fuzzy skin, support and seam painting), and skin you never painted keeps the
+      filament of its own part:
+    </p>
+
+    <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Edit</th><th>Since</th><th>What happens to the painting</th></tr></thead>
+      <tbody>
+        <tr><td><b>Boolean</b> (here, Mesh boolean, Split)</td><td>2.4.8</td><td>Kept. The inside, and the walls of a cut, take the filament of #1.</td></tr>
+        <tr><td><b>Cut</b> (plane, connectors, dowels, tongue and groove, Cut to parts)</td><td>2.4.9</td><td>Kept on every piece. The new face comes out with the filament of the part. A painted skull of a million triangles cuts in under half a second of painting work.</td></tr>
+        <tr><td><b>Remesh</b></td><td>2.4.9</td><td>Painted again from the old mesh, in a few seconds.</td></tr>
+        <tr><td><b>Fix model</b> (Windows)</td><td>2.4.9</td><td>Kept. Not tested: the author only has a Mac.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p class="small">
+      ColorStitch recipes, Texture Bump zones and stickers do not carry over through a boolean yet.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="costs" data-short="The catch">The catch</h2>
+
+    <ul>
+      <li><strong>The new solids are plain meshes.</strong> Change the model afterwards and you make
+        them again.</li>
+      <li><strong>A boolean needs two closed solids that overlap.</strong> If not, it tells you and
+        leaves the scene alone. A broken mesh goes through Remesh first, or use <b>Neg. part</b>.</li>
+      <li><strong>Remesh loses what is thinner than a voxel</strong> and rounds sharp edges by half a
+        voxel. Pick a finer Quality for fine detail. <b>Extreme</b> on a big object takes minutes and
+        gigabytes of memory.</li>
+      <li><strong>A big Smooth only fills what is smaller than about twice its value.</strong> Large
+        shapes of the inside (eye sockets, the nose) stay, rounded. A Smooth larger than the model is
+        deep leaves nothing inside, and it tells you.</li>
+      <li><strong>Remesh paints the new mesh from the old one.</strong> In Draft, borders between
+        colours follow the bigger triangles and can look a little cracked; in the slice they come out
+        clean. Big offsets blur the painting.</li>
+      <li><strong>Circle drills straight in</strong> by its radius plus a wall. Where the model is
+        thinner than that, it can come out on the other side.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="place.html"><small>Previous</small><b>← Placing</b></a>
+      <a class="is-next" href="realcolor.html"><small>Next</small><b>RealColor →</b></a>
+    </nav>
+
+  </main>
+</div>
+</div>
+
+<footer class="foot">
+  <div class="foot__in">
+    <div>
+      <p><strong>Neotko</strong>, a pile of features living on top of Snapmaker Orca 2.4.0.</p>
+      <p class="small">This page covers <b>§7</b> of the
+        <a href="https://github.com/sebsucmor-alt/OrcaFS-NeotkoCM/blob/main/WIKI.md">written WIKI</a>.</p>
+    </div>
+    <div class="small">
+      <p><a href="../beginners.html">Beginners video series</a></p>
+      <p><a href="play.html">The Playground</a></p>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ===================================================================
+   boolean — Union / Difference / Intersection on two shapes, with the
+   colour rules of 2.4.8: painting stays, unpainted skin keeps its own
+   part's filament, the inside (and the cut walls) take #1's.
+   =================================================================== */
+Tour.demo('boolean', function (host) {
+  var el = Tour.el;
+  var F = Optics.DEFAULT_FILAMENTS;
+  var COL = { a: F[1].hex, b: F[3].hex, paint: F[2].hex };   // #1 blue, #2 yellow, a magenta stroke on #1
+  var S = { op: 'union', cx: 0.60, cy: 0.45 };
+  var R1 = { x0: 0.18, x1: 0.62, y0: 0.30, y1: 0.80 };       // #1, in box fractions
+  var RAD = 0.21;                                            // #2 radius, as a fraction of the height
+
+  function sdRect(x, y, W, H) {
+    var cx = (R1.x0 + R1.x1) / 2 * W, cy = (R1.y0 + R1.y1) / 2 * H;
+    var hx = (R1.x1 - R1.x0) / 2 * W, hy = (R1.y1 - R1.y0) / 2 * H;
+    var dx = Math.abs(x - cx) - hx, dy = Math.abs(y - cy) - hy;
+    var ox = Math.max(dx, 0), oy = Math.max(dy, 0);
+    return Math.sqrt(ox * ox + oy * oy) + Math.min(Math.max(dx, dy), 0);
+  }
+  function sdCirc(x, y, W, H) {
+    var dx = x - S.cx * W, dy = y - S.cy * H;
+    return Math.sqrt(dx * dx + dy * dy) - RAD * H;
+  }
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [el('span', { text: 'Section through the two solids' }), el('span', { 'data-bnote': true })]));
+  var cvHost = el('div'); box.appendChild(cvHost);
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    ctx.fillStyle = Tour.token('--surface'); ctx.fillRect(0, 0, w, h);
+    var cell = 3, wall = 7, inside = Optics.linearToCss(
+      Optics.hexToLinear(COL.a).map(function (c) { return c * 0.45 + 0.30; }));
+    var paintX0 = (R1.x0 + 0.04) * w, paintX1 = (R1.x0 + 0.22) * w;
+    for (var y = 0; y < h; y += cell) for (var x = 0; x < w; x += cell) {
+      var px = x + cell / 2, py = y + cell / 2;
+      var d1 = sdRect(px, py, w, h), d2 = sdCirc(px, py, w, h), d;
+      if (S.op === 'union') d = Math.min(d1, d2);
+      else if (S.op === 'difference') d = Math.max(d1, -d2);
+      else d = Math.max(d1, d2);
+      if (d > 0) continue;
+      var c = inside;
+      if (d > -wall) {
+        var from1 = Math.abs(d - d1) < 1e-6 && !(S.op === 'difference' && Math.abs(d + d2) < 1e-6 && -d2 >= d1);
+        if (S.op === 'difference') c = COL.a;                 // #1's own skin and the walls of the cut
+        else c = from1 ? COL.a : COL.b;
+        if (from1 && Math.abs(py - R1.y0 * h) < wall + 1 && px > paintX0 && px < paintX1) c = COL.paint;
+      }
+      ctx.fillStyle = c; ctx.fillRect(x, y, cell, cell);
+    }
+    // the inputs, dashed
+    ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.strokeStyle = Tour.token('--ink-faint');
+    ctx.strokeRect(R1.x0 * w, R1.y0 * h, (R1.x1 - R1.x0) * w, (R1.y1 - R1.y0) * h);
+    ctx.beginPath(); ctx.arc(S.cx * w, S.cy * h, RAD * h, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    ctx.font = '600 12px ' + Tour.token('--mono'); ctx.fillStyle = Tour.token('--ink');
+    ctx.fillText('#1', R1.x0 * w + 6, R1.y1 * h - 8);
+    ctx.fillText('#2', S.cx * w - 8, S.cy * h + 4);
+  }, { height: 240, cursor: 'move' });
+
+  Tour.draggable(cv.canvas, {
+    onDown: move, onMove: move
+  });
+  function move(p) {
+    S.cx = Math.max(0.08, Math.min(0.92, p.x / cv.width));
+    S.cy = Math.max(0.12, Math.min(0.88, p.y / cv.height));
+    update();
+  }
+
+  var read = el('p.gv__read', { style: 'margin:0' });
+  var seg = Tour.segmented({ label: 'Operation', value: S.op,
+    options: [['union', 'Union'], ['difference', 'Difference'], ['intersection', 'Intersection']],
+    onChange: function (v) { S.op = v; update(); } });
+
+  function sw(hex, t) { return '<span style="display:inline-block;width:.8em;height:.8em;border-radius:2px;vertical-align:-1px;background:' + hex + '"></span> ' + t; }
+  function update() {
+    cv.render();
+    var n = host.querySelector('[data-bnote]');
+    if (n) n.textContent = S.op;
+    var txt = {
+      union: 'Both become one solid. Each keeps its own skin colour.',
+      difference: '#2 is carved out of #1. The walls of the cut take #1’s filament.',
+      intersection: 'Only what both share is left. Skin from each side keeps its colour.'
+    }[S.op];
+    read.innerHTML = txt + '<br>' + sw(COL.a, 'inside and #1’s skin: filament of #1') + '<br>' +
+      (S.op === 'difference' ? '' : sw(COL.b, '#2’s skin: filament of #2') + '<br>') +
+      sw(COL.paint, 'a stroke painted on #1: stays');
+  }
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Boolean' }), seg]));
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Where the colour comes from' }), read]));
+  host.appendChild(el('div.gv', null, [box, side]));
+
+  var OPS = ['union', 'difference', 'intersection'], lastOp = -1;
+  Tour.attract({
+    host: host, period: 10500,
+    hint: 'playing · drag #2 to take over', idleHint: 'drag #2, pick an operation',
+    onFrame: function (k, phase) {
+      var a = phase * Math.PI * 2;
+      S.cx = 0.60 + Math.cos(a) * 0.08; S.cy = 0.52 + Math.sin(a) * 0.12;
+      var i = Math.min(2, Math.floor(phase * 3));
+      if (i !== lastOp) { lastOp = i; S.op = OPS[i];
+        seg.querySelectorAll('button').forEach(function (b, j) { b.setAttribute('aria-pressed', String(j === i)); }); }
+    },
+    render: update
+  });
+  update();
+});
+
+/* ===================================================================
+   hole — the cabinet handle example. Peg outline = hole outline grown
+   by Offset; Difference widens the hole wherever the peg reaches.
+   =================================================================== */
+Tour.demo('hole', function (host) {
+  var el = Tour.el;
+  var D = 4.0, DEPTH = 14, BODY_W = 22, BODY_H = 18;        // mm
+  var S = { off: 1.0, hgt: 25, both: false };
+
+  var box = el('div.vbox');
+  box.appendChild(el('div.vbox__hd', null, [el('span', { text: 'Section through the screw hole' }), el('span', { 'data-hnote': true })]));
+  var cvHost = el('div'); box.appendChild(cvHost);
+
+  function geom() {
+    var pegW = D + 2 * S.off;
+    var z0 = S.both ? -S.hgt / 2 : 0, z1 = S.both ? S.hgt / 2 : S.hgt;   // from the hole floor, up
+    return { pegW: pegW, z0: z0, z1: z1 };
+  }
+
+  var cv = Tour.canvas(cvHost, function (ctx, w, h) {
+    ctx.fillStyle = Tour.token('--surface'); ctx.fillRect(0, 0, w, h);
+    var g = geom();
+    var sc = Math.min((w * 0.46) / BODY_W, (h - 30) / (BODY_H + 8));
+    var ox = w * 0.27, floorY = h - 14 - (BODY_H - DEPTH) * sc;   // y of the hole floor
+    function X(mm) { return ox + mm * sc; }
+    function Y(z) { return floorY - z * sc; }
+    var body = Tour.token('--ink-faint');
+    // body, then the hole after Difference
+    ctx.fillStyle = Optics.DEFAULT_FILAMENTS[1].hex;
+    ctx.fillRect(X(-BODY_W / 2), Y(DEPTH), BODY_W * sc, BODY_H * sc);
+    ctx.fillStyle = Tour.token('--surface');
+    ctx.fillRect(X(-D / 2), Y(DEPTH), D * sc, DEPTH * sc);                 // the original hole
+    var cutLo = Math.max(g.z0, -(BODY_H - DEPTH)), cutHi = Math.min(g.z1, DEPTH);
+    if (g.pegW > D && cutHi > cutLo) {
+      ctx.fillStyle = Tour.token('--surface');
+      ctx.fillRect(X(-g.pegW / 2), Y(cutHi), g.pegW * sc, (cutHi - cutLo) * sc);
+    }
+    // the peg, dashed
+    ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = Optics.DEFAULT_FILAMENTS[3].hex;
+    ctx.strokeRect(X(-g.pegW / 2), Y(g.z1), g.pegW * sc, (g.z1 - g.z0) * sc);
+    ctx.setLineDash([]);
+    // the picked face
+    ctx.strokeStyle = '#e8803a'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(X(-D / 2), Y(0)); ctx.lineTo(X(D / 2), Y(0)); ctx.stroke();
+    // labels
+    ctx.font = '11px ' + Tour.token('--mono'); ctx.fillStyle = Tour.token('--ink');
+    ctx.fillText('picked face', X(BODY_W / 2) + 10, Y(0) + 4);
+    ctx.fillText('peg', X(g.pegW / 2) + 6, Y(Math.min(g.z1, DEPTH + 6)) + 12);
+    ctx.fillStyle = body;
+    ctx.fillText('handle', X(-BODY_W / 2) + 4, Y(-(BODY_H - DEPTH)) - 6);
+  }, { height: 260 });
+
+  var read = el('p.gv__read', { style: 'margin:0' });
+  var sOff = Tour.slider({ label: 'Offset', min: -1, max: 2, step: 0.1, value: S.off,
+    format: function (v) { return (v > 0 ? '+' : '') + v.toFixed(1) + ' mm'; },
+    onInput: function (v) { S.off = v; update(); } });
+  var sH = Tour.slider({ label: 'Height', min: 2, max: 30, step: 1, value: S.hgt,
+    format: function (v) { return v + ' mm'; }, onInput: function (v) { S.hgt = v; update(); } });
+  var tBoth = Tour.toggle({ label: 'Both directions', value: false, onChange: function (v) { S.both = v; update(); } });
+
+  function update() {
+    cv.render();
+    var g = geom(), n = host.querySelector('[data-hnote]');
+    var reach = Math.min(g.z1, DEPTH) - Math.max(g.z0, 0);
+    if (g.pegW <= D) {
+      read.innerHTML = 'peg <b>' + g.pegW.toFixed(1) + ' mm</b>, no wider than the hole.<br>' +
+        '<span class="air">Difference changes nothing.</span>';
+      if (n) n.textContent = 'no change';
+      return;
+    }
+    read.innerHTML = 'hole <b>' + D.toFixed(1) + '</b> → <b class="hit">' + g.pegW.toFixed(1) + ' mm</b>, ' +
+      (S.off).toFixed(1) + ' mm looser per side<br>' +
+      (reach >= DEPTH - 1e-6 ? 'the whole ' + DEPTH + ' mm of the hole is widened'
+        : 'only the bottom <b>' + Math.max(0, reach).toFixed(1) + ' mm</b> of the hole is widened') +
+      (g.z0 < 0 ? '<br><span class="air">' + (-g.z0).toFixed(1) + ' mm goes below the floor into the handle</span>' : '');
+    if (n) n.textContent = 'after Difference';
+  }
+
+  var side = el('div', { style: 'display:grid;gap:.6rem' });
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Extrude from the face' }), sOff, sH, tBoth]));
+  side.appendChild(el('div.gv__grp', null, [el('span.gv__gt', { text: 'Result' }), read]));
+  host.appendChild(el('div.gv', null, [box, side]));
+
+  Tour.attract({
+    host: host, period: 8000,
+    hint: 'playing · touch anything to take over', idleHint: 'move Offset and Height',
+    onFrame: function (k) { S.off = Math.round((-0.6 + k * 2.2) * 10) / 10; sOff.set(S.off); },
+    render: update
+  });
+  update();
+});
+
+</script>
+</body>
+</html>

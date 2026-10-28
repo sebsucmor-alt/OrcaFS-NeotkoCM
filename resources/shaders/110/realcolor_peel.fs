@@ -284,7 +284,12 @@ void main()
     }
 
     gl_FragData[0] = vec4(lit, 1.0);
-    gl_FragData[1] = vec4(float(u_tool_id), u_thickness, v_eye_z, 1.0); // a=1 marks "fragment written"
+    // NEOTKO_REALCOLOR_TAG s20oct (§7.4.1 b de docs/WIP/REALCOLOR_LESSONS_FROM_REALVIEW.md): grosor
+    // que la vista recorre de verdad, alto / |cos θ| con la normal y la vista, con tope ×3 para que
+    // los bordes rasantes no se vuelvan opacos. Solo el grosor de la cuenta del TD (meta.g); el
+    // sesgo del pelado sigue con u_thickness.
+    float rc_view_thickness = u_thickness / max(abs(dot(N, view_dir)), 1.0 / 3.0);
+    gl_FragData[1] = vec4(float(u_tool_id), rc_view_thickness, v_eye_z, 1.0); // a=1 marks "fragment written"
     // NEOTKO_REALCOLOR_TAG s166 (item 3): 3rd MRT target for SSAO in realcolor_present.fs —
     // packs the view-space normal [-1,1] -> [0,1], same convention as the 140/ variant.
     gl_FragData[2] = vec4(normalize(v_view_normal) * 0.5 + 0.5, 1.0);

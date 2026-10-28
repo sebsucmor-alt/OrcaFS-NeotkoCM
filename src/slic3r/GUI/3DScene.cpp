@@ -689,7 +689,10 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
         }
         // Red de seguridad: sin sub-mallas no habría NADA que dibujar y el objeto
         // desaparecería. Mejor caer al camino de siempre (un solo color).
-        cm_volume = !cmpaint_parts.empty();
+        // NEOTKO_SAFE_RENDER_TAG — y lo mismo si hay trozos pero ninguno llegó a la GPU (mallas
+        // sin inicializar en algún driver): antes se saltaba el dibujo normal y no salía nada.
+        cm_volume = std::any_of(cmpaint_parts.begin(), cmpaint_parts.end(),
+            [](const std::unique_ptr<CMPaintPart>& part) { return part && part->model.is_initialized(); });
     } while (0);
     // NEOTKO_PROFILE_TAG_END
 
@@ -811,8 +814,13 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
                     int extruder_id = model_volume->extruder_id();
                     if (extruder_id <= 0)
                         extruder_id = 1;
+                    // NEOTKO_SAFE_RENDER_TAG — a part assigned to a filament the colour list does not
+                    // have (a Mixed Filament, a shorter list) read past the end of the vector: garbage
+                    // colour, possibly fully transparent, so the unpainted part of the object vanished.
+                    if (extruder_id > int(extruder_colors.size()))
+                        extruder_id = 1;
                     // to make black not too hard too see
-                    ColorRGBA new_color = adjust_color_for_rendering(extruder_colors[extruder_id - 1]);
+                    ColorRGBA new_color = extruder_colors.empty() ? render_color : adjust_color_for_rendering(extruder_colors[extruder_id - 1]);
                     if (ban_light) {
                         new_color[3] = (255 - (extruder_id - 1)) / 255.0f;
                     }
@@ -829,7 +837,7 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
                         // shader->set_uniform("uniform_color", new_color);
                     } else {
                         // to make black not too hard too see
-                        ColorRGBA new_color = adjust_color_for_rendering(extruder_colors[0]);
+                        ColorRGBA new_color = extruder_colors.empty() ? render_color : adjust_color_for_rendering(extruder_colors[0]); // NEOTKO_SAFE_RENDER_TAG
                         if (ban_light) {
                             new_color[3] = (255 - 0) / 255.0f;
                         }

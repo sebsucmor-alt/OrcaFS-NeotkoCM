@@ -193,6 +193,10 @@ public:
     /// <param name="mouse_event">Keep information about mouse click</param>
     /// <returns>Return True when use the information and don't want to propagate it otherwise False.</returns>
     virtual bool on_mouse(const wxMouseEvent &mouse_event) { return false; }
+    // NEOTKO_PAINTERPRO_TAG — true while the gizmo needs the camera frozen (painter Lock view):
+    // the canvas then ignores trackpad gestures, the view cube and the view shortcuts too, which
+    // never pass through on_mouse().
+    virtual bool locks_camera() const { return false; }
     unsigned int get_sprite_id() const { return m_sprite_id; }
 
     int get_hover_id() const { return m_hover_id; }

@@ -323,6 +323,26 @@ static inline std::string colorstitch_profiles_b64_decode(const std::string& b64
 // (bug_xml_escape_per_part_metadata). Per sticker: n=name, s=b64(svg),
 // p=profile id, t=16 row-major doubles of the object-frame transform.
 static constexpr const char* COLORSTITCH_STICKERS_KEY = "colormix_stickers_b64";
+static constexpr const char* PAINT_DECALS_KEY = "neotko_paint_decals_b64"; // NEOTKO_SVGDECAL_TAG — F3
+static constexpr const char* PAINT_SYMMETRY_KEY = "neotko_paint_symmetry"; // NEOTKO_SVGDECAL_TAG — F5: "x y z", only when custom
+
+// 22-oct-2026 — receta por profundidad: [[tool, mm], ...] de abajo a arriba.
+static inline nlohmann::json depth_blocks_to_json(const std::vector<Slic3r::ColorStitchDepthBlock>& blocks)
+{
+    nlohmann::json a = nlohmann::json::array();
+    for (const Slic3r::ColorStitchDepthBlock& b : blocks)
+        a.push_back(nlohmann::json::array({ b.tool, b.mm }));
+    return a;
+}
+
+static inline void depth_blocks_from_json(const nlohmann::json& a, std::vector<Slic3r::ColorStitchDepthBlock>& blocks)
+{
+    blocks.clear();
+    if (!a.is_array()) return;
+    for (const auto& jb : a)
+        if (jb.is_array() && jb.size() == 2)
+            blocks.push_back({ jb[0].get<int>(), jb[1].get<float>() });
+}
 
 static inline std::string serialize_colorstitch_stickers(const std::vector<Slic3r::ColorStitchSticker>& stickers)
 {
@@ -345,15 +365,122 @@ static inline std::string serialize_colorstitch_stickers(const std::vector<Slic3
                 nlohmann::json jc = { { "rgb", col.rgb }, { "p", col.profile_id }, { "h", col.hidden ? 1 : 0 } };
                 if (!col.band_profiles.empty()) jc["b"] = col.band_profiles;   // s349: bandas del degradado
                 if (col.zone >= 0) jc["z"] = col.zone;                          // s350: zona del SVG
+                if (!col.depth_blocks.empty()) jc["d"] = depth_blocks_to_json(col.depth_blocks);   // receta por profundidad
+                if (col.depth_de >= 0.f) jc["de"] = col.depth_de;
                 c.push_back(std::move(jc));
             }
             j["c"]  = std::move(c);
             j["cm"] = st.color_mode;
         }
         if (st.hidden) j["h"] = 1;
+        // 22-oct-2026 — modo profundidad; omitido si está apagado (ficheros de antes, idénticos).
+        if (st.depth_mode) {
+            j["dm"] = 1;
+            j["dx"] = st.depth_max_mm;
+        }
+        if (!st.depth_blocks.empty()) j["d"] = depth_blocks_to_json(st.depth_blocks);
         arr.push_back(std::move(j));
     }
     return colorstitch_profiles_b64_encode(arr.dump());
+}
+
+// NEOTKO_SVGDECAL_TAG — F3: paint decals (struct PaintDecal) as b64 JSON, same pattern as the
+// Sandwich Stickers. Defaults are omitted to keep the metadata short.
+static inline std::string serialize_paint_decals(const std::vector<Slic3r::PaintDecal>& decals)
+{
+    if (decals.empty()) return std::string();
+    nlohmann::json arr = nlohmann::json::array();
+    for (const Slic3r::PaintDecal& d : decals) {
+        nlohmann::json j;
+        j["n"] = d.name;
+        j["s"] = colorstitch_profiles_b64_encode(d.svg_data);
+        j["c"] = { d.centre[0], d.centre[1], d.centre[2] };
+        j["d"] = { d.dir[0], d.dir[1], d.dir[2] };
+        j["u"] = { d.up[0], d.up[1], d.up[2] };
+        if (d.perspective) { j["p"] = 1; j["e"] = d.eye_dist; }
+        j["l"] = { d.lin[0], d.lin[1], d.lin[2], d.lin[3] };
+        j["o"] = { d.off[0], d.off[1] };
+        if (d.through) j["t"] = 1;
+        if (d.warp != Slic3r::PaintDecal().warp)
+            j["w"] = { d.warp[0], d.warp[1], d.warp[2], d.warp[3], d.warp[4], d.warp[5], d.warp[6], d.warp[7], d.warp[8] };
+        if (d.mirror != 0) j["m"] = d.mirror;
+        if (d.mirror_readable) j["mr"] = 1;
+        nlohmann::json zs = nlohmann::json::array();
+        for (const Slic3r::PaintDecalZone& z : d.zones) {
+            nlohmann::json jz = { { "z", z.zone }, { "rgb", z.rgb }, { "st", z.state } };
+            if (z.hidden) jz["h"] = 1;
+            zs.push_back(std::move(jz));
+        }
+        j["z"] = std::move(zs);
+        if (!d.parts.empty()) {
+            nlohmann::json ps = nlohmann::json::array();
+            for (const Slic3r::PaintDecalPart& p : d.parts) {
+                nlohmann::json jp = { { "i", p.shape }, { "st", p.state } };
+                if (p.hidden) jp["h"] = 1;
+                ps.push_back(std::move(jp));
+            }
+            j["pt"] = std::move(ps);
+        }
+        if (d.hidden) j["h"] = 1;
+        if (d.locked) j["k"] = 1;
+        arr.push_back(std::move(j));
+    }
+    return colorstitch_profiles_b64_encode(arr.dump());
+}
+
+static inline void parse_paint_decals(const std::string& b64, std::vector<Slic3r::PaintDecal>& decals)
+{
+    decals.clear();
+    const std::string json_str = colorstitch_profiles_b64_decode(b64);
+    if (json_str.empty()) return;
+    try {
+        const nlohmann::json arr = nlohmann::json::parse(json_str);
+        if (!arr.is_array()) return;
+        auto read = [](const nlohmann::json& j, const char* key, double* out, size_t n) {
+            if (j.contains(key) && j[key].is_array() && j[key].size() == n)
+                for (size_t i = 0; i < n; ++i) out[i] = j[key][i].get<double>();
+        };
+        for (const auto& j : arr) {
+            Slic3r::PaintDecal d;
+            d.name     = j.value("n", std::string());
+            d.svg_data = colorstitch_profiles_b64_decode(j.value("s", std::string()));
+            read(j, "c", d.centre.data(), 3);
+            read(j, "d", d.dir.data(), 3);
+            read(j, "u", d.up.data(), 3);
+            d.perspective = j.value("p", 0) != 0;
+            d.eye_dist    = j.value("e", 0.);
+            read(j, "l", d.lin.data(), 4);
+            read(j, "o", d.off.data(), 2);
+            d.through = j.value("t", 0) != 0;
+            read(j, "w", d.warp.data(), 9);
+            d.mirror = j.value("m", 0) & 7;
+            d.mirror_readable = j.value("mr", 0) != 0;
+            if (j.contains("z") && j["z"].is_array())
+                for (const auto& jz : j["z"]) {
+                    Slic3r::PaintDecalZone z;
+                    z.zone   = jz.value("z", -1);
+                    z.rgb    = jz.value("rgb", 0u);
+                    z.state  = jz.value("st", 1);
+                    z.hidden = jz.value("h", 0) != 0;
+                    d.zones.push_back(z);
+                }
+            if (j.contains("pt") && j["pt"].is_array())
+                for (const auto& jp : j["pt"]) {
+                    Slic3r::PaintDecalPart p;
+                    p.shape  = jp.value("i", -1);
+                    p.state  = jp.value("st", -1);
+                    p.hidden = jp.value("h", 0) != 0;
+                    if (p.shape >= 0)
+                        d.parts.push_back(p);
+                }
+            d.hidden = j.value("h", 0) != 0;
+            d.locked = j.value("k", 0) != 0;
+            if (!d.svg_data.empty())
+                decals.push_back(std::move(d));
+        }
+    } catch (const std::exception&) {
+        decals.clear();
+    }
 }
 
 static inline void parse_colorstitch_stickers(const std::string& b64, std::vector<Slic3r::ColorStitchSticker>& stickers)
@@ -384,10 +511,15 @@ static inline void parse_colorstitch_stickers(const std::string& b64, std::vecto
                     if (jc.contains("b") && jc["b"].is_array())   // s349
                         for (const auto& jb : jc["b"]) col.band_profiles.push_back(jb.get<int>());
                     col.zone       = jc.value("z", -1);   // s350
+                    if (jc.contains("d")) depth_blocks_from_json(jc["d"], col.depth_blocks);
+                    col.depth_de   = jc.value("de", -1.f);
                     st.colors.push_back(col);
                 }
             st.color_mode = j.value("cm", 0);
             st.hidden     = j.value("h", 0) != 0;
+            st.depth_mode   = j.value("dm", 0) != 0;
+            st.depth_max_mm = j.value("dx", 5.f);
+            if (j.contains("d")) depth_blocks_from_json(j["d"], st.depth_blocks);
             if (!st.svg_data.empty())
                 stickers.push_back(std::move(st));
         }
@@ -403,6 +535,8 @@ static inline void parse_colorstitch_stickers(const std::string& b64, std::vecto
 // pre-Fase-4.2 default) so projects that never touch the new plane controls keep byte-identical
 // 3mf output.
 static constexpr const char* TEXTURE_BUMP_PLANE_TRANSFORM_KEY = "texture_bump_plane_transform_b64";
+// NEOTKO_PRINTORDER_TAG 2_49 — ModelObject::neotko_print_rank, written only when > 0.
+static constexpr const char* NEOTKO_PRINT_RANK_KEY = "neotko_print_rank";
 
 static inline std::string serialize_texture_bump_plane_transform(const Slic3r::Transform3d& transform)
 {
@@ -2297,8 +2431,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         model_object->module_name = metadata.value;
                     else if (metadata.key == COLORSTITCH_STICKERS_KEY) // NEOTKO_STICKER_TAG
                         parse_colorstitch_stickers(metadata.value, model_object->colorstitch_stickers);
+                    else if (metadata.key == PAINT_DECALS_KEY) // NEOTKO_SVGDECAL_TAG — F3
+                        parse_paint_decals(metadata.value, model_object->paint_decals);
+                    else if (metadata.key == PAINT_SYMMETRY_KEY) { // NEOTKO_SVGDECAL_TAG — F5
+                        std::istringstream in(metadata.value);
+                        Slic3r::PaintSymmetry sym;
+                        if (in >> sym.centre[0] >> sym.centre[1] >> sym.centre[2]) {
+                            // F5b: "x y z custom brush"; the first files had only the custom centre.
+                            int custom = 1, brush = 0;
+                            if (in >> custom)
+                                in >> brush;
+                            sym.custom_centre = custom != 0;
+                            sym.brush         = brush & 7;
+                            model_object->paint_symmetry = sym;
+                        }
+                    }
                     else if (metadata.key == TEXTURE_BUMP_PLANE_TRANSFORM_KEY) // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2
                         model_object->texture_bump_plane_transform = parse_texture_bump_plane_transform(metadata.value);
+                    else if (metadata.key == NEOTKO_PRINT_RANK_KEY) // NEOTKO_PRINTORDER_TAG 2_49
+                        model_object->neotko_print_rank = std::max(0, std::atoi(metadata.value.c_str()));
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -5159,6 +5310,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     parse_colorstitch_slot_table(metadata.value, volume->colorstitch_slot_to_profile_id);
                 else if (metadata.key == TEXTUREBUMP_SLOT_TABLE_KEY) // NEOTKO_TEXTUREBUMP_TAG
                     parse_colorstitch_slot_table(metadata.value, volume->texture_bump_slot_to_zone_id);
+                else if (metadata.key == NEOTKO_PRINT_RANK_KEY) // NEOTKO_PRINTORDER_TAG 2_49 — part number
+                    volume->neotko_print_rank = std::max(0, std::atoi(metadata.value.c_str()));
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -5324,6 +5477,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     parse_colorstitch_slot_table(metadata.value, volume->colorstitch_slot_to_profile_id);
                 else if (metadata.key == TEXTUREBUMP_SLOT_TABLE_KEY) // NEOTKO_TEXTUREBUMP_TAG
                     parse_colorstitch_slot_table(metadata.value, volume->texture_bump_slot_to_zone_id);
+                else if (metadata.key == NEOTKO_PRINT_RANK_KEY) // NEOTKO_PRINTORDER_TAG 2_49 — part number
+                    volume->neotko_print_rank = std::max(0, std::atoi(metadata.value.c_str()));
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -7912,6 +8067,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << COLORSTITCH_STICKERS_KEY
                                << "\" " << VALUE_ATTR << "=\"" << stickers_b64 << "\"/>\n";
                 }
+                // NEOTKO_SVGDECAL_TAG — F3: the paint decals (b64 JSON), omitted when there are none.
+                {
+                    const std::string decals_b64 = serialize_paint_decals(obj->paint_decals);
+                    if (!decals_b64.empty())
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PAINT_DECALS_KEY
+                               << "\" " << VALUE_ATTR << "=\"" << decals_b64 << "\"/>\n";
+                    if (obj->paint_symmetry.custom_centre || obj->paint_symmetry.brush != 0) {
+                        std::ostringstream c;
+                        c.precision(10);
+                        c << obj->paint_symmetry.centre[0] << ' ' << obj->paint_symmetry.centre[1] << ' ' << obj->paint_symmetry.centre[2]
+                          << ' ' << (obj->paint_symmetry.custom_centre ? 1 : 0) << ' ' << obj->paint_symmetry.brush;
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PAINT_SYMMETRY_KEY
+                               << "\" " << VALUE_ATTR << "=\"" << c.str() << "\"/>\n";
+                    }
+                }
 
                 // NEOTKO_TEXTUREBUMP_TAG — Fase 4.2: persist the base projection-plane transform
                 // (b64 JSON, omitted entirely when Identity so untouched projects stay byte-identical).
@@ -7921,6 +8091,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << TEXTURE_BUMP_PLANE_TRANSFORM_KEY
                                << "\" " << VALUE_ATTR << "=\"" << plane_transform_b64 << "\"/>\n";
                 }
+
+                // NEOTKO_PRINTORDER_TAG 2_49 — Print order number (omitted when Free, so untouched
+                // projects stay byte-identical).
+                if (obj->neotko_print_rank > 0)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NEOTKO_PRINT_RANK_KEY
+                           << "\" " << VALUE_ATTR << "=\"" << obj->neotko_print_rank << "\"/>\n";
 
                 // stores object's config data
                 for (const std::string& key : obj->config.keys()) {
@@ -8010,6 +8186,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                            << TEXTUREBUMP_SLOT_TABLE_KEY << "\" " << VALUE_ATTR << "=\""
                                            << tb_slot_csv << "\"/>\n";
                             }
+
+                            // NEOTKO_PRINTORDER_TAG 2_49 — part number inside its object (omitted when Free)
+                            if (volume->neotko_print_rank > 0)
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NEOTKO_PRINT_RANK_KEY
+                                       << "\" " << VALUE_ATTR << "=\"" << volume->neotko_print_rank << "\"/>\n";
 
                             if (const std::optional<EmbossShape> &es = volume->emboss_shape;
                                 es.has_value())

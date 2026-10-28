@@ -261,6 +261,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour" aria-current="page">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -815,6 +816,173 @@
       <li><strong>Bottom on the bed face:</strong> the wipe tower plans the first tool change in the wrong
         place (the print does it at the start). The part prints fine; it is on the list for the tower.</li>
       <li>Sliced and checked in the G-code; not yet proven over many prints.</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="shapemask" data-short="Shape mask">Shape mask, with curves <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.9</span></h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Painter</b><span class="sep">›</span><b>Pro Mode</b><span class="sep">›</span><b>Shape mask</b>
+    </p>
+
+    <p>
+      Draw a shape on the part and paint exactly what is inside it, with smooth curves instead of
+      straight segments. It replaces the old Polygon mask.
+    </p>
+
+    <ul>
+      <li><b>Click</b> places a corner point. <b>Click and drag</b> places a curved one and pulls out
+        its handles, as in a vector drawing program.</li>
+      <li>Click the first point to close the shape. It does not paint yet: it stays on screen, filled
+        with the colour of the selected filament, so you can still move points and handles, or click on
+        the outline to add a point. <b>Alt + click</b> turns a point from corner to curve and back;
+        <b>Alt + drag</b> moves one handle on its own.</li>
+      <li><b>Apply</b> paints it, <b>Erase</b> removes the paint inside, <b>Cancel</b> (or a right
+        click) drops it. Each Apply is one undo.</li>
+      <li><b>Keep shape after Apply</b> leaves it on screen, to paint the same shape again with another
+        filament, or nudge it and paint again.</li>
+      <li><b>Lock view</b> (on by default) freezes the camera while you draw. The shape lives on the
+        screen, so moving the camera would make it miss the part.</li>
+    </ul>
+
+    <p>
+      The Rectangle and Shape masks also stopped painting through the part: only what you can see gets
+      painted, not the inside of a hole or a wall hidden behind another bit of the model.
+    </p>
+
+    <figure>
+      <img src="../images/Painter-Shape-mask-curves.webp" width="2000" height="1335" alt="Shape mask on a Godzilla foot: a curved shape with its handles, closed and ready to Apply" loading="lazy">
+      <figcaption>A curved shape on a Godzilla foot, closed and ready to Apply.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/Painter-Shape-mask-sliced.png" width="564" height="446" alt="The same foot sliced: two colours painted with one shape" loading="lazy">
+      <figcaption>Sliced: two colours from one shape, the second with <b>Keep shape after Apply</b>.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="vector" data-short="Vector &amp; SVG decals">Vector mode and SVG decals <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.4.9</span></h2>
+
+    <p class="where">
+      <span class="where__label">Where</span>
+      <b>Multi-material painting</b><span class="sep">›</span><b>Brush</b> (B) / <b>Vector</b> (V)
+    </p>
+
+    <p>
+      The multi-material painting tool has two modes at the top of its panel. <b>Brush</b> is the
+      painter you know. <b>Vector</b> is for shapes and SVG files, placed and painted in one go. These
+      are painted strokes, like the brush: they print as the filament each colour picks. Stickers above
+      are a different thing, recipes resolved at slice time.
+    </p>
+
+    <h3 id="vector-svg">Load an SVG and paint it in its own colours</h3>
+    <ul>
+      <li><b>Load SVG...</b> reads the file with the same engine as the Stickers. Every colour of the
+        SVG gets its own row, and each row picks the filament (or Mixed Filament) it paints with. The eye
+        on a row leaves that colour out, so what is under it stays as it was.</li>
+      <li>Drag inside its frame to move it; <b>Scale</b> and <b>Rotate</b>, and <b>Width</b> and
+        <b>Height</b> to stretch it along one side only. <b>Deform corners</b> gives four handles to bend
+        it in perspective, like a sticker pressed on a slanted face. Straight lines stay straight.</li>
+      <li>Small SVGs keep smooth curves when you enlarge them a lot: the curves are cut finer the smaller
+        the drawing is.</li>
+      <li>It is fast: a multicolour SVG on a model of a million triangles applies in under a second.</li>
+      <li><b>Pick parts</b>, then click a piece of the SVG to select it (Shift + click adds or removes).
+        The <b>Selected</b> row gives those pieces their own filament, or switches them off so what the
+        SVG has under them shows through. The <b>Part list</b> shows them all.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/painter-249-svg-colour-off.png" width="1268" height="750" alt="A BIG 1 sticker SVG on screen over a painted skull, with its black colour row switched off so the dark background of the sticker is gone, one part outlined in orange, and the panel showing Parts: 10 with Pick parts on" loading="lazy">
+      <figcaption><b>A whole colour off.</b> The black row has its eye off, so every black piece of the SVG goes and the model shows through.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/painter-249-svg-parts-off.png" width="1276" height="752" alt="The same sticker with black back on and three yellow stripes behind the 1 selected in orange and switched off, so the dark background shows where they were, while the yellow strip at the bottom stays; the panel reads Selected: 3" loading="lazy">
+      <figcaption><b>Only some pieces off.</b> Shift + click picked the three stripes behind the 1 and their eye is off. The yellow strip at the bottom has the same colour and stays, because it is a different part.</figcaption>
+    </figure>
+
+    <h3 id="vector-decals">Decals: the SVG stays where you put it</h3>
+    <ul>
+      <li><b>Pin to view</b> keeps the SVG as a <b>decal</b> of the object, seen from that camera. It is
+        saved in the 3MF and follows the object when you move it.</li>
+      <li>Every decal is a row in the <b>Decals</b> list: show, hide, lock, reorder, and <b>Apply</b>,
+        <b>Erase</b>, <b>Edit</b> or <b>Delete</b>. <b>Apply all</b> paints them in order, the lower ones
+        on top.</li>
+      <li><b>Projection</b>: <b>Perspective</b> projects from the eye you pinned it from; <b>Parallel</b>
+        keeps the same size at any depth. <b>Depth</b>: <b>First surface</b> paints only what the rays meet
+        first; <b>Through</b> paints every surface they cross, the back of the object included.</li>
+      <li><b>On surface</b> shows every decal laid on the model, exactly where it will paint. Off, they
+        float around the object as cards.</li>
+      <li><b>Move on object</b>: drag on the model and the decal slides over it, wrapping round. The mouse
+        wheel turns it, Shift + wheel scales it.</li>
+      <li><b>Mirror</b> <b>Left/Right</b>, <b>Front/Back</b>, <b>Top/Bottom</b> paints mirrored copies
+        through the centre of the object (two of them give three copies). <b>Keep readable</b> places the
+        copies without flipping them, for text and logos. <b>Mirror centre › Pick on object</b> sets
+        where the planes cross.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/Decals-clown-preview.webp" width="1972" height="960" alt="Three decals on a head with On surface on: two clown SVGs and a sticker, each outlined in blue, in the Decals list" loading="lazy">
+      <figcaption><b>On surface.</b> Three decals laid on the head, exactly where they will paint, before anything is applied.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/Decals-clown-applied.webp" width="1886" height="928" alt="The same three decals applied: a clown face painted in four filaments" loading="lazy">
+      <figcaption><b>Apply all.</b> Painted in list order, the lower decals on top.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/Decals-henna-mirror.webp" width="2000" height="1163" alt="Mirror Left/Right on: one ornament SVG on top of a skull and its mirrored copy shown in blue on the other side, with the panel" loading="lazy">
+      <figcaption><b>Mirror Left/Right.</b> One ornament placed; its copy shows on the other side before you apply.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="../images/Decals-henna-result.webp" width="1532" height="1042" style="max-width:560px" alt="The ornament painted twice, mirrored, on top of the skull" loading="lazy">
+      <figcaption>One decal, two ornaments.</figcaption>
+    </figure>
+
+    <h3 id="vector-draw">Draw your own shapes</h3>
+    <p>
+      <b>Draw shape</b>, right under Brush and Vector, then click on the part: the same curved Shape
+      mask as in Pro Mode. <b>Close shape</b> and <b>Apply</b> it, or <b>Save as decal</b> to keep it like
+      an SVG. A saved shape keeps its points: <b>Edit</b> it, then <b>Edit points</b> to move them again.
+      In Brush mode, <b>Show decals</b> keeps them on screen as a reference while you paint by hand.
+    </p>
+
+    <h3 id="vector-mirrorbrush">Mirror brush</h3>
+    <p>
+      In <b>Brush</b> mode, <b>Mirror brush</b> with <b>Left/Right</b>, <b>Front/Back</b> or
+      <b>Top/Bottom</b> paints every stroke again on the mirrored side, through the same orange centre as
+      the decal mirrors. Dashed rings show where the copies land while you move. Where the model is not
+      symmetric and has nothing on the other side, that copy is skipped. It works with the Circle and
+      Sphere brushes.
+    </p>
+    <figure>
+      <img src="../images/painter-249-mirror-brush.gif" width="400" height="238" alt="A skull being painted with the brush and Mirror brush Left/Right on: a blue stroke in one eye socket is painted at the same time in the other one" loading="lazy">
+      <figcaption><b>Mirror brush, Left/Right.</b> One stroke in the left eye paints the right eye too.</figcaption>
+    </figure>
+
+    <p class="small">Screenshots of decals on the model are coming. Not tested on Windows.</p>
+
+    <!-- ================================================================= -->
+    <h2 id="keeppaint" data-short="Painting survives edits">The painting survives cuts, booleans and repairs</h2>
+
+    <p>
+      Painting a model and then editing it used to throw the painting away. Since 2.4.8 the booleans
+      and Split keep it, and since 2.4.9 so do these:
+    </p>
+
+    <ul>
+      <li><strong>Cut</strong> (plane, connectors, dowels, tongue and groove, Cut to parts). Every piece
+        keeps its colour, fuzzy skin, support and seam painting; the new face of the cut comes out with
+        the filament of the part. A painted skull of a million triangles cuts in under half a second of
+        painting work, because everything the plane does not touch is copied as it is.</li>
+      <li><strong>Remesh</strong> in <a href="construct.html#ac-remesh">Align &amp; Construct</a>, which
+        rebuilds a broken model from voxels, hollows it or grows it, and paints the new mesh like the
+        old one.</li>
+      <li><strong>Fix model</strong> on Windows (also the one offered right after a cut). Not tested: the
+        author only has a Mac.</li>
     </ul>
 
     <!-- ================================================================= -->

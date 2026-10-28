@@ -16,6 +16,13 @@ uniform sampler2D u_prev_accum_transmit;
 uniform float u_material_td[16];      // scalar TD per tool, broadcast per RGB channel
 uniform bool  u_beer_lambert;        // false = M3 flat-alpha debug mode (peel-order validation)
 uniform float u_flat_alpha;          // only used when u_beer_lambert == false
+// NEOTKO_REALCOLOR_TAG s20oct (docs/WIP/REALCOLOR_LESSONS_FROM_REALVIEW.md §7.3, el modelo de RealView):
+// u_material_rgb = el color del filamento (sRGB, el mismo array que realcolor_peel.fs), para el TD
+// CON COLOR; u_diffusion = 1 la luz que se queda en el cordón según el TD (quita fantasmas), 0 = sin;
+// u_last_pass = esta es la última pasada del presupuesto: lo que aún pasa se lo lleva este cordón.
+uniform vec3  u_material_rgb[16];
+uniform float u_diffusion;
+uniform bool  u_last_pass;
 
 in vec2 uv;
 layout(location = 0) out vec4 out_accum_color;
@@ -49,11 +56,25 @@ void main()
         if (td_idx < 0)  td_idx = 0;
         if (td_idx > 15) td_idx = 15;
         float td = u_material_td[td_idx];
-        float tt = (td < 1e-6) ? 0.0 : pow(0.1, thickness / max(td, 1e-6));
-        vec3 t = vec3(tt);
         vec3 layer_lin = vec3(srgb_to_linear(layer_srgb.r), srgb_to_linear(layer_srgb.g), srgb_to_linear(layer_srgb.b));
-        out_accum_color = vec4(prevC + T * (1.0 - t) * layer_lin, 1.0);
-        out_accum_transmit = vec4(T * t, 1.0);
+        // §7.3: TD con color. Cada canal se apaga según lo que el filamento NO refleja (un amarillo
+        // se come el azul), y la media de los tres sigue cumpliendo el TD. Con td 0 = opaco.
+        vec3 alb = u_material_rgb[td_idx];
+        alb = vec3(srgb_to_linear(alb.r), srgb_to_linear(alb.g), srgb_to_linear(alb.b));
+        vec3 k = -log(max(alb, vec3(0.02))) + vec3(0.05);
+        vec3 w = vec3(0.15) + 0.85 * k / ((k.r + k.g + k.b) / 3.0);
+        vec3 t = (td < 1e-6) ? vec3(0.0) : pow(vec3(0.1), w * (thickness / max(td, 1e-6)));
+        // §7.3: difusión según el TD (entera hasta ~1,5 mm, mínimo 0,12): parte de la luz que iba a
+        // pasar se queda en el cordón y sale con su color.
+        float D = u_diffusion * max(clamp((4.5 - td) / 3.0, 0.0, 1.0), 0.12);
+        float esparce = 1.0 - exp(-thickness * D * 5.0);
+        vec3 aporta = esparce + (1.0 - esparce) * (1.0 - t);
+        vec3 deja = (1.0 - esparce) * t;
+        // §7.4.2: en la última pasada del presupuesto, si aún tocamos plástico, lo que sigue pasando
+        // no puede ver el fondo: se lo lleva este cordón (sin esto la pieza gruesa se transparenta).
+        if (u_last_pass) { aporta += deja; deja = vec3(0.0); }
+        out_accum_color = vec4(prevC + T * aporta * layer_lin, 1.0);
+        out_accum_transmit = vec4(T * deja, 1.0);
     } else {
         // M3 debug mode: flat non-physical alpha blend to validate peel order/geometry only.
         float a = clamp(u_flat_alpha, 0.0, 1.0);

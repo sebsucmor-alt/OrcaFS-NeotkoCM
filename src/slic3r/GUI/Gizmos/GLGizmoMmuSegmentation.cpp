@@ -19,6 +19,7 @@
 
 
 #include <GL/glew.h>
+#include <wx/filedlg.h>
 #include <algorithm>
 #include <boost/log/trivial.hpp>
 
@@ -296,6 +297,15 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
     render_cursor();
 
     glsafe(::glDisable(GL_BLEND));
+    // NEOTKO_SAFE_RENDER_TAG — leave the GL state as the canvas expects it after the gizmo's
+    // frame, whatever a preview, a mask overlay or an early return in between changed. The
+    // canvas keeps drawing after this call (and after the gizmo closes) assuming these values.
+    glsafe(::glFrontFace(GL_CCW));
+    glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+    glsafe(::glPolygonOffset(0.0f, 0.0f));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glLineWidth(1.0f));
 }
 
 // NEOTKO_PROFILE_TAG_START — s235 F5b, ver la nota del .hpp.
@@ -546,6 +556,13 @@ bool GLGizmoMmuSegmentation::on_number_key_down(int number)
 }
 
 bool GLGizmoMmuSegmentation::on_key_down_select_tool_type(int keyCode) {
+    // NEOTKO_SVGDECAL_TAG — B / V switch the panel mode; a brush tool key also goes to Brush.
+    if (keyCode == 'B' || keyCode == 'V') {
+        set_paint_mode(keyCode == 'B' ? PaintMode::Brush : PaintMode::Vector);
+        return true;
+    }
+    if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G')
+        set_paint_mode(PaintMode::Brush);
     switch (keyCode)
     {
     case 'F':
@@ -675,6 +692,13 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     const float approx_height = m_imgui->scaled(22.0f);
     y = std::min(y, bottom_limit - approx_height);
+    // NEOTKO_SVGDECAL_TAG — the panel sits against the right edge of the 3D view instead of under
+    // its toolbar icon, where it covered the middle of the model; it grows down to bottom_limit at
+    // most and scrolls beyond that. The width is last frame's (0 on the very first frame).
+    if (last_input_window_width > 1.f)
+        x = std::max(0.f, float(m_parent.get_canvas_size().get_width()) - last_input_window_width - m_imgui->scaled(0.5f));
+    // Width capped too (the painter panel once grew frame after frame until it covered the 3D view).
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0.f, 0.f), ImVec2(m_imgui->scaled(34.f), std::max(approx_height, bottom_limit - y)));
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always);
 
     wchar_t old_tool = m_current_tool;
@@ -907,6 +931,63 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.1));
     }
 
+    // NEOTKO_SVGDECAL_TAG — Brush | Vector. Same filaments for both; each mode shows only its own tools.
+    {
+        auto mode_button = [this](const wxString &label, PaintMode mode, const wxString &tip) {
+            const bool on = m_paint_mode == mode;
+            if (on) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.f, 0.59f, 0.53f, 0.35f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.45f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.f, 0.59f, 0.53f, 0.55f));
+                ImGui::PushStyleColor(ImGuiCol_Border,        ImGuiWrapper::COL_ORCA);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            }
+            if (m_imgui->button(label))
+                set_paint_mode(mode);
+            if (on) {
+                ImGui::PopStyleVar(1);
+                ImGui::PopStyleColor(4);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", into_u8(tip).c_str());
+        };
+        mode_button(_L("Brush"), PaintMode::Brush, _L("Paint by hand: brushes, fill, height range.\nKey: B"));
+        ImGui::SameLine();
+        mode_button(_L("Vector"), PaintMode::Vector, _L("Shapes and SVG decals, applied in one go.\nKey: V"));
+        // Vector mode: a shape starts only from here, so a plain drag keeps orbiting the camera.
+        if (m_paint_mode == PaintMode::Vector) {
+            const bool armed = m_shape_draw_armed || !m_shape_nodes.empty();
+            if (armed) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.59f, 0.53f, 0.35f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImGuiWrapper::COL_ORCA);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            }
+            m_imgui->disabled_begin(!m_svg_zones.empty() || !m_shape_nodes.empty());
+            if (m_imgui->button(into_u8(std::wstring(1, ImGui::NeotkoDrawShapeIcon)) + " " + _u8L("Draw shape"))) {
+                m_shape_draw_armed = !m_shape_draw_armed;
+                m_parent.set_as_dirty();
+            }
+            m_imgui->disabled_end();
+            if (armed) {
+                ImGui::PopStyleVar(1);
+                ImGui::PopStyleColor(2);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Then click on the object to place the points.\n"
+                    "Click: corner point.  Click and drag: curved point.\n"
+                    "Click the first point to close the shape.\n"
+                    "Drag points or handles to edit.  Click on the outline to add a point.\n"
+                    "Alt+click a point: corner <-> curve.  Alt+drag a handle: break the curve.\n"
+                    "Right click: cancel.").c_str());
+            if (m_shape_draw_armed && m_shape_nodes.empty()) {
+                ImGui::SameLine();
+                m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("Click on the object."));
+            }
+        }
+        ImGui::Dummy(ImVec2(0.0f, ImGui::GetFontSize() * 0.1));
+    }
+
+    if (m_paint_mode == PaintMode::Brush) {   // NEOTKO_SVGDECAL_TAG — Orca's brush tools
     m_imgui->text(m_desc.at("tool_type"));
 
     std::array<wchar_t, 6> tool_ids;
@@ -1133,6 +1214,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
             m_vertical_only = false;
         }
     }
+    } // NEOTKO_SVGDECAL_TAG — end of Brush mode tools
 
     // NEOTKO_MMU_COEXIST_TAG s235 F5 — la sección de coexistencia con el sandwich. Sólo
     // aparece si este objeto TIENE pintura de sandwich: en un objeto sin ella no habría nada
@@ -1143,17 +1225,63 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     // (F1-F4) is low-risk enough to ship as a permanent part of this fork rather than behind the
     // LibreMode flag. See docs/FUTURE/PAINTER_PROMODE_PLAN.md.
     ImGui::Separator();
+    // NEOTKO_SVGDECAL_TAG — Vector mode's own panel goes first, the common options fold below.
+    if (m_paint_mode == PaintMode::Vector) {
+        render_vector_panel();
+        ImGui::Separator();
+    }
+    // NEOTKO_SVGDECAL_TAG — the decals as a reference while painting by hand.
+    // NEOTKO_SVGDECAL_TAG — F5b: brush symmetry, every stroke repeated across the mirror planes.
+    if (m_paint_mode == PaintMode::Brush) {
+        ModelObject *sym_mo = m_c->selection_info()->model_object();
+        m_imgui->text(_L("Mirror brush"));
+        for (int axis = 0; axis < 3; ++axis) {
+            if (axis > 0)
+                ImGui::SameLine();
+            bool on = (sym_mo->paint_symmetry.brush & (1 << axis)) != 0;
+            if (m_imgui->bbl_checkbox(axis == 0 ? _L("Left/Right") : axis == 1 ? _L("Front/Back") : _L("Top/Bottom"), on)) {
+                Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Mirror brush"), UndoRedo::SnapshotType::GizmoAction);
+                sym_mo->paint_symmetry.brush = on ? (sym_mo->paint_symmetry.brush | (1 << axis)) : (sym_mo->paint_symmetry.brush & ~(1 << axis));
+                m_parent.set_as_dirty();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Every brush stroke is painted again on the mirrored side,\n"
+                    "through the orange mark (the same centre as the decal mirrors).\n"
+                    "Dashed rings show where the copies land. Where the object is not\n"
+                    "symmetric and has nothing on the other side, the copy is skipped.\n"
+                    "Works with the Circle and Sphere brushes.").c_str());
+        }
+        if (sym_mo->paint_symmetry.brush != 0)
+            render_mirror_centre_controls();
+        ImGui::Separator();
+    }
+    if (m_paint_mode == PaintMode::Brush && !m_c->selection_info()->model_object()->paint_decals.empty()) {
+        if (ImGui::Checkbox(_u8L("Show decals").c_str(), &m_show_decals_in_brush))
+            m_parent.set_as_dirty();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Show the SVG decals of the Vector mode while you paint,\n"
+                "as a reference. They are not painted until you Apply them.").c_str());
+        ImGui::Separator();
+    }
     if (ImGui::CollapsingHeader(_u8L("Pro Mode").c_str())) {
         render_pro_mode_section(sliders_left_width, sliders_width, slider_icon_width);
+        if (m_paint_mode == PaintMode::Brush)
+            render_rectangle_mask_option();
     }
 
     // NEOTKO_PAINTERPRO_TAG — F4 Sesion A/B: the toolbar row above (lines ~721-881) unconditionally
     // sets m_tool_type from whichever icon is selected, every frame - so rectangle/polygon mask
     // have to win here, after that logic runs, rather than being just another toolbar icon.
-    if (m_rectangle_mask_active)
-        m_tool_type = ToolType::RECTANGLE;
-    else if (m_polygon_mask_active)
-        m_tool_type = ToolType::POLYGON;
+    // NEOTKO_SVGDECAL_TAG — Vector mode is the shape tool; Brush mode never is.
+    if (m_paint_mode == PaintMode::Vector) {
+        m_rectangle_mask_active = false;
+        m_polygon_mask_active   = true;
+        m_tool_type             = ToolType::POLYGON;
+    } else {
+        m_polygon_mask_active = false;
+        if (m_rectangle_mask_active)
+            m_tool_type = ToolType::RECTANGLE;
+    }
 
     ImGui::Separator();
 
@@ -1694,28 +1822,876 @@ void GLGizmoMmuSegmentation::render_pro_mode_section(float sliders_left_width, f
         m_imgui->text(_L("0 = use global value"));
     }
 
-    // --- F4 Sesion A/B: screen-space rectangle/polygon masks (TriangleSelector::Rectangle/
-    // PolygonProjectionCursor, see on_render_input_window()'s override of m_tool_type right after
-    // this Pro Mode section). Mutually exclusive, like Vertical/Horizontal further down. ---
-    if (ImGui::Checkbox(_u8L("Rectangle mask").c_str(), &m_rectangle_mask_active)) {
-        m_polygon_mask_active = false;
-        m_polygon_points.clear();
-        m_polygon_dragged_vertex = -1;
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Drag a rectangle on screen to paint every visible facet under it "
-            "with the selected filament, instead of brushing by hand. Only front-facing triangles are "
-            "painted (nothing behind the object gets masked).").c_str());
+}
 
-    if (ImGui::Checkbox(_u8L("Polygon mask").c_str(), &m_polygon_mask_active)) {
-        m_rectangle_mask_active = false;
-        m_polygon_points.clear();
-        m_polygon_dragged_vertex = -1;
+// NEOTKO_SVGDECAL_TAG — B / V. Leaving Vector keeps the shape or SVG being edited: it only stops
+// being drawn and grabbed until Vector comes back.
+void GLGizmoMmuSegmentation::set_paint_mode(PaintMode mode)
+{
+    if (m_paint_mode == mode)
+        return;
+    m_paint_mode = mode;
+    m_parent.set_as_dirty();
+}
+
+// NEOTKO_PAINTERPRO_TAG — Brush mode only: drag a box on screen and paint what is under it.
+void GLGizmoMmuSegmentation::render_rectangle_mask_option()
+{
+    if (ImGui::Checkbox(_u8L("Rectangle mask").c_str(), &m_rectangle_mask_active))
+        shape_clear();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Drag a rectangle on screen to paint every visible facet under it\n"
+            "with the selected filament, instead of brushing by hand.\n"
+            "Only what the camera sees is painted.").c_str());
+}
+
+bool GLGizmoMmuSegmentation::render_svg_colour_row(int id, uint32_t rgb, bool grad, int &state, bool &hidden)
+{
+    bool changed = false;
+    const float row_start = ImGui::GetCursorScreenPos().x;
+    const size_t n_filaments = std::min(GLGizmoMmuSegmentation::EXTRUDERS_LIMIT, m_display_filament_ids.size());
+    auto filament_label = [this, n_filaments](int s) {
+        for (size_t i = 0; i < n_filaments; ++i)
+            if (int(m_display_filament_ids[i]) == s)
+                return std::to_string(i + 1);
+        return std::string("?");
+    };
+    const ImGuiColorEditFlags swatch_flags = ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker | ImGuiColorEditFlags_NoDragDrop;
+    const ImVec2 swatch_size(ImGui::GetFrameHeight(), ImGui::GetFrameHeight());
+    ImGui::PushID(id);
+    const ImVec4 svg_col(float((rgb >> 16) & 0xFF) / 255.f, float((rgb >> 8) & 0xFF) / 255.f, float(rgb & 0xFF) / 255.f, 1.f);
+    ImGui::ColorButton("##svg_colour", svg_col, swatch_flags, swatch_size);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", (grad ? _u8L("Colour in the SVG (a gradient: its mean colour)") : _u8L("Colour in the SVG")).c_str());
+    ImGui::SameLine();
+    m_imgui->text(">");
+    ImGui::SameLine();
+    ImGui::ColorButton("##filament_colour", ImGuiWrapper::to_ImVec4(get_state_color(state)), swatch_flags, swatch_size);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(m_imgui->scaled(3.5f));
+    if (ImGui::BeginCombo("##filament", filament_label(state).c_str())) {
+        for (size_t i = 0; i < n_filaments; ++i) {
+            const int s = int(m_display_filament_ids[i]);
+            ImGui::PushID(int(i));
+            ImGui::ColorButton("##c", ImGuiWrapper::to_ImVec4(get_state_color(s)), swatch_flags, swatch_size);
+            ImGui::SameLine();
+            if (ImGui::Selectable(std::to_string(i + 1).c_str(), s == state)) {
+                state   = s;
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", _u8L("Click to place vertices of a free polygon on screen; click "
-            "near the first vertex again (with at least 3 placed) to close it and paint every "
-            "visible facet inside. Click an existing vertex to drag it. Right-click cancels.").c_str());
+        ImGui::SetTooltip("%s", _u8L("Filament this colour paints with.").c_str());
+    ImGui::SameLine();
+    bool visible = !hidden;
+    if (ImGui::Checkbox("##visible", &visible)) {
+        hidden  = !visible;
+        changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Off: this colour is not painted and lets through\nwhat the SVG has under it.").c_str());
+    m_colour_row_w = std::max(m_colour_row_w, ImGui::GetItemRectMax().x - row_start);
+    ImGui::PopID();
+    return changed;
+}
+
+// NEOTKO_SVGDECAL_TAG — F5: Pick on object / Box centre, shared by the decals and the brush.
+void GLGizmoMmuSegmentation::render_mirror_centre_controls()
+{
+    ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr)
+        return;
+    auto snapshot = [](const std::string &name) { Plater::TakeSnapshot(wxGetApp().plater(), name, UndoRedo::SnapshotType::GizmoAction); };
+    m_imgui->text(_L("Mirror centre"));
+    ImGui::SameLine();
+    const bool picking = m_mirror_pick_armed;
+    if (picking) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.59f, 0.53f, 0.35f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImGuiWrapper::COL_ORCA);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    }
+    if (m_imgui->button(_L("Pick on object"))) {
+        m_mirror_pick_armed = !m_mirror_pick_armed;
+        m_parent.set_as_dirty();
+    }
+    if (picking) {
+        ImGui::PopStyleVar(1);
+        ImGui::PopStyleColor(2);
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Then click on the object: the mirror planes cross there (the orange mark).\n"
+            "For an object that is not centred in its box, like a face turned a little.").c_str());
+    if (mo->paint_symmetry.custom_centre) {
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Box centre"))) {
+            snapshot(_u8L("Mirror centre"));
+            mo->paint_symmetry.custom_centre = false;
+            m_parent.set_as_dirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Back to the centre of the object's box.").c_str());
+    }
+    if (picking)
+        m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("Click on the object."));
+}
+
+bool GLGizmoMmuSegmentation::render_part_filament_combo(const char *id, int &state)
+{
+    bool changed = false;
+    const size_t n_filaments = std::min(GLGizmoMmuSegmentation::EXTRUDERS_LIMIT, m_display_filament_ids.size());
+    std::string label = _u8L("Colour");
+    for (size_t i = 0; i < n_filaments; ++i)
+        if (int(m_display_filament_ids[i]) == state)
+            label = std::to_string(i + 1);
+    const ImGuiColorEditFlags swatch_flags = ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker | ImGuiColorEditFlags_NoDragDrop;
+    const ImVec2 swatch_size(ImGui::GetFrameHeight(), ImGui::GetFrameHeight());
+    ImGui::SetNextItemWidth(m_imgui->scaled(5.f));
+    if (ImGui::BeginCombo(id, label.c_str())) {
+        if (ImGui::Selectable(_u8L("Colour").c_str(), state < 0)) {
+            state   = -1;
+            changed = true;
+        }
+        for (size_t i = 0; i < n_filaments; ++i) {
+            const int s = int(m_display_filament_ids[i]);
+            ImGui::PushID(int(i));
+            ImGui::ColorButton("##c", ImGuiWrapper::to_ImVec4(get_state_color(s)), swatch_flags, swatch_size);
+            ImGui::SameLine();
+            if (ImGui::Selectable(std::to_string(i + 1).c_str(), s == state)) {
+                state   = s;
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+bool GLGizmoMmuSegmentation::render_svg_parts()
+{
+    if (m_svg_shapes.size() < 2)
+        return false;   // one shape: its colour row already is the part
+    bool changed = false;
+    const int hover_before = m_svg_part_hover;
+    m_svg_part_hover = -1;
+    ImGui::PushID("svg_parts");
+    m_imgui->text(GUI::format(_L("Parts: %1%"), m_svg_shapes.size()));
+    ImGui::SameLine();
+    if (m_imgui->bbl_checkbox(_L("Pick parts"), m_svg_pick_parts))
+        m_parent.set_as_dirty();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Click a part of the SVG to select it, Shift + click to add or remove one.\n"
+            "While this is on, dragging does not move the SVG.").c_str());
+
+    const ImGuiColorEditFlags swatch_flags = ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker | ImGuiColorEditFlags_NoDragDrop;
+    const ImVec2 swatch_size(ImGui::GetFrameHeight(), ImGui::GetFrameHeight());
+    auto zone_colour = [this](int shape) {
+        const int z = m_svg_shapes[size_t(shape)].zone;
+        const uint32_t rgb = (z >= 0 && size_t(z) < m_svg_zones.size()) ? m_svg_zones[size_t(z)].rgb : 0;
+        return ImVec4(float((rgb >> 16) & 0xFF) / 255.f, float((rgb >> 8) & 0xFF) / 255.f, float(rgb & 0xFF) / 255.f, 1.f);
+    };
+
+    // The selection: one filament and one eye for all of it.
+    if (!m_svg_part_sel.empty()) {
+        m_imgui->text(GUI::format(_L("Selected: %1%"), m_svg_part_sel.size()));
+        ImGui::SameLine();
+        const PaintDecalPart *first = svg_part(*m_svg_part_sel.begin(), false);
+        int  state  = first ? first->state : -1;
+        bool hidden = first ? first->hidden : false;
+        if (render_part_filament_combo("##sel_filament", state)) {
+            for (int k : m_svg_part_sel)
+                svg_part(k, true)->state = state;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Filament the selected parts paint with.\nColour: the one of their colour row.").c_str());
+        ImGui::SameLine();
+        bool visible = !hidden;
+        if (ImGui::Checkbox("##sel_visible", &visible)) {
+            for (int k : m_svg_part_sel)
+                svg_part(k, true)->hidden = !visible;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Off: the selected parts are not painted and let through\nwhat the SVG has under them.").c_str());
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Reset"))) {
+            for (int k : m_svg_part_sel)
+                if (PaintDecalPart *p = svg_part(k, false)) {
+                    p->state  = -1;
+                    p->hidden = false;
+                }
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("The selected parts follow their colour again.").c_str());
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Clear")))
+            m_svg_part_sel.clear();
+    }
+
+    // The list: the parts changed or selected, or all of them.
+    if (ImGui::TreeNode(_u8L("Part list").c_str())) {
+        ImGui::RadioButton(_u8L("Changed").c_str(), &m_svg_parts_filter, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton(_u8L("All").c_str(), &m_svg_parts_filter, 1);
+        std::vector<int> rows;
+        if (m_svg_parts_filter == 1) {
+            for (size_t k = 0; k < m_svg_shapes.size(); ++k)
+                rows.push_back(int(k));
+        } else {
+            std::set<int> shown(m_svg_part_sel.begin(), m_svg_part_sel.end());
+            for (const PaintDecalPart &p : m_svg_parts)
+                shown.insert(p.shape);
+            rows.assign(shown.begin(), shown.end());
+        }
+        if (rows.empty())
+            m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("No part changed. Pick parts on the SVG, or show All."));
+        const float row_h = ImGui::GetFrameHeightWithSpacing();
+        ImGui::BeginChild("##parts", ImVec2(0.f, std::min(float(rows.size()), 8.f) * row_h + 4.f), false);
+        ImGuiListClipper clipper;
+        clipper.Begin(int(rows.size()), row_h);
+        while (clipper.Step())
+            for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+                const int k = rows[size_t(r)];
+                ImGui::PushID(k);
+                const PaintDecalPart *p = svg_part(k, false);
+                int  state  = p ? p->state : -1;
+                bool hidden = p ? p->hidden : false;
+                bool sel    = m_svg_part_sel.count(k) != 0;
+                const float row_y = ImGui::GetCursorScreenPos().y;
+                if (ImGui::Checkbox("##sel", &sel)) {
+                    if (sel)
+                        m_svg_part_sel.insert(k);
+                    else
+                        m_svg_part_sel.erase(k);
+                    m_parent.set_as_dirty();
+                }
+                ImGui::SameLine();
+                ImGui::ColorButton("##colour", zone_colour(k), swatch_flags, swatch_size);
+                ImGui::SameLine();
+                m_imgui->text("#" + std::to_string(k + 1));
+                ImGui::SameLine();
+                if (render_part_filament_combo("##filament", state)) {
+                    svg_part(k, true)->state = state;
+                    changed = true;
+                }
+                ImGui::SameLine();
+                bool visible = !hidden;
+                if (ImGui::Checkbox("##visible", &visible)) {
+                    svg_part(k, true)->hidden = !visible;
+                    changed = true;
+                }
+                if (ImGui::IsMouseHoveringRect(ImVec2(ImGui::GetWindowPos().x, row_y), ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowWidth(), row_y + row_h)))
+                    m_svg_part_hover = k;
+                ImGui::PopID();
+            }
+        ImGui::EndChild();
+        ImGui::TreePop();
+    }
+    ImGui::PopID();
+    if (changed)
+        svg_prune_parts();
+    if (changed || m_svg_part_hover != hover_before)
+        m_parent.set_as_dirty();
+    return changed;
+}
+
+// NEOTKO_SVGDECAL_TAG — Vector mode: actions, the decal layers, the selected decal, and the shape
+// or SVG being edited on screen. Same layout as the mockup approved on 27-oct-2026.
+void GLGizmoMmuSegmentation::render_vector_panel()
+{
+    ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr)
+        return;
+    auto snapshot = [](const std::string &name) { Plater::TakeSnapshot(wxGetApp().plater(), name, UndoRedo::SnapshotType::GizmoAction); };
+    std::vector<PaintDecal> &decals = mo->paint_decals;
+    // Colour rows go in two columns when the panel is wide enough for two of them side by side.
+    // The row width is MEASURED (render_svg_colour_row), never guessed: a second column placed past
+    // the window's edge widens an auto-resized window, which moves the edge, and so on every frame.
+    // The second column is aligned to the right edge, so it can never push it.
+    const ImGuiStyle &style = ImGui::GetStyle();
+    auto colour_column = [this, &style](size_t k, float line_x, float avail) {
+        const float w = m_colour_row_w;
+        if (w > 1.f && avail >= 2.f * w + style.ItemSpacing.x * 2.f && k % 2 == 1)
+            ImGui::SameLine(line_x + avail - w);
+    };
+    if (m_selected_decal >= int(decals.size()))
+        m_selected_decal = decals.empty() ? -1 : int(decals.size()) - 1;
+
+    // --- Actions
+    if (m_imgui->button(_L("Load SVG..."))) {
+        wxFileDialog dlg(wxGetApp().plater(), _L("Choose an SVG file"), "", "", "SVG files (*.svg)|*.svg", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dlg.ShowModal() == wxID_OK)
+            shape_load_svg(std::string(dlg.GetPath().ToUTF8().data()));
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Load an SVG, centred on the view.\nEach of its colours gets a filament.").c_str());
+    ImGui::SameLine();
+    m_imgui->disabled_begin(decals.empty());
+    if (m_imgui->button(_L("Apply all"))) {
+        std::vector<size_t> idxs;
+        for (size_t i = 0; i < decals.size(); ++i)
+            if (!decals[i].hidden)
+                idxs.push_back(i);
+        snapshot(_u8L("Apply SVG decals"));
+        decal_apply(idxs, false);
+        update_model_object();
+        m_parent.set_as_dirty();
+    }
+    m_imgui->disabled_end();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Apply every visible decal, top of the list first\n(the lower ones paint over).").c_str());
+    if (!m_shape_svg_error.empty())
+        m_imgui->warning_text(m_shape_svg_error);
+    ImGui::Checkbox(_u8L("Lock view").c_str(), &m_shape_view_lock);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Freeze the camera while you work on screen:\nno zoom, orbit or pan, view cube or view keys.").c_str());
+    ImGui::SameLine();
+    if (ImGui::Checkbox(_u8L("Preview colours").c_str(), &m_decal_preview_colours))
+        m_parent.set_as_dirty();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Fill the decal cards with their filaments' colours, see-through,\n"
+            "for an idea of the result before Apply.").c_str());
+    ImGui::SameLine();
+    if (ImGui::Checkbox(_u8L("On surface").c_str(), &m_decal_on_surface))
+        m_parent.set_as_dirty();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Show the cards laid on the object, exactly where they will paint\n"
+            "(mirrored copies too). Off: floating around the object, as a reference.\n"
+            "On folds and edges the preview can show small gaps: only the preview,\n"
+            "Apply paints the whole area.").c_str());
+    // A left drag orbits outside the SVG or shape being placed (and always before Draw shape).
+    if (!m_shape_view_lock) {
+        m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("Orbit: drag outside the SVG or shape. Pan: right drag."));
+    }
+
+    // F5: where the mirror planes cross, for every decal of the object (shown while any mirror is on).
+    bool any_mirror = m_svg_mirror != 0;
+    for (const PaintDecal &d : decals)
+        any_mirror = any_mirror || d.mirror != 0;
+    if (any_mirror)
+        render_mirror_centre_controls();
+
+    // --- Layers
+    if (!decals.empty()) {
+        ImGui::Separator();
+        m_imgui->text(GUI::format(_L("Decals (%1%)"), decals.size()));
+        int move_from = -1, move_to = -1;
+        const float dot = ImGui::GetTextLineHeight() * 0.45f;
+        for (size_t i = 0; i < decals.size(); ++i) {
+            PaintDecal &d = decals[i];
+            ImGui::PushID(int(i) + 7000);
+            bool visible = !d.hidden;
+            if (ImGui::Checkbox("##visible", &visible)) {
+                snapshot(_u8L("Show/hide SVG decal"));
+                d.hidden = !visible;
+                m_parent.set_as_dirty();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Show the card, and include it in Apply all.").c_str());
+            ImGui::SameLine();
+            bool locked = d.locked;
+            if (ImGui::Checkbox("##locked", &locked)) {
+                snapshot(_u8L("Lock/unlock SVG decal"));
+                d.locked = locked;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Locked: it cannot be edited or deleted.").c_str());
+            ImGui::SameLine();
+            // The filaments it paints with, as small dots.
+            {
+                ImDrawList  *draw = ImGui::GetWindowDrawList();
+                const ImVec2 pos  = ImGui::GetCursorScreenPos();
+                const float  cy   = pos.y + ImGui::GetFrameHeight() * 0.5f;
+                float        cx   = pos.x + dot;
+                int          shown = 0;
+                for (const PaintDecalZone &z : d.zones) {
+                    if (z.hidden || shown >= 4)
+                        continue;
+                    draw->AddCircleFilled(ImVec2(cx, cy), dot, ImGuiWrapper::to_ImU32(get_state_color(z.state)));
+                    draw->AddCircle(ImVec2(cx, cy), dot, IM_COL32(0, 0, 0, 255));
+                    cx += dot * 2.4f;
+                    ++shown;
+                }
+                ImGui::Dummy(ImVec2(dot * 2.4f * 4.f, ImGui::GetFrameHeight()));
+            }
+            ImGui::SameLine();
+            std::string label = d.name.empty() ? std::string("SVG") : d.name;
+            label += d.perspective ? "  [P]" : "  [O]";
+            if (d.through)
+                label += " [T]";
+            if (int(i) == m_svg_edit_decal)
+                label += "  *";
+            ImGui::AlignTextToFramePadding();
+            if (ImGui::Selectable(label.c_str(), int(i) == m_selected_decal, 0, ImVec2(m_imgui->scaled(9.f), 0.f)))
+                m_selected_decal = int(i);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("[P] perspective, [O] parallel rays, [T] through.\n* = being edited on screen.").c_str());
+            ImGui::SameLine();
+            if (ImGui::ArrowButton("##up", ImGuiDir_Up) && i > 0) {
+                move_from = int(i);
+                move_to   = int(i) - 1;
+            }
+            ImGui::SameLine();
+            if (ImGui::ArrowButton("##down", ImGuiDir_Down) && i + 1 < decals.size()) {
+                move_from = int(i);
+                move_to   = int(i) + 1;
+            }
+            ImGui::PopID();
+        }
+        if (move_from >= 0) {
+            snapshot(_u8L("Reorder SVG decals"));
+            std::swap(decals[size_t(move_from)], decals[size_t(move_to)]);
+            auto follow = [move_from, move_to](int &idx) {
+                if (idx == move_from)
+                    idx = move_to;
+                else if (idx == move_to)
+                    idx = move_from;
+            };
+            follow(m_selected_decal);
+            follow(m_svg_edit_decal);
+            m_decal_rings_cache.clear();
+            m_parent.set_as_dirty();
+        }
+
+        // --- The selected decal
+        if (m_selected_decal >= 0 && size_t(m_selected_decal) < decals.size() && m_selected_decal == m_svg_edit_decal) {
+            ImGui::Separator();
+            m_imgui->text(GUI::format(_L("Selected: %1%"), decals[size_t(m_selected_decal)].name));
+            m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("Being edited on screen, below."));
+        } else if (!m_svg_zones.empty() || !m_shape_nodes.empty()) {
+            // Something else is on screen: the selected decal's controls wait, so they are not
+            // mixed up with the ones of the SVG or shape being placed.
+            ImGui::Separator();
+            m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("Pin or cancel what is on screen to edit the decals."));
+        } else if (m_selected_decal >= 0 && size_t(m_selected_decal) < decals.size()) {
+            // Own ID scope: ImGui tells buttons apart by their label, and the on-screen block below
+            // also has Apply and Erase (the second one never fired).
+            ImGui::PushID("selected_decal");
+            PaintDecal &d = decals[size_t(m_selected_decal)];
+            ImGui::Separator();
+            m_imgui->text(GUI::format(_L("Selected: %1%"), d.name.empty() ? std::string("SVG") : d.name));
+            m_imgui->disabled_begin(d.locked);
+            if (m_imgui->button(_L("Edit")))
+                svg_edit_decal(m_selected_decal);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Go to the view it was pinned from and adjust it on screen:\n"
+                    "move, scale, rotate, colours. Then Save (editing never paints).").c_str());
+            m_imgui->disabled_end();
+            ImGui::SameLine();
+            if (m_imgui->button(_L("Apply"))) {
+                snapshot(_u8L("Apply SVG decal"));
+                decal_apply({ size_t(m_selected_decal) }, false);
+                update_model_object();
+                m_parent.set_as_dirty();
+            }
+            ImGui::SameLine();
+            if (m_imgui->button(_L("Erase"))) {
+                snapshot(_u8L("Erase SVG decal"));
+                decal_apply({ size_t(m_selected_decal) }, true);
+                update_model_object();
+                m_parent.set_as_dirty();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Remove the paint this decal's area covers.").c_str());
+            ImGui::SameLine();
+            m_imgui->disabled_begin(d.locked);
+            const bool delete_it = m_imgui->button(_L("Delete"));
+            m_imgui->disabled_end();
+            // F4b: slide it over the object with the mouse, seeing where it paints.
+            {
+                const bool moving = m_decal_move_armed;
+                if (moving) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.59f, 0.53f, 0.35f));
+                    ImGui::PushStyleColor(ImGuiCol_Border, ImGuiWrapper::COL_ORCA);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                }
+                m_imgui->disabled_begin(d.locked);
+                if (m_imgui->button(_L("Move on object"))) {
+                    m_decal_move_armed = !m_decal_move_armed;
+                    if (m_decal_move_armed)
+                        m_decal_on_surface = true;   // moving it only makes sense seeing where it lands
+                    m_parent.set_as_dirty();
+                }
+                m_imgui->disabled_end();
+                if (moving) {
+                    ImGui::PopStyleVar(1);
+                    ImGui::PopStyleColor(2);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", _u8L("Then drag on the object: the decal slides over it, turning around the object,\n"
+                        "and you see live where it will paint. Drag off the object to orbit.\n"
+                        "Click the button again to stop.").c_str());
+                if (moving) {
+                    ImGui::SameLine();
+                    m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("Drag on the object."));
+                }
+            }
+
+            // F4b: turn and scale it on its own card, around the centre of the SVG. Each slider gesture
+            // starts from the decal as it was when grabbed, and is one undo step.
+            if (!d.locked) {
+                const float tw = -(std::max(ImGui::CalcTextSize(_u8L("Turn").c_str()).x, ImGui::CalcTextSize(_u8L("Size").c_str()).x) + style.ItemInnerSpacing.x * 2.f);
+                auto gesture = [&](bool changed) {
+                    if (ImGui::IsItemActivated()) {
+                        snapshot(_u8L("Turn or scale SVG decal"));
+                        m_decal_ts_start = d;
+                    }
+                    if (changed)
+                        decal_turn_scale(size_t(m_selected_decal), m_decal_ts_start, m_decal_turn_ui, m_decal_size_ui / 100.);
+                    if (ImGui::IsItemDeactivated()) {
+                        m_decal_turn_ui = 0.f;
+                        m_decal_size_ui = 100.f;
+                    }
+                    if (changed)
+                        m_parent.set_as_dirty();
+                };
+                ImGui::SetNextItemWidth(tw);
+                gesture(ImGui::SliderFloat(_u8L("Turn").c_str(), &m_decal_turn_ui, -180.f, 180.f, "%.0f deg"));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", _u8L("Turn the decal on the object, around its centre.\nWith Move on object: mouse wheel.").c_str());
+                ImGui::SetNextItemWidth(tw);
+                gesture(ImGui::SliderFloat(_u8L("Size").c_str(), &m_decal_size_ui, 25.f, 400.f, "%.0f%%"));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", _u8L("Scale the decal on the object, around its centre.\nWith Move on object: Shift + mouse wheel.").c_str());
+            }
+
+            // Projection and depth as two-way choices.
+            auto choice = [this](const wxString &a, const wxString &b, bool &second) {
+                bool changed = false;
+                for (int k = 0; k < 2; ++k) {
+                    const bool on = (k == 1) == second;
+                    if (on) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.59f, 0.53f, 0.35f));
+                        ImGui::PushStyleColor(ImGuiCol_Border, ImGuiWrapper::COL_ORCA);
+                        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                    }
+                    if (m_imgui->button(k == 0 ? a : b) && !on) {
+                        second  = k == 1;
+                        changed = true;
+                    }
+                    if (on) {
+                        ImGui::PopStyleVar(1);
+                        ImGui::PopStyleColor(2);
+                    }
+                    if (k == 0)
+                        ImGui::SameLine();
+                }
+                return changed;
+            };
+            const float half = ImGui::GetCursorPosX() + std::max(ImGui::GetContentRegionAvail().x * 0.5f,
+                m_imgui->calc_button_size(_L("Parallel")).x + m_imgui->calc_button_size(_L("Perspective")).x + style.ItemSpacing.x * 3.f);
+            m_imgui->text(_L("Projection"));
+            ImGui::SameLine(half);
+            m_imgui->text(_L("Depth"));
+            bool perspective = d.perspective;
+            if (choice(_L("Parallel"), _L("Perspective"), perspective)) {
+                snapshot(_u8L("SVG decal projection"));
+                d.perspective = perspective;
+                if (perspective && d.eye_dist <= 0.)
+                    d.eye_dist = std::max(3. * mo->raw_mesh_bounding_box().size().norm(), 50.);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Perspective: rays from the eye it was pinned from, as the camera saw it.\n"
+                    "Parallel: the same size at any depth.").c_str());
+            ImGui::SameLine(half);
+            bool through = d.through;
+            if (choice(_L("First surface"), _L("Through"), through)) {
+                snapshot(_u8L("SVG decal depth"));
+                d.through = through;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Through: every surface the rays cross, folds and hidden faces too.\n"
+                    "It also comes out on the back of the object.").c_str());
+            // F5: symmetry, mirrored copies through the centre of the object's box.
+            m_imgui->text(_L("Mirror"));
+            for (int axis = 0; axis < 3; ++axis) {
+                if (axis > 0)
+                    ImGui::SameLine();
+                bool on = (d.mirror & (1 << axis)) != 0;
+                if (m_imgui->bbl_checkbox(axis == 0 ? _L("Left/Right") : axis == 1 ? _L("Front/Back") : _L("Top/Bottom"), on)) {
+                    snapshot(_u8L("SVG decal mirror"));
+                    d.mirror = on ? (d.mirror | (1 << axis)) : (d.mirror & ~(1 << axis));
+                    m_parent.set_as_dirty();
+                }
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Paint mirrored copies through the centre of the object:\n"
+                    "Left/Right across X, Front/Back across Y, Top/Bottom across Z.\n"
+                    "Two give three copies. The copies are drawn as cards too and follow the decal.").c_str());
+            if (d.mirror != 0) {
+                bool readable = d.mirror_readable;
+                if (m_imgui->bbl_checkbox(_L("Keep readable"), readable)) {
+                    snapshot(_u8L("SVG decal mirror"));
+                    d.mirror_readable = readable;
+                    m_parent.set_as_dirty();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", _u8L("The copies land in the same mirrored place but are not flipped,\n"
+                        "so text and logos read the right way.").c_str());
+            }
+            m_imgui->text(_L("Colours and filaments"));
+            const float zones_x = ImGui::GetCursorPosX(), zones_avail = ImGui::GetContentRegionAvail().x;
+            for (size_t k = 0; k < d.zones.size(); ++k) {
+                colour_column(k, zones_x, zones_avail);
+                PaintDecalZone &z = d.zones[k];
+                int  state  = z.state;
+                bool hidden = z.hidden;
+                if (render_svg_colour_row(int(k) + 9000, z.rgb, false, state, hidden)) {
+                    snapshot(_u8L("SVG decal colours"));
+                    z.state  = state;
+                    z.hidden = hidden;
+                    m_parent.set_as_dirty();
+                }
+            }
+            if (delete_it) {
+                snapshot(_u8L("Delete SVG decal"));
+                const int del = m_selected_decal;
+                decals.erase(decals.begin() + del);
+                if (m_svg_edit_decal == del)
+                    m_svg_edit_decal = -1;
+                else if (m_svg_edit_decal > del)
+                    --m_svg_edit_decal;
+                m_selected_decal = decals.empty() ? -1 : std::min(del, int(decals.size()) - 1);
+                m_decal_rings_cache.clear();
+                m_parent.set_as_dirty();
+            }
+            ImGui::PopID();
+        }
+    }
+
+    // --- On screen: the shape or SVG being edited
+    ImGui::Separator();
+    const bool has_svg   = !m_svg_zones.empty();
+    const bool has_shape = !m_shape_nodes.empty();
+    if (!has_svg && !has_shape) {
+        m_imgui->text_colored(ImGuiWrapper::COL_GREY_LIGHT, _L("Load an SVG, or Draw shape above."));
+        return;
+    }
+    ImGui::PushID("on_screen");
+    if (has_svg)
+        m_imgui->text(m_svg_edit_decal >= 0 ? GUI::format(_L("On screen: editing %1%"), m_svg_name)
+                                            : GUI::format(_L("On screen: %1% (not pinned)"), m_svg_name.empty() ? std::string("SVG") : m_svg_name));
+    else
+        m_imgui->text(GUI::format(m_shape_closed ? _L("On screen: shape, %1% points") : _L("On screen: open shape, %1% points"), m_shape_nodes.size()));
+
+    if (has_svg) {
+        m_imgui->text(_L("Drag inside its frame to move it."));
+        float pct = m_shape_scale_pct;
+        const float slider_w = -(std::max({ ImGui::CalcTextSize(_u8L("Scale").c_str()).x, ImGui::CalcTextSize(_u8L("Rotate").c_str()).x, ImGui::CalcTextSize(_u8L("Width").c_str()).x, ImGui::CalcTextSize(_u8L("Height").c_str()).x }) + style.ItemInnerSpacing.x * 2.f);
+        ImGui::SetNextItemWidth(slider_w);
+        if (ImGui::SliderFloat(_u8L("Scale").c_str(), &pct, 25.f, 400.f, "%.0f%%")) {
+            shape_scale(pct / m_shape_scale_pct);
+            m_shape_scale_pct = pct;
+            m_parent.set_as_dirty();
+        }
+        float deg = m_shape_rotate_deg;
+        ImGui::SetNextItemWidth(slider_w);
+        if (ImGui::SliderFloat(_u8L("Rotate").c_str(), &deg, -180.f, 180.f, "%.0f deg")) {
+            shape_rotate(deg - m_shape_rotate_deg);
+            m_shape_rotate_deg = deg;
+            m_parent.set_as_dirty();
+        }
+        // F4b: width and height on their own, along the SVG's axes.
+        float wpct = m_svg_width_pct;
+        ImGui::SetNextItemWidth(slider_w);
+        if (ImGui::SliderFloat(_u8L("Width").c_str(), &wpct, 25.f, 400.f, "%.0f%%")) {
+            svg_stretch(0, wpct / m_svg_width_pct);
+            m_svg_width_pct = wpct;
+            m_parent.set_as_dirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Stretch or squeeze the SVG along its own width.").c_str());
+        float hpct = m_svg_height_pct;
+        ImGui::SetNextItemWidth(slider_w);
+        if (ImGui::SliderFloat(_u8L("Height").c_str(), &hpct, 25.f, 400.f, "%.0f%%")) {
+            svg_stretch(1, hpct / m_svg_height_pct);
+            m_svg_height_pct = hpct;
+            m_parent.set_as_dirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Stretch or squeeze the SVG along its own height.").c_str());
+        // F4: corner deform, handles on the corners of the frame.
+        if (m_imgui->bbl_checkbox(_L("Deform corners"), m_svg_deform))
+            m_parent.set_as_dirty();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Drag a corner of the frame to bend the SVG in perspective.\n"
+                "Straight lines stay straight. A corner that would fold the frame stops.").c_str());
+        if (svg_is_deformed()) {
+            ImGui::SameLine();
+            if (m_imgui->button(_L("Reset corners"))) {
+                svg_reset_corners();
+                m_parent.set_as_dirty();
+            }
+        }
+        // F5: mirror planes, the copies drawn live on the object while you place it.
+        m_imgui->text(_L("Mirror"));
+        for (int axis = 0; axis < 3; ++axis) {
+            if (axis > 0)
+                ImGui::SameLine();
+            bool on = (m_svg_mirror & (1 << axis)) != 0;
+            if (m_imgui->bbl_checkbox(axis == 0 ? _L("Left/Right") : axis == 1 ? _L("Front/Back") : _L("Top/Bottom"), on)) {
+                m_svg_mirror = on ? (m_svg_mirror | (1 << axis)) : (m_svg_mirror & ~(1 << axis));
+                m_parent.set_as_dirty();
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Mirrored copies through the centre of the object:\n"
+                "Left/Right across X, Front/Back across Y, Top/Bottom across Z.\n"
+                "They show as cards where they will land, and are kept when you save.").c_str());
+        if (m_svg_mirror != 0) {
+            if (m_imgui->bbl_checkbox(_L("Keep readable"), m_svg_mirror_readable))
+                m_parent.set_as_dirty();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("The copies land in the same mirrored place but are not flipped,\n"
+                    "so text and logos read the right way.").c_str());
+        }
+        bool masks_dirty = false;
+        const float zones_x = ImGui::GetCursorPosX(), zones_avail = ImGui::GetContentRegionAvail().x;
+        for (size_t z = 0; z < m_svg_zones.size(); ++z) {
+            colour_column(z, zones_x, zones_avail);
+            SvgZone &zone = m_svg_zones[z];
+            const bool hidden_before = zone.hidden;
+            if (render_svg_colour_row(int(z), zone.rgb, zone.grad, zone.state, zone.hidden)) {
+                // Parts: the paint groups carry the filaments, so any change rebuilds them.
+                masks_dirty = true;
+                (void) hidden_before;
+                m_parent.set_as_dirty();
+            }
+        }
+        masks_dirty = render_svg_parts() || masks_dirty;
+        if (svg_is_drawn_shape()) {
+            if (m_imgui->button(_L("Edit points")))
+                svg_to_shape_nodes();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Turn this drawn shape back into points and handles to edit them.\n"
+                    "Save it again to update the decal. A corner deform is only approximated.").c_str());
+        }
+        if (masks_dirty) {
+            svg_rebuild_masks();
+            svg_update_screen_rings();
+        }
+    }
+
+    // Keep it: as a decal pinned to this view (an SVG, or a closed shape turned into one).
+    // An SVG on screen is only adjusted here; it paints from its layer once saved, so what is
+    // painted is always what is stored.
+    if (has_svg) {
+        if (m_imgui->button(m_svg_edit_decal >= 0 ? _L("Save") : _L("Pin to view"))) {
+            const int editing = m_svg_edit_decal;
+            if (svg_pin_to_view())
+                m_selected_decal = editing >= 0 ? editing : int(decals.size()) - 1;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", (m_svg_edit_decal >= 0
+                ? _u8L("Store the changes in the decal and close. Then Apply it from its layer.")
+                : _u8L("Keep it as a decal of the object, seen from this view.\n"
+                       "It floats as a card that follows the object.\nThen Apply it from its layer.")).c_str());
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Cancel"))) {
+            shape_clear();
+            m_parent.set_as_dirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Drop the changes. A pinned decal keeps its last saved version.").c_str());
+        ImGui::PopID();
+        return;
+    } else if (!m_shape_closed) {
+        m_imgui->disabled_begin(m_shape_nodes.size() < 3);
+        if (m_imgui->button(_L("Close shape"))) {
+            m_shape_closed = true;
+            m_parent.set_as_dirty();
+        }
+        m_imgui->disabled_end();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Join the last point to the first one.").c_str());
+    } else {
+        if (m_imgui->button(m_shape_from_decal >= 0 ? _L("Save") : _L("Save as decal"))) {
+            if (shape_to_svg_session() && svg_pin_to_view())
+                m_selected_decal = int(decals.size()) - 1;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Keep the shape as a decal pinned to this view, painting with\n"
+                "the selected filament. Edit points brings its points back later.").c_str());
+    }
+
+    m_imgui->disabled_begin(!m_shape_closed);
+    if (m_imgui->button(_L("Apply")))
+        shape_apply(get_left_button_state_type(), std::string(handle_snapshot_action_name(false, Button::Left).ToUTF8().data()));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", (has_svg ? _u8L("Paint the SVG from this view, each colour with its filament.")
+                                         : _u8L("Paint the shape with the selected filament.")).c_str());
+    ImGui::SameLine();
+    if (m_imgui->button(_L("Erase")))
+        shape_apply(EnforcerBlockerType::NONE, std::string(handle_snapshot_action_name(true, Button::Left).ToUTF8().data()));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Remove the paint inside it.").c_str());
+    m_imgui->disabled_end();
+    ImGui::SameLine();
+    if (m_imgui->button(_L("Cancel"))) {
+        shape_clear();
+        m_parent.set_as_dirty();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Drop what is on screen. A pinned decal keeps its last version.").c_str());
+    if (has_shape) {
+        ImGui::SameLine();
+        if (m_imgui->button(_L("Undo point"))) {
+            if (m_shape_closed)
+                m_shape_closed = false;
+            else
+                m_shape_nodes.pop_back();
+            m_parent.set_as_dirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Reopen a closed shape, or remove the last point of an open one.").c_str());
+    }
+    ImGui::Checkbox(_u8L("Keep on screen after Apply").c_str(), &m_shape_keep_after_apply);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", _u8L("Leave it on screen after Apply,\nto paint it again with another filament or tweak it.").c_str());
+    ImGui::PopID();
+}
+
+ColorRGBA GLGizmoMmuSegmentation::get_shape_fill_color() const
+{
+    ColorRGBA color = m_selected_extruder_idx < m_extruders_colors.size() ?
+        m_extruders_colors[m_selected_extruder_idx] : ColorRGBA(0.0f, 1.0f, 0.3f, 1.0f);
+    color.a(0.35f);
+    return color;
+}
+
+// NEOTKO_SVGDECAL_TAG — F2. `state` is a filament id (1-based, Mixed Filaments included).
+ColorRGBA GLGizmoMmuSegmentation::get_state_color(int state) const
+{
+    if (state >= 1 && size_t(state) <= m_extruders_colors.size())
+        return m_extruders_colors[size_t(state) - 1];
+    return ColorRGBA(0.6f, 0.6f, 0.6f, 1.0f);
+}
+
+// The filament whose colour is closest (RGB distance) to the SVG colour, among the ones the
+// panel offers; the selected one if there is none.
+int GLGizmoMmuSegmentation::svg_default_state(uint32_t rgb) const
+{
+    const float r = float((rgb >> 16) & 0xFF) / 255.f, g = float((rgb >> 8) & 0xFF) / 255.f, b = float(rgb & 0xFF) / 255.f;
+    int   best      = int(get_left_button_state_type());
+    float best_dist = std::numeric_limits<float>::max();
+    const size_t n = std::min(GLGizmoMmuSegmentation::EXTRUDERS_LIMIT, m_display_filament_ids.size());
+    for (size_t i = 0; i < n; ++i) {
+        const int state = int(m_display_filament_ids[i]);
+        if (state < 1 || size_t(state) > m_extruders_colors.size())
+            continue;
+        const ColorRGBA &c = m_extruders_colors[size_t(state) - 1];
+        const float dist = (c.r() - r) * (c.r() - r) + (c.g() - g) * (c.g() - g) + (c.b() - b) * (c.b() - b);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best      = state;
+        }
+    }
+    return best;
 }
 
 void GLGizmoMmuSegmentation::render_filament_remap_ui(float window_width, float max_tooltip_width)

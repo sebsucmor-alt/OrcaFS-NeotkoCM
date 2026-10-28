@@ -17,6 +17,12 @@
 #include "slic3r/GUI/Field.hpp"
 #include "slic3r/GUI/MsgDialog.hpp"
 #include "FixModelByWin10.hpp"
+#include "libslic3r/PaintTransfer.hpp" // NEOTKO_PAINTCARRY_TAG
+#include <wx/busyinfo.h>
+#include <wx/glcanvas.h>
+#include "libslic3r/NeoDebug.hpp"
+#include <chrono>
+#include <sstream>
 
 namespace Slic3r {
 namespace GUI {
@@ -1891,15 +1897,23 @@ void GLGizmoCut3D::PartSelection::add_object(const ModelObject* object)
 GLGizmoCut3D::PartSelection::PartSelection(const ModelObject* mo, const Transform3d& cut_matrix, int instance_idx_in, const Vec3d& center, const Vec3d& normal, const CommonGizmosDataObjects::ObjectClipper& oc)
     : m_instance_idx(instance_idx_in)
 {
+    // NEOTKO_PAINTCARRY_TAG — probe: the right-click part view stalls on the 1M skull. Time each step.
+    using ndbg_clock = std::chrono::steady_clock;
+    auto ndbg_ms = [](ndbg_clock::time_point t) { return long(std::chrono::duration_cast<std::chrono::milliseconds>(ndbg_clock::now() - t).count()); };
+    const auto ndbg_t0 = ndbg_clock::now();
     Cut cut(mo, instance_idx_in, cut_matrix);
     add_object(cut.perform_with_plane().front());
+    const long ndbg_cut_ms = ndbg_ms(ndbg_t0);
 
     const ModelVolumePtrs& volumes = model_object()->volumes;
 
     // split to parts
+    const auto ndbg_t1 = ndbg_clock::now();
     for (int id = int(volumes.size())-1; id >= 0; id--)
         if (volumes[id]->is_splittable())
             volumes[id]->split(1);
+    const long ndbg_split_ms = ndbg_ms(ndbg_t1);
+    const auto ndbg_t2 = ndbg_clock::now();
 
     m_parts.clear();
     for (const ModelVolume* volume : volumes) {
@@ -1959,7 +1973,13 @@ GLGizmoCut3D::PartSelection::PartSelection(const ModelObject* mo, const Transfor
 
     }
 
-    
+    if (NeoDebug::enabled(NeoDebug::GRAVITY)) {
+        std::ostringstream os;
+        os << "CUT_PART_VIEW parts=" << m_parts.size() << " contours=" << m_contour_points.size()
+           << " cut_ms=" << ndbg_cut_ms << " split_ms=" << ndbg_split_ms << " raycast_gl_ms=" << ndbg_ms(ndbg_t2)
+           << " total_ms=" << ndbg_ms(ndbg_t0);
+        NeoDebug::write(NeoDebug::GRAVITY, os.str());
+    }
     m_valid = true;
 }
 
@@ -2411,8 +2431,11 @@ void GLGizmoCut3D::reset_cut_by_contours()
         toggle_model_objects_visibility();
 }
 
-void GLGizmoCut3D::process_contours()
+void GLGizmoCut3D::process_contours(const char* caller)
 {
+    // NEOTKO_PAINTCARRY_TAG — probe: who rebuilds the part view, and how often.
+    if (NeoDebug::enabled(NeoDebug::GRAVITY))
+        NeoDebug::write(NeoDebug::GRAVITY, std::string("CUT_PROCESS_CONTOURS from=") + caller + " dragging=" + (m_dragging ? "1" : "0"));
     const Selection& selection = m_parent.get_selection();
     const ModelObjectPtrs& model_objects = selection.get_model()->objects;
 
@@ -3344,6 +3367,13 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         apply_connectors_in_model(cut_mo , dowels_count);
 
         wxBusyCursor wait;
+        // NEOTKO_PAINTCARRY_TAG — the cut carries the painting over to the pieces now.
+        std::unique_ptr<wxBusyInfo> paint_busy;
+        if (std::any_of(cut_mo->volumes.begin(), cut_mo->volumes.end(),
+                        [](const ModelVolume *v) { return PaintTransfer::has_painting(*v); })) {
+            paint_busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), plater->get_current_canvas3D()->get_wxglcanvas());
+            wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+        }
 
         ModelObjectCutAttributes attributes = only_if(has_connectors ? true : m_keep_upper, ModelObjectCutAttribute::KeepUpper) |
                                               only_if(has_connectors ? true : m_keep_lower, ModelObjectCutAttribute::KeepLower) |
@@ -3362,6 +3392,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(m_part_selection.get_cut_parts(), dowels_count):
                                              cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m) :
                                                                  cut.perform_with_plane();
+        paint_busy.reset();
 
         // fix_non_manifold_edges
 #ifdef HAS_WIN10SDK

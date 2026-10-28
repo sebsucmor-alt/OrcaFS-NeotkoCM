@@ -270,6 +270,17 @@ public:
     static std::vector<StickerZone> sticker_svg_zones(const std::string& svg_data);
     // s350 — formas del SVG que caen en cada zona (índice = forma de sticker_shapes_in_transform).
     static std::vector<int> sticker_shape_zones(const std::string& svg_data);
+    // NEOTKO_SVGDECAL_TAG — F2: the SVG's area per ZONE (index = sticker_svg_zones), already
+    // occluded inside the SVG (later shapes cover earlier ones) and with no recipes involved, for
+    // the paint decals. Zones are disjoint, so each one can be painted in one pass in any order.
+    // zone_hidden[z] = true ⇒ that zone is transparent (what is under it shows through).
+    static std::vector<ExPolygons> svg_zone_masks(const std::string& svg_data, const Transform3d& to_target,
+                                                  const std::vector<bool>& zone_hidden = {});
+    // NEOTKO_SVGDECAL_TAG — parts: the same walk with any grouping of the shapes. shape_group[k] =
+    // group of shape k (index of sticker_shapes_in_transform), -1 = transparent; groups >= n_groups
+    // are dropped. svg_zone_masks is this with the groups = the zones.
+    static std::vector<ExPolygons> svg_group_masks(const std::string& svg_data, const Transform3d& to_target,
+                                                   const std::vector<int>& shape_group, size_t n_groups);
     // s349 — degradados LINEALES del SVG, por su color medio (la clave con la que los ve el resto
     // del sticker). Para la receta automática y la UI. `stops` = el color del degradado MUESTREADO
     // en t = 0, 0.5 y 1 (interpolando sus paradas, tenga las que tenga); nstops = 3 siempre que

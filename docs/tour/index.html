@@ -138,6 +138,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="#colour">Colour</a>
       <a href="#output">Output</a>
+      <a href="#build">Build &amp; fix</a>
       <a href="#placing">Placing</a>
       <a href="#structure">Structure</a>
       <a href="play.html">Playground</a>
@@ -171,8 +172,8 @@
       </div>
       <button class="hero__replay" type="button" data-intro-replay hidden>▶ Replay intro</button>
       <ul class="stat">
-        <li><b>24</b><span>feature families</span></li>
-        <li><b>2.4.4</b><span>current version</span></li>
+        <li><b>27</b><span>feature families</span></li>
+        <li><b>2.4.9</b><span>current version</span></li>
         <li><b>0</b><span>changed at defaults</span></li>
       </ul>
     </div>
@@ -346,7 +347,7 @@
     <li><a class="card" href="painter.html">
       <span class="card__n">§6</span>
       <span class="card__t">The ColorStitch Painter</span>
-      <p class="card__d">Save Sandwiches as profiles and flood-fill them onto individual faces. Different steps of one object, each with its own recipe, and the weave drawn live on the model.</p>
+      <p class="card__d">Save Sandwiches as profiles and flood-fill them onto individual faces. Different steps of one object, each with its own recipe, and the weave drawn live on the model. Curved shape masks, SVG decals, and painting that survives a cut.</p>
       <span class="card__f">
         <span class="badge badge--free">no gate</span>
         <span class="badge badge--ver badge--plain">2.4.0 rework</span>
@@ -394,7 +395,7 @@
     <li><a class="card" href="extras.html">
       <span class="card__n">§15 · §18 · §19</span>
       <span class="card__t">G-code &amp; finishing</span>
-      <p class="card__d">A layer-ranged, per-tool G-code post-processor you edit as a chart. Real font kerning for embossed text. And bridges that anchor on solid ground before they cross.</p>
+      <p class="card__d">Hotends that switch off when their work is done. A layer-ranged, per-tool G-code post-processor you edit as a chart. Real font kerning for embossed text. Bridges that anchor on solid ground before they cross.</p>
       <span class="card__f">
         <span class="badge badge--gate">Libre (Reprocessor)</span>
         <span class="badge badge--risk">edits real G-code</span>
@@ -404,6 +405,44 @@
 </section>
 
 <!-- ============================================================ placing -->
+<section class="group" id="build">
+  <div class="group__head">
+    <h2>Build &amp; fix</h2>
+    <p>Make and mend geometry inside the slicer, and keep the painting while you do it.</p>
+  </div>
+  <ul class="cards">
+    <li><a class="card" href="construct.html">
+      <span class="card__n">§7</span>
+      <span class="card__t">Align &amp; Construct</span>
+      <p class="card__d">Place one object exactly against another, grow a face into a new solid, run booleans between objects or parts. No other Orca fork has these.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--ver badge--plain">2.4.8</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="construct.html#ac-remesh">
+      <span class="card__n">§7</span>
+      <span class="card__t">Remesh: repair, grow, hollow</span>
+      <p class="card__d">Rebuild a broken model from voxels as one closed solid, make it fatter or thinner, or hollow it into a bowl. Orca's repair only exists on Windows; this one runs everywhere and keeps the painting.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--ver badge--plain">2.4.9</span>
+      </span>
+    </a></li>
+
+    <li><a class="card" href="construct.html#keeppaint">
+      <span class="card__n">§6 · §7</span>
+      <span class="card__t">The painting survives</span>
+      <p class="card__d">Booleans, Split, Cut and Remesh keep every stroke: colour, fuzzy skin, support and seam. A painted skull of a million triangles cuts in under half a second.</p>
+      <span class="card__f">
+        <span class="badge badge--free">no gate</span>
+        <span class="badge badge--ver badge--plain">2.4.8 · 2.4.9</span>
+      </span>
+    </a></li>
+  </ul>
+</section>
+
 <section class="group" id="placing">
   <div class="group__head">
     <h2>Placing things</h2>
@@ -421,8 +460,8 @@
 
     <li><a class="card" href="place.html">
       <span class="card__n">§7 · §17</span>
-      <span class="card__t">Align &amp; Construct · Gravity</span>
-      <p class="card__d">Place one object precisely against another, extrude a face, run a boolean that keeps the painting. Then make the slicer <em>believe</em> it: a face resting on another object prints as solid contact instead of a false bridge over thin air. Drag and drop that lands on the real surface below.</p>
+      <span class="card__t">Gravity · Snap &amp; Drag · Print order</span>
+      <p class="card__d">Make the slicer <em>believe</em> a stack: a face resting on another object prints as solid contact instead of a false bridge over thin air. Drag and drop that lands on the real surface below.</p>
       <span class="card__f">
         <span class="badge badge--gate">True Objects</span>
       </span>
@@ -682,7 +721,7 @@
 
   /* --- 3. TD ------------------------------------------------------------ */
   Tour.demo('band-td', function (host) {
-    var td = 2.6, hex = '#d61f5c';
+    var td = 0.78, hex = '#d61f5c';
     var stripHost = el('div.tstrip');
     var out = el('span');
     host.appendChild(stripHost);
@@ -697,20 +736,20 @@
       }
     }, { height: 54 });
 
-    var range = el('input', { type: 'range', min: 2, max: 90, value: td * 10, 'aria-label': 'TD' });
+    var range = el('input', { type: 'range', min: 5, max: 270, value: td * 100, 'aria-label': 'TD' });
     host.appendChild(el('div.trow', null, [el('span', { text: 'TD' }), range, out]));
 
     function upd() {
       strip.render();
       var tdmm = Optics.tdToMm(td, LAYER);
-      out.innerHTML = '<b>' + td.toFixed(1) + '</b> · ' + Optics.tdBand(td) +
+      out.innerHTML = '<b>' + td.toFixed(2) + '</b> · ' + Optics.tdBand(td) +
         ' · at 0.2 mm, <b>' + (Optics.transmittance(0.2, tdmm) * 100).toFixed(0) +
         '%</b> of the base still shows';
     }
-    range.addEventListener('input', function () { td = parseInt(range.value, 10) / 10; upd(); });
+    range.addEventListener('input', function () { td = parseInt(range.value, 10) / 100; upd(); });
     upd();
     Tour.attract({ host: host, period: 7600, render: upd,
-      onFrame: function (k) { td = 0.3 + k * 8.4; range.value = Math.round(td * 10); } });
+      onFrame: function (k) { td = 0.08 + k * 2.5; range.value = Math.round(td * 100); } });
   });
 
   /* --- 4. PathBlend ----------------------------------------------------- */

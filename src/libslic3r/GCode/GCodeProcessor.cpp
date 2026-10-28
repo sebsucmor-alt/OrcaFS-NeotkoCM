@@ -967,6 +967,11 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
 
     // BBS
     const ConfigOptionStrings* filament_colour = config.option<ConfigOptionStrings>("filament_colour");
+    // NEOTKO 20-oct-2026: al abrir un G-code desde fichero extruder_colors llega VACÍO aquí, así que la
+    // comparación de tamaños de abajo nunca casaba y todo salía #FF8000 (Cube_PLA de Discord: 4 colores
+    // en `filament_colour`, visor naranja entero). Se dimensiona antes, con huecos vacíos para rellenar.
+    if (filament_colour != nullptr && m_result.extruder_colors.empty() && filament_colour->values.size() == m_result.extruders_count)
+        m_result.extruder_colors.assign(m_result.extruders_count, std::string());
     if (filament_colour != nullptr && filament_colour->values.size() == m_result.extruder_colors.size()) {
         for (size_t i = 0; i < m_result.extruder_colors.size(); ++i) {
             if (m_result.extruder_colors[i].empty())

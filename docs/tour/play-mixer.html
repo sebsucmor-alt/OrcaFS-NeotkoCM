@@ -142,6 +142,7 @@
       <a href="../index.html" class="topnav__home">Home</a>
       <a href="index.html#colour">Colour</a>
       <a href="index.html#output">Output</a>
+      <a href="index.html#build">Build &amp; fix</a>
       <a href="index.html#placing">Placing</a>
       <a href="index.html#structure">Structure</a>
       <a href="play.html" aria-current="page">Playground</a>
@@ -234,27 +235,27 @@
 Tour.demo('mixer', function (host) {
   var el = Tour.el;
 
-  /* A small library of plausible spools. TD is in layer-height units, the
-   * same as neotko_td_1..4. These are sensible starting points, not
+  /* A small library of plausible spools. TD is in millimetres, as typed in
+   * the app since 2.4.9. These are sensible starting points, not
    * measurements: your own spools will differ and that is the whole reason
    * the sliders exist. */
   var LIBRARY = [
-    { name: 'PLA white',        hex: '#f2f0eb', td: 0.9 },
-    { name: 'PLA black',        hex: '#1a1c20', td: 0.5 },
-    { name: 'PLA grey',         hex: '#8d9199', td: 0.8 },
-    { name: 'PLA red',          hex: '#c02026', td: 1.6 },
-    { name: 'PLA blue',         hex: '#1d3f8f', td: 1.4 },
-    { name: 'PLA yellow',       hex: '#f2b705', td: 3.4 },
-    { name: 'PLA magenta',      hex: '#d61f5c', td: 2.6 },
-    { name: 'PLA cyan',         hex: '#12a4b8', td: 2.2 },
-    { name: 'PLA green',        hex: '#2e8b45', td: 1.9 },
-    { name: 'PLA orange',       hex: '#e8621f', td: 2.4 },
-    { name: 'Silk gold',        hex: '#d4a537', td: 1.2 },
-    { name: 'Silk silver',      hex: '#c8ccd2', td: 1.0 },
-    { name: 'Natural / clear',  hex: '#e8e4d6', td: 7.5 },
-    { name: 'Translucent red',  hex: '#cc3344', td: 6.0 },
-    { name: 'Translucent blue', hex: '#3355bb', td: 6.0 },
-    { name: 'Matte bone',       hex: '#e3ddd0', td: 0.7 }
+    { name: 'PLA white',        hex: '#f2f0eb', td: 0.27 },
+    { name: 'PLA black',        hex: '#1a1c20', td: 0.15 },
+    { name: 'PLA grey',         hex: '#8d9199', td: 0.24 },
+    { name: 'PLA red',          hex: '#c02026', td: 0.48 },
+    { name: 'PLA blue',         hex: '#1d3f8f', td: 0.42 },
+    { name: 'PLA yellow',       hex: '#f2b705', td: 1.02 },
+    { name: 'PLA magenta',      hex: '#d61f5c', td: 0.78 },
+    { name: 'PLA cyan',         hex: '#12a4b8', td: 0.66 },
+    { name: 'PLA green',        hex: '#2e8b45', td: 0.57 },
+    { name: 'PLA orange',       hex: '#e8621f', td: 0.72 },
+    { name: 'Silk gold',        hex: '#d4a537', td: 0.36 },
+    { name: 'Silk silver',      hex: '#c8ccd2', td: 0.3 },
+    { name: 'Natural / clear',  hex: '#e8e4d6', td: 2.25 },
+    { name: 'Translucent red',  hex: '#cc3344', td: 1.8 },
+    { name: 'Translucent blue', hex: '#3355bb', td: 1.8 },
+    { name: 'Matte bone',       hex: '#e3ddd0', td: 0.21 }
   ];
 
   var S = {
@@ -264,10 +265,10 @@ Tour.demo('mixer', function (host) {
     base: '#8d9199',
     magnify: false,
     filaments: [
-      { name: 'PLA white',   hex: '#f2f0eb', td: 0.9 },
-      { name: 'PLA blue',    hex: '#1d3f8f', td: 1.4 },
-      { name: 'PLA magenta', hex: '#d61f5c', td: 2.6 },
-      { name: 'PLA yellow',  hex: '#f2b705', td: 3.4 }
+      { name: 'PLA white',   hex: '#f2f0eb', td: 0.27 },
+      { name: 'PLA blue',    hex: '#1d3f8f', td: 0.42 },
+      { name: 'PLA magenta', hex: '#d61f5c', td: 0.78 },
+      { name: 'PLA yellow',  hex: '#f2b705', td: 1.02 }
     ],
     zones: {
       penu: { on: false, passes: [{ kind: 'solid', tool: 0, z: 0.20, pctA: 50, toolB: 1, easing: 1 }] },
@@ -340,7 +341,7 @@ Tour.demo('mixer', function (host) {
       });
     });
     out.push('Layer height ' + S.layerH.toFixed(2) + ' mm · TD ' +
-      S.filaments.map(function (f) { return f.td.toFixed(1); }).join(' / '));
+      S.filaments.map(function (f) { return f.td.toFixed(2); }).join(' / '));
     return out.join('\n');
   }
 
@@ -358,8 +359,8 @@ Tour.demo('mixer', function (host) {
       LIBRARY.forEach(function (L, li) {
         sel.appendChild(el('option', { value: String(li), text: L.name, selected: L.name === f.name }));
       });
-      var tdLab = el('span.frow__td', { text: 'TD ' + f.td.toFixed(1) + ' · ' + Optics.tdBand(f.td) });
-      var tdIn = el('input', { type: 'range', min: 0.2, max: 10, step: 0.1, value: f.td, 'aria-label': 'Slot ' + (i+1) + ' TD' });
+      var tdLab = el('span.frow__td', { text: 'TD ' + f.td.toFixed(2) + ' · ' + Optics.tdBand(f.td) });
+      var tdIn = el('input', { type: 'range', min: 0.05, max: 3, step: 0.01, value: f.td, 'aria-label': 'Slot ' + (i+1) + ' TD' });
       tdIn.style.height = '13px';
 
       sw.addEventListener('input', function () { f.hex = sw.value; f.name = 'custom'; redraw(); });
@@ -371,7 +372,7 @@ Tour.demo('mixer', function (host) {
       });
       tdIn.addEventListener('input', function () {
         f.td = parseFloat(tdIn.value);
-        tdLab.textContent = 'TD ' + f.td.toFixed(1) + ' · ' + Optics.tdBand(f.td);
+        tdLab.textContent = 'TD ' + f.td.toFixed(2) + ' · ' + Optics.tdBand(f.td);
         redraw();
       });
 

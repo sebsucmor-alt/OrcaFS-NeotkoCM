@@ -48,6 +48,7 @@ bool zone_colour(const SurfacePassStack& st,
                  bool penu,
                  const std::string& fallback_pattern,
                  const Material mats[4],
+                 float layer_mm,
                  float out_rgb[3],
                  float* out_weight = nullptr);
 
@@ -58,6 +59,7 @@ bool sandwich_colour_legacy(const SurfacePassStack& top,
                             const std::string& fallback_pattern_top,
                             const std::string& fallback_pattern_penu,
                             const Material mats[4],
+                            float layer_mm,
                             float out_rgb[3]);
 
 // Composición física: cada pass del stack es una capa Beer-Lambert apilada
@@ -81,13 +83,17 @@ std::string pass_pattern_of(const SurfacePass& p, bool penu);
 // pila al revés.
 SurfacePassStack reversed_stack(const SurfacePassStack& st);
 void sandwich_colour_bottom(const SurfacePassStack& bottom, const Material mats[4],
-                            const float bg_rgb[3], float out_rgb[3]);
+                            const float bg_rgb[3], double layer_mm, float out_rgb[3]);
 
 // El orden de composición del sandwich completo: penu primero, top encima.
+// 21-oct-2026: `layer_mm` = altura de capa en mm. El ratio de cada pasada es una fracción de capa y
+// el TD va en mm, así que el grosor que entra en Beer-Lambert es ratio × layer_mm (antes se usaba
+// el ratio a pelo: una capa entera contaba como 1 mm). Igual que RealColor y RealView.
 void sandwich_colour_stacked(const SurfacePassStack& top,
                              const SurfacePassStack& penu,
                              const Material mats[4],
                              const float bg_rgb[3],
+                             double layer_mm,
                              float out_rgb[3],
                              float* out_transmit = nullptr);
 

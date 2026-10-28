@@ -788,11 +788,8 @@ public:
 
     // NEOTKO_REALCOLOR_TAG: LUT of TD/rgb per physical tool for the RealColor view,
     // read from raw filament_colour + app_config neotko_td_1..4 (same source as
-    // Sandwich Editor/Painter, see ColorSci.cpp::blend_stacked). NOTE (s166): unlike the
-    // Sandwich/Painter previews, `td` here is baked to MILLIMETERS (neotko_td_N in its native
-    // ratio-units × nominal layer_height) in refresh_realcolor_materials() — RealColor's peel
-    // composites against real physical mm thickness per pass, not a layer-height-relative
-    // ratio, so it needs mm-space TD to stay consistent. See the UNIT FIX comment there.
+    // Sandwich Editor/Painter, see ColorSci.cpp::blend_stacked). `td` is in MILLIMETERS, the same
+    // number the user typed (21-oct-2026; s166 multiplied it by the layer height, now reverted).
     // NEOTKO_REALCOLOR_TAG s251b: ACABADO POR FILAMENTO. Los presets vienen de PHOTO_MODE_PLAN.md
     // §8 (F3), la tabla que ya está shippeada en el renderer de shells — se reusan sus nombres y su
     // orden relativo en vez de inventar una escala nueva. `Custom` no es un preset elegible: es lo
@@ -901,9 +898,11 @@ public:
         std::array<float, 6> light_dirs{};
         unsigned int layers_z_range[2] = { 0, 0 };
         unsigned int moves_first = 0, moves_last = 0;
+        // NEOTKO 21-oct-2026: tipos de línea visibles (ocultar torre/soportes, aquí o en Line Type).
+        unsigned int role_flags = 0;
 
         bool operator==(const RealColorFingerprint& other) const {
-            return canvas_w == other.canvas_w && canvas_h == other.canvas_h &&
+            return canvas_w == other.canvas_w && canvas_h == other.canvas_h && role_flags == other.role_flags &&
                    layers_z_range[0] == other.layers_z_range[0] && layers_z_range[1] == other.layers_z_range[1] &&
                    moves_first == other.moves_first && moves_last == other.moves_last &&
                    td == other.td && rgb == other.rgb && finish == other.finish &&
@@ -1812,7 +1811,13 @@ private:
     // que TODOS los sitios que lo consultan durante un mismo export den la misma respuesta — si
     // ensure_realcolor_fbos() y el bucle de peel discreparan, los buffers y el viewport tendrían
     // tamaños distintos.
-    int realcolor_supersample() const { return m_realcolor_export ? m_realcolor_export_ss : 2; }
+    // NEOTKO 20-oct-2026: «Draft» = RealColor rápido para buscar ángulos (Sebas: cada parada de cámara
+    // costaba 20–30 s). Sin supersample y con pocas capas de pelado; la foto (export) va siempre entera.
+    // 21-oct-2026: Draft POR DEFECTO (la vista entera tarda 15–20 s con el TD en mm; Draft ~1 s).
+    bool m_realcolor_draft = true;
+    // Supersample con el que se crearon los FBO, para rehacerlos al cambiar de Draft a normal.
+    int  m_realcolor_fbo_ss = 0;
+    int realcolor_supersample() const { return m_realcolor_export ? m_realcolor_export_ss : (m_realcolor_draft ? 1 : 2); }
 
     // Prueba instrumentada del camino de export: reserva a tamaño de fichero, mide, y lo deja todo
     // como estaba. NO escribe ninguna imagen todavía — existe para que los tres modos de fallo

@@ -8,6 +8,8 @@
 #include <functional>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
+#include "PolygonMask2D.hpp" // NEOTKO_SVGDECAL_TAG
+#include <memory>
 
 namespace Slic3r {
 
@@ -96,6 +98,17 @@ public:
 
         static bool is_facet_visible(const Cursor &cursor, int facet_idx, const std::vector<Vec3f> &face_normals);
 
+        // NEOTKO_PAINTERPRO_TAG — Painter Pro Mode F5 (commit 4): optional occlusion test, mesh
+        // coords -> true if the camera really sees that point (nothing of the object in front of
+        // it). is_facet_visible() above only rejects back faces; a front face hidden behind
+        // another part of the object (inside of a ring, a wall behind a handle) passed and the
+        // screen-space masks painted "through" it. Only the Rectangle/Polygon projection cursors
+        // use it; it's empty (= everything seen) everywhere else.
+        using VisibilityTest = std::function<bool(const Vec3f &)>;
+        void set_visibility_test(VisibilityTest test) { m_visibility_test = std::move(test); }
+        bool is_point_seen(const Vec3f &point) const { return !m_visibility_test || m_visibility_test(point); }
+        bool has_visibility_test() const { return bool(m_visibility_test); }
+
     protected:
         explicit Cursor(const Vec3f &source_, float radius_world, const Transform3d &trafo_, const ClippingPlane &clipping_plane_);
 
@@ -109,6 +122,8 @@ public:
         Vec3f       dir = Vec3f(0.f, 0.f, 0.f);
 
         ClippingPlane clipping_plane; // Clipping plane to limit painting to not clipped facets only
+
+        VisibilityTest m_visibility_test;
 
         friend TriangleSelector;
     };
@@ -293,6 +308,9 @@ public:
         {
             return TriangleSelector::Cursor::is_facet_visible(*this, facet_idx, face_normals);
         }
+        // With an occlusion test the "rectangle" seen on the object has holes (whatever is hidden),
+        // so it's no longer convex - same reasoning as PolygonProjectionCursor.
+        bool all_vertices_inside_implies_whole_triangle_inside() const override { return !has_visibility_test(); }
 
     private:
         bool project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const;
@@ -359,6 +377,61 @@ public:
         Matrix4d            m_view_projection_matrix;
         std::array<int, 4>  m_viewport;
         std::vector<Vec2f>  m_polygon;
+    };
+
+    // NEOTKO_SVGDECAL_TAG — F1 (docs/WIP/SVG_DECALS_PROPAINTER_PLAN.md): screen-space mask made of
+    // several rings with holes (an SVG), painted in ONE select_patch() pass. Same tests as
+    // PolygonProjectionCursor, but (1) every query goes through PolygonMask2D's grid instead of
+    // walking all the edges, and (2) the cheap geometric test runs first: occlusion rays are only
+    // cast for triangles that actually touch the mask. Holes stay unpainted (they are not painted
+    // with NONE afterwards, which also wiped paint that was already there).
+    class PolygonSetProjectionCursor : public SinglePointCursor
+    {
+    public:
+        PolygonSetProjectionCursor() = delete;
+        ~PolygonSetProjectionCursor() override = default;
+
+        // mask: screen-space rings in pixels (Y down, matches mouse coords), shared by every mesh.
+        explicit PolygonSetProjectionCursor(const Vec3f &camera_pos_mesh, const Vec3f &camera_target_mesh,
+                                             const Matrix4d &view_projection_matrix, const std::array<int, 4> &viewport,
+                                             std::shared_ptr<const PolygonMask2D> mask,
+                                             const Transform3d &trafo_, const ClippingPlane &clipping_plane_)
+            : SinglePointCursor(camera_target_mesh, camera_pos_mesh, 1.f, trafo_, clipping_plane_)
+            , m_view_projection_matrix(view_projection_matrix)
+            , m_viewport(viewport)
+            , m_mask(std::move(mask))
+        {
+            assert(m_mask);
+        }
+
+        static std::unique_ptr<Cursor> cursor_factory(const Vec3f &camera_pos_mesh, const Vec3f &camera_target_mesh,
+                                                       const Matrix4d &view_projection_matrix, const std::array<int, 4> &viewport,
+                                                       std::shared_ptr<const PolygonMask2D> mask,
+                                                       const Transform3d &trafo_matrix, const ClippingPlane &clipping_plane)
+        {
+            return std::make_unique<TriangleSelector::PolygonSetProjectionCursor>(camera_pos_mesh, camera_target_mesh,
+                view_projection_matrix, viewport, std::move(mask), trafo_matrix, clipping_plane);
+        }
+
+        bool is_mesh_point_inside(const Vec3f &point) const override;
+        bool is_pointer_in_triangle(const Vec3f &p1, const Vec3f &p2, const Vec3f &p3) const override;
+        bool is_edge_inside_cursor(const Triangle &tr, const std::vector<Vertex> &vertices) const override;
+        bool is_facet_visible(int facet_idx, const std::vector<Vec3f> &face_normals) const override
+        {
+            return m_any_facing || TriangleSelector::Cursor::is_facet_visible(*this, facet_idx, face_normals);
+        }
+        // NEOTKO_SVGDECAL_TAG — F3 "through": facets facing away from the eye are painted too.
+        void set_any_facing(bool on) { m_any_facing = on; }
+        // Concave and holed: 3 vertices inside never proves the whole triangle is inside.
+        bool all_vertices_inside_implies_whole_triangle_inside() const override { return false; }
+
+    private:
+        bool project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const;
+
+        Matrix4d                              m_view_projection_matrix;
+        std::array<int, 4>                    m_viewport;
+        std::shared_ptr<const PolygonMask2D>  m_mask;
+        bool                                  m_any_facing = false;
     };
 
     struct TriangleBitStreamMapping
@@ -457,8 +530,9 @@ public:
     // Repaint the whole mesh from a function that gives the state at any point (mesh coords).
     // Each triangle is sampled at its corners, edge midpoints and centre; where the samples
     // disagree, or the triangle is bigger than the painting it sits on, it is split (down to
-    // `edge_limit`) and sampled again.
-    void resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit);
+    // `edge_limit`) and sampled again. Facets flagged in `skip` are left unpainted and unsampled
+    // (their painting is copied in by the caller).
+    void resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit, const std::vector<bool> *skip = nullptr);
     // NEOTKO_PAINTCARRY_TAG_END
 
     // Select all triangles fully inside the circle, subdivide where needed.

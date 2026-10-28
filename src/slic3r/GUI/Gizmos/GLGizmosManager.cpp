@@ -34,6 +34,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp" // NEOTKO_HAE_TAG
 #include "slic3r/GUI/Gizmos/GLGizmoSupportZones.hpp" // NEOTKO_SUPPORTZONES_TAG s286
 #include "slic3r/GUI/Gizmos/GLGizmoNeoStroke.hpp" // NEOTKO_NEOSTROKE_TAG s337
+#include "slic3r/GUI/Gizmos/GLGizmoPrintOrder.hpp" // NEOTKO_PRINTORDER_TAG 2_49
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -205,6 +206,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::NeoStroke): // NEOTKO_NEOSTROKE_TAG s337
             gizmo->set_icon_filename(m_is_dark ? "toolbar_neostroke_dark.svg" : "toolbar_neostroke.svg");
             break;
+        case (EType::PrintOrder): // NEOTKO_PRINTORDER_TAG 2_49
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_print_order_dark.svg" : "toolbar_print_order.svg");
+            break;
         }
 
     }
@@ -266,6 +270,9 @@ bool GLGizmosManager::init()
     // NEOTKO_NEOSTROKE_TAG s337 — el visor de NeoStroke. Va justo detrás de SupportZones, igual que en EType.
     // 🚨 Los dos SVG tienen que existir: si falta uno, init() falla y se caen TODOS los gizmos.
     m_gizmos.emplace_back(new GLGizmoNeoStroke(m_parent, m_is_dark ? "toolbar_neostroke_dark.svg" : "toolbar_neostroke.svg", EType::NeoStroke));
+    // NEOTKO_PRINTORDER_TAG 2_49 — Print order (LibreMode-gated via on_is_activable). Right after
+    // NeoStroke, same as in EType. 🚨 Both SVGs must exist or every gizmo is dropped.
+    m_gizmos.emplace_back(new GLGizmoPrintOrder(m_parent, m_is_dark ? "toolbar_print_order_dark.svg" : "toolbar_print_order.svg", EType::PrintOrder));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -1470,6 +1477,11 @@ bool GLGizmosManager::is_in_editing_mode(bool error_notification) const
 
 }
 
+
+bool GLGizmosManager::is_camera_locked() const
+{
+    return m_current != Undefined && m_gizmos[m_current]->locks_camera();
+}
 
 bool GLGizmosManager::is_hiding_instances() const
 {
