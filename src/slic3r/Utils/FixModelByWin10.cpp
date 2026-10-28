@@ -33,6 +33,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/PaintTransfer.hpp"
 #include "../GUI/GUI.hpp"
 #include "../GUI/I18N.hpp"
 #include "../GUI/MsgDialog.hpp"
@@ -400,7 +401,9 @@ bool fix_model_by_win10_sdk_gui(ModelObject &model_object, int volume_idx, GUI::
 	 			meshes_repaired.emplace_back(std::move(model.objects.front()->volumes.front()->mesh()));
 			}
 			for (size_t i = 0; i < volumes.size(); ++ i) {
-				volumes[i]->set_mesh(std::move(meshes_repaired[i]));
+				// The repair used to drop the painting (Orca cleared it before repairing); carry it
+				// over to the repaired mesh.
+				PaintTransfer::set_mesh_keep_painting(*volumes[i], std::move(meshes_repaired[i]));
 				volumes[i]->calculate_convex_hull();
 				volumes[i]->invalidate_convex_hull_2d();
 				volumes[i]->set_new_unique_id();

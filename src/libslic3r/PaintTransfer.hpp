@@ -97,6 +97,11 @@ private:
 // their meshes). Returns false, without touching `target`, when some facet has no match.
 bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::vector<int> &facet_map);
 
+// Replaces the mesh of `volume` with `mesh` (a repair, which rebuilds the mesh) and keeps its
+// painting: facets the repair left as they were copy theirs, the new ones are resampled from the
+// old mesh. Without painting it is a plain set_mesh().
+void set_mesh_keep_painting(ModelVolume &volume, TriangleMesh &&mesh);
+
 } // namespace PaintTransfer
 } // namespace Slic3r
 
