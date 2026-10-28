@@ -135,13 +135,37 @@ Stats transfer(const std::vector<Source> &sources, ModelVolume &target, const Tr
     return stats;
 }
 
-Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int base_filament)
+// Where the bits of each facet are in serialized painting: facet -> [begin, end).
+static std::unordered_map<int, std::pair<int, int>> bits_by_facet(const TriangleSelector::TriangleSplittingData &data)
+{
+    std::vector<TriangleSelector::TriangleBitStreamMapping> by_start = data.triangles_to_split;
+    std::sort(by_start.begin(), by_start.end(), [](const auto &l, const auto &r) { return l.bitstream_start_idx < r.bitstream_start_idx; });
+    std::unordered_map<int, std::pair<int, int>> bits;
+    bits.reserve(by_start.size());
+    for (size_t i = 0; i < by_start.size(); ++i)
+        bits[by_start[i].triangle_idx] = { by_start[i].bitstream_start_idx,
+                                           i + 1 < by_start.size() ? by_start[i + 1].bitstream_start_idx : int(data.bitstream.size()) };
+    return bits;
+}
+
+Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int base_filament, const std::vector<int> *facet_map)
 {
     Stats stats;
     const std::vector<Source>         &sources  = m->sources;
     const std::vector<PreparedSource> &prepared = m->prepared;
     if (sources.empty() || target.mesh().empty())
         return stats;
+    // A facet copied as it is keeps the source's painting, so this only holds for one source that
+    // prints with the target's filament (else its unpainted skin would need colouring).
+    if (facet_map && (sources.size() != 1 || facet_map->size() != target.mesh().its.indices.size() ||
+                      sources.front().filament != base_filament))
+        facet_map = nullptr;
+    std::vector<bool> copied;
+    if (facet_map) {
+        copied.resize(facet_map->size());
+        for (size_t i = 0; i < facet_map->size(); ++i)
+            copied[i] = (*facet_map)[i] >= 0 || (*facet_map)[i] == FACET_UNPAINTED;
+    }
 
     // Two skins closer than this count as the same place, and the earlier source wins.
     const BoundingBoxf3 bbox = target.mesh().transformed_bounding_box(target_to_world);
@@ -336,11 +360,38 @@ Stats Transfer::to(ModelVolume &target, const Transform3d &target_to_world, int 
             if (colour && out.state == EnforcerBlockerType::NONE && sources[hit.source].filament != base_filament)
                 out.state = EnforcerBlockerType(sources[hit.source].filament);
             return out;
-        }, EDGE_LIMIT);
+        }, EDGE_LIMIT, facet_map ? &copied : nullptr);
         stats.resample_ms += ms_since(t_resample);
 
         const auto t_store = std::chrono::steady_clock::now();
-        (target.*layer).set(selector);
+        if (facet_map) {
+            // Splice: copied facets take the source's bits, the others the resampled ones.
+            const FacetsAnnotation &from = sources.front().volume->*layer;
+            const TriangleSelector::TriangleSplittingData resampled = selector.serialize();
+            const auto src_bits = from.empty() ? std::unordered_map<int, std::pair<int, int>>{} : bits_by_facet(from.get_data());
+            const auto new_bits = bits_by_facet(resampled);
+            TriangleSelector::TriangleSplittingData out;
+            for (int t = 0; t < int(facet_map->size()); ++t) {
+                const int  src_facet = (*facet_map)[t];
+                if (src_facet == FACET_UNPAINTED)
+                    continue;
+                const auto &bits     = src_facet >= 0 ? src_bits : new_bits;
+                auto        it       = bits.find(src_facet >= 0 ? src_facet : t);
+                if (it == bits.end())
+                    continue;
+                const std::vector<bool> &stream = src_facet >= 0 ? from.get_data().bitstream : resampled.bitstream;
+                out.triangles_to_split.emplace_back(t, int(out.bitstream.size()));
+                out.bitstream.insert(out.bitstream.end(), stream.begin() + it->second.first, stream.begin() + it->second.second);
+            }
+            if (out.triangles_to_split.empty()) {
+                (target.*layer).reset();
+            } else {
+                TriangleSelector spliced(target.mesh());
+                spliced.deserialize(out);
+                (target.*layer).set(spliced);
+            }
+        } else
+            (target.*layer).set(selector);
         stats.store_ms += ms_since(t_store);
         ++stats.layers;
     }
@@ -419,13 +470,7 @@ bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::ve
         }
         // Where the bits of each source facet are: from its start to the start of the next one.
         const TriangleSelector::TriangleSplittingData &data = from.get_data();
-        std::vector<TriangleSelector::TriangleBitStreamMapping> by_start = data.triangles_to_split;
-        std::sort(by_start.begin(), by_start.end(), [](const auto &l, const auto &r) { return l.bitstream_start_idx < r.bitstream_start_idx; });
-        std::unordered_map<int, std::pair<int, int>> bits; // source facet -> [begin, end)
-        bits.reserve(by_start.size());
-        for (size_t i = 0; i < by_start.size(); ++i)
-            bits[by_start[i].triangle_idx] = { by_start[i].bitstream_start_idx,
-                                               i + 1 < by_start.size() ? by_start[i + 1].bitstream_start_idx : int(data.bitstream.size()) };
+        const std::unordered_map<int, std::pair<int, int>> bits = bits_by_facet(data); // source facet -> [begin, end)
 
         TriangleSelector::TriangleSplittingData out;
         for (size_t t = 0; t < facet_map.size(); ++t) {
@@ -445,6 +490,7 @@ bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::ve
     }
     return true;
 }
+
 
 } // namespace PaintTransfer
 } // namespace Slic3r

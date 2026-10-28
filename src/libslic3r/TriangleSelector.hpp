@@ -428,8 +428,9 @@ public:
     // Repaint the whole mesh from a function that gives the state at any point (mesh coords).
     // Each triangle is sampled at its corners, edge midpoints and centre; where the samples
     // disagree, or the triangle is bigger than the painting it sits on, it is split (down to
-    // `edge_limit`) and sampled again.
-    void resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit);
+    // `edge_limit`) and sampled again. Facets flagged in `skip` are left unpainted and unsampled
+    // (their painting is copied in by the caller).
+    void resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit, const std::vector<bool> *skip = nullptr);
 
     // Select all triangles fully inside the circle, subdivide where needed.
     void select_patch(int                       facet_start,                   // facet of the original mesh (unsplit) that the hit point belongs to

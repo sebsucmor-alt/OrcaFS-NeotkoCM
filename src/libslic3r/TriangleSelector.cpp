@@ -998,7 +998,8 @@ void TriangleSelector::split_triangle(int facet_idx, const Vec3i32 &neighbors)
 
     // In case the object is non-uniformly scaled, transform the
     // points to world coords.
-    if (! m_cursor->uniform_scaling) {
+    // resample() splits with no cursor.
+    if (m_cursor && ! m_cursor->uniform_scaling) {
         for (size_t i=0; i<pts.size(); ++i) {
             pts_transformed[i] = m_cursor->trafo * (*pts[i]);
             pts[i] = &pts_transformed[i];
@@ -1418,7 +1419,7 @@ struct ResamplePlanner
 };
 } // namespace
 
-void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit)
+void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit, const std::vector<bool> *skip)
 {
     reset();
     set_edge_limit(edge_limit);
@@ -1428,6 +1429,10 @@ void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)>
     std::vector<std::vector<int16_t>> plans(m_orig_size_indices);
     tbb::parallel_for(tbb::blocked_range<int>(0, m_orig_size_indices), [&](const tbb::blocked_range<int> &range) {
         for (int facet_idx = range.begin(); facet_idx < range.end(); ++facet_idx) {
+            if (skip && (*skip)[facet_idx]) {
+                plans[facet_idx].assign(1, int16_t(EnforcerBlockerType::NONE));
+                continue;
+            }
             const std::array<int, 3> &vi = m_triangles[facet_idx].verts_idxs;
             const Vec3f a = m_vertices[vi[0]].v, b = m_vertices[vi[1]].v, c = m_vertices[vi[2]].v;
             ResamplePlanner planner{ sampler, m_edge_limit_sqr, plans[facet_idx] };
