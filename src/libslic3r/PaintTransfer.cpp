@@ -492,5 +492,26 @@ bool copy_painting(const ModelVolume &source, ModelVolume &target, const std::ve
 }
 
 
+void set_mesh_keep_painting(ModelVolume &volume, TriangleMesh &&mesh)
+{
+    if (! has_painting(volume)) {
+        volume.set_mesh(std::move(mesh));
+        return;
+    }
+    // Keep the old mesh and its painting in a copy while the volume takes the new one.
+    Model        tmp;
+    ModelObject *tmp_object = tmp.add_object();
+    ModelVolume *old        = tmp_object->add_volume(volume);
+    Source src;
+    src.volume   = old;
+    src.to_world = volume.get_matrix();
+    src.filament = effective_filament(volume);
+
+    volume.set_mesh(std::move(mesh));
+
+    const std::vector<int> facet_map = FacetMatcher(old->mesh().its).match(volume.mesh().its);
+    Transfer(std::vector<Source>{ src }).to(volume, volume.get_matrix(), src.filament, &facet_map);
+}
+
 } // namespace PaintTransfer
 } // namespace Slic3r
