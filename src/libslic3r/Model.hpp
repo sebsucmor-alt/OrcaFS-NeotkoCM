@@ -348,6 +348,127 @@ enum class ModelVolumeType : int {
     SUPPORT_ENFORCER,
 };
 
+// A paint decal: an SVG card floating around the object, looking at it from one direction; Apply projects it onto the object
+// and BAKES it into the colour paint (mmu_segmentation_facets), one filament per SVG colour zone.
+// It is not resolved at slice time: the card is kept only to be moved and applied again. Everything is in the OBJECT frame (instance transform excluded), so cards
+// follow the object when it is moved, rotated or scaled.
+//   The card plane goes through `centre`, perpendicular to `dir` (unit, from the object towards
+//   the viewer); `up` (unit, ⟂ dir) is its vertical. Card coordinates (u, v) are mm along
+//   right = up × dir and up. The SVG (its own mm, Y up, as SvgPaint reads it) sits on the
+//   card through (u, v) = lin * svg + off.
+//   Ortho: rays parallel to -dir. Perspective: rays from the eye at centre + dir * eye_dist.
+//   through = false: only the first surface each ray meets is painted; true: every one it crosses.
+struct PaintDecalZone
+{
+    int      zone   = -1;     // index in SvgPaint::zones(svg_data)
+    uint32_t rgb    = 0;      // 0xRRGGBB of the SVG colour (mean for a gradient)
+    int      state  = 1;      // filament / Mixed Filament id it paints with
+    bool     hidden = false;  // transparent: not painted, shows what the SVG has under it
+
+    template<class Archive> void serialize(Archive& ar) { ar(zone, rgb, state, hidden); }
+    bool operator==(const PaintDecalZone& o) const { return zone == o.zone && rgb == o.rgb && state == o.state && hidden == o.hidden; }
+    bool operator!=(const PaintDecalZone& o) const { return !(*this == o); }
+};
+
+// One shape of the SVG set apart from its colour. Only the parts the
+// user changed are stored.
+struct PaintDecalPart
+{
+    int      shape  = -1;     // index in SvgPaint::shapes(svg_data)
+    int      state  = -1;     // its own filament / Mixed Filament id; -1 = the one of its colour
+    bool     hidden = false;  // off: transparent, like a colour with its eye off
+
+    template<class Archive> void serialize(Archive& ar) { ar(shape, state, hidden); }
+    bool operator==(const PaintDecalPart& o) const { return shape == o.shape && state == o.state && hidden == o.hidden; }
+    bool operator!=(const PaintDecalPart& o) const { return !(*this == o); }
+};
+
+// What an SVG decal paints, as disjoint groups: group z (< number of zones) is colour z, and each
+// part with its own filament adds one group after them, in the order of `parts`. A group's
+// PaintDecalZone carries the filament it paints with (zone = its group index, hidden = not painted).
+// shape_group[k] = group of shape k of the SVG, -1 = transparent.
+struct PaintDecalGroups
+{
+    std::vector<PaintDecalZone> groups;
+    std::vector<int>            shape_group;
+};
+PaintDecalGroups paint_decal_groups(const std::string& svg_data, const std::vector<PaintDecalZone>& zones,
+                                    const std::vector<PaintDecalPart>& parts);
+
+struct PaintDecal
+{
+    std::string           name;
+    std::string           svg_data;            // cleaned SVG (SvgPaint::flatten)
+    std::array<double, 3> centre { 0., 0., 0. };
+    std::array<double, 3> dir    { 0., 0., 1. };
+    std::array<double, 3> up     { 0., 1., 0. };
+    bool                  perspective = false;
+    double                eye_dist    = 0.;   // perspective only
+    std::array<double, 4> lin { 1., 0., 0., 1. };   // row major 2x2
+    std::array<double, 2> off { 0., 0. };
+    bool                  through = false;
+    std::vector<PaintDecalZone> zones;
+    bool                  hidden = false;      // card not drawn, skipped by "Apply all"
+    bool                  locked = false;      // cannot be edited or deleted
+    // Corner deform: homography (row major 3x3, last entry 1) in the SVG frame, from the SVG
+    // as drawn to the SVG as placed on the card. Identity = no deform. Straight lines stay straight.
+    std::array<double, 9> warp { 1., 0., 0., 0., 1., 0., 0., 0., 1. };
+    // Symmetry: bit 0 = mirror across the object's X plane, bit 1 = Y, bit 2 = Z, all through
+    // the centre of the object's box. Copies are not stored: with_mirror_copies() makes them.
+    int                   mirror = 0;
+    bool                  mirror_readable = false;   // copies placed mirrored but not flipped (text)
+    std::vector<PaintDecalPart> parts;                // shapes set apart from their colour
+
+    // 4x4 projective map from an OBJECT-frame point p to the SVG frame: with h = M * [p; 1],
+    // svg = (h.x / h.w, h.y / h.w), valid while h.w > 0 (in front of the eye). Row 2 is unused.
+    Matrix4d object_to_svg() const;
+    // A point of the SVG frame placed on the card, in the object frame.
+    Vec3d svg_to_object(const Vec2d& svg) const;
+    // The eye in the object frame (perspective), or a point far along dir (ortho).
+    Vec3d eye_object() const;
+    Matrix3d warp_matrix() const;
+    // This decal followed by one mirrored copy per combination of its mirror planes (X, Y, XY...),
+    // reflected through mirror_centre (object frame). A copy is an exact reflection: the SVG comes
+    // out mirrored for one plane, turned for two.
+    std::vector<PaintDecal> with_mirror_copies(const Vec3d& mirror_centre) const;
+
+    template<class Archive> void serialize(Archive& ar)
+    {
+        ar(name, svg_data, centre[0], centre[1], centre[2], dir[0], dir[1], dir[2], up[0], up[1], up[2],
+           perspective, eye_dist, lin[0], lin[1], lin[2], lin[3], off[0], off[1], through, zones, hidden, locked);
+        for (double& v : warp)
+            ar(v);
+        ar(mirror, mirror_readable, parts);
+    }
+    bool operator==(const PaintDecal& o) const
+    {
+        return name == o.name && svg_data == o.svg_data && centre == o.centre && dir == o.dir && up == o.up &&
+               perspective == o.perspective && eye_dist == o.eye_dist && lin == o.lin && off == o.off &&
+               through == o.through && zones == o.zones && hidden == o.hidden && locked == o.locked &&
+               warp == o.warp && mirror == o.mirror && mirror_readable == o.mirror_readable && parts == o.parts;
+    }
+    bool operator!=(const PaintDecal& o) const { return !(*this == o); }
+};
+
+// The object's symmetry for painting, shared by every decal and the brush: the mirror planes cross at `centre` (object frame) when custom_centre, else at the centre
+// of the object's mesh box.
+struct PaintSymmetry
+{
+    bool                  custom_centre = false;
+    std::array<double, 3> centre { 0., 0., 0. };
+    // Brush symmetry: mirror planes of every brush stroke (bits as PaintDecal::mirror:
+    // 1 = X, 2 = Y, 4 = Z), through the same centre as the decals.
+    int                   brush = 0;
+
+    template<class Archive> void serialize(Archive& ar) { ar(custom_centre, centre[0], centre[1], centre[2], brush); }
+    bool operator==(const PaintSymmetry& o) const { return custom_centre == o.custom_centre && centre == o.centre && brush == o.brush; }
+    bool operator!=(const PaintSymmetry& o) const { return !(*this == o); }
+};
+
+// The plane homography taking src[i] to dst[i] (4 points each, no three on a line), normalised
+// so its last entry is 1. Identity when the system has no solution.
+Matrix3d homography_from_quads(const std::array<Vec2d, 4>& src, const std::array<Vec2d, 4>& dst);
+
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
 // and possibly having multiple modifier volumes, each modifier volume with its set of parameters and materials.
 // Each ModelObject may be instantiated mutliple times, each instance having different placement on the print bed,
@@ -400,6 +521,12 @@ public:
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
+
+    // Paint decals of this object (see struct PaintDecal), in the order "Apply all" paints them
+    // (later ones on top). Copied in assign_copy, in undo/redo and in the 3mf. Not part of
+    // slicing: what prints is the painting they leave.
+    std::vector<PaintDecal> paint_decals;
+    PaintSymmetry           paint_symmetry;   // where the mirror planes cross, and the brush's planes
 
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
@@ -702,7 +829,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, paint_decals, paint_symmetry);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -715,7 +842,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id);
+            cut_connectors, cut_id, paint_decals, paint_symmetry);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)

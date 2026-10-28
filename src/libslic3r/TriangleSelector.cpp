@@ -247,7 +247,8 @@ void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&c
     // world coords and does not change after scaling.
     const bool is_area_cursor = dynamic_cast<TriangleSelector::HeightRange *>(m_cursor.get()) != nullptr
         || dynamic_cast<TriangleSelector::RectangleProjectionCursor *>(m_cursor.get()) != nullptr
-        || dynamic_cast<TriangleSelector::PolygonProjectionCursor *>(m_cursor.get()) != nullptr;
+        || dynamic_cast<TriangleSelector::PolygonProjectionCursor *>(m_cursor.get()) != nullptr
+        || dynamic_cast<TriangleSelector::PolygonSetProjectionCursor *>(m_cursor.get()) != nullptr;
 
     if (m_old_cursor_radius_sqr != m_cursor->radius_sqr) {
         // BBS: improve details for large cursor radius
@@ -2657,6 +2658,86 @@ bool TriangleSelector::PolygonProjectionCursor::is_pointer_in_triangle(const Vec
             if (screen_segments_intersect(m_polygon[previous], m_polygon[i], triangle[side], triangle[side < 2 ? side + 1 : 0]))
                 return true;
     return false;
+}
+
+// Geometry first, occlusion rays last: on a big object almost every
+// facet is far from the mask and is rejected by its screen bounding box without casting a ray.
+bool TriangleSelector::PolygonSetProjectionCursor::project_to_screen(const Vec3f &mesh_point, Vec2f &out_screen) const
+{
+    return project_mesh_point_to_screen(this->trafo, m_view_projection_matrix, m_viewport, mesh_point, out_screen);
+}
+
+bool TriangleSelector::PolygonSetProjectionCursor::is_mesh_point_inside(const Vec3f &point) const
+{
+    Vec2f screen;
+    if (!project_to_screen(point, screen))
+        return false;
+    if (!m_mask->inside(screen.x(), screen.y()))
+        return false;
+
+    return is_mesh_point_not_clipped(point, clipping_plane) && is_point_seen(point);
+}
+
+bool TriangleSelector::PolygonSetProjectionCursor::is_edge_inside_cursor(const Triangle &tr, const std::vector<Vertex> &vertices) const
+{
+    std::array<Vec2f, 3> pts;
+    std::array<bool, 3>  valid;
+    float min_x = FLT_MAX, min_y = FLT_MAX, max_x = -FLT_MAX, max_y = -FLT_MAX;
+    for (int i = 0; i < 3; ++i) {
+        valid[i] = project_to_screen(vertices[tr.verts_idxs[i]].v, pts[i]);
+        if (valid[i]) {
+            min_x = std::min(min_x, pts[i].x()); max_x = std::max(max_x, pts[i].x());
+            min_y = std::min(min_y, pts[i].y()); max_y = std::max(max_y, pts[i].y());
+        }
+    }
+    if (!m_mask->bbox_overlaps(min_x, min_y, max_x, max_y))
+        return false;
+
+    // An edge enters the mask: one of its ends is inside, or it crosses a ring.
+    bool touches = false;
+    for (int side = 0; side < 3 && !touches; ++side) {
+        const int a = side;
+        const int b = side < 2 ? side + 1 : 0;
+        if (!valid[a] || !valid[b])
+            continue;
+        touches = m_mask->inside(pts[a].x(), pts[a].y()) || m_mask->inside(pts[b].x(), pts[b].y())
+               || m_mask->segment_crosses_boundary(pts[a].x(), pts[a].y(), pts[b].x(), pts[b].y());
+    }
+    if (!touches)
+        return false;
+
+    return triangle_seen(*this, vertices[tr.verts_idxs[0]].v, vertices[tr.verts_idxs[1]].v, vertices[tr.verts_idxs[2]].v) != TriangleSeen::None;
+}
+
+// Same answer as PolygonProjectionCursor::is_pointer_in_triangle(), reordered so the rays are cast
+// only when the geometry already says yes.
+bool TriangleSelector::PolygonSetProjectionCursor::is_pointer_in_triangle(const Vec3f &p1, const Vec3f &p2, const Vec3f &p3) const
+{
+    std::array<Vec2f, 3> tri;
+    if (!project_to_screen(p1, tri[0]) || !project_to_screen(p2, tri[1]) || !project_to_screen(p3, tri[2]))
+        return false;
+
+    const float min_x = std::min({ tri[0].x(), tri[1].x(), tri[2].x() }), max_x = std::max({ tri[0].x(), tri[1].x(), tri[2].x() });
+    const float min_y = std::min({ tri[0].y(), tri[1].y(), tri[2].y() }), max_y = std::max({ tri[0].y(), tri[1].y(), tri[2].y() });
+    if (!m_mask->bbox_overlaps(min_x, min_y, max_x, max_y))
+        return false;
+
+    // The mask boundary reaches inside the triangle: a ring vertex inside it, or a ring edge
+    // crossing one of its sides.
+    bool boundary_inside = m_mask->any_vertex_in_triangle(tri[0].x(), tri[0].y(), tri[1].x(), tri[1].y(), tri[2].x(), tri[2].y());
+    for (int side = 0; side < 3 && !boundary_inside; ++side) {
+        const Vec2f &a = tri[side];
+        const Vec2f &b = tri[side < 2 ? side + 1 : 0];
+        boundary_inside = m_mask->segment_crosses_boundary(a.x(), a.y(), b.x(), b.y());
+    }
+    if (boundary_inside)
+        return triangle_seen(*this, p1, p2, p3) != TriangleSeen::None;
+
+    // Partly hidden triangle touching the mask: subdivide along the occlusion edge.
+    bool vertex_inside = false;
+    for (const Vec2f &v : tri)
+        vertex_inside = vertex_inside || m_mask->inside(v.x(), v.y());
+    return vertex_inside && triangle_seen(*this, p1, p2, p3) == TriangleSeen::Some;
 }
 
 } // namespace Slic3r

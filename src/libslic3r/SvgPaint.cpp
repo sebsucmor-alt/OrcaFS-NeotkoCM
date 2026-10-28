@@ -4,6 +4,7 @@
 #include "SvgPaint.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
+#include "Model.hpp"
 #include "NSVGUtils.hpp"
 
 #include <algorithm>
@@ -402,6 +403,49 @@ std::vector<ExPolygons> zone_masks(const std::string& svg_data, const Transform3
             z = -1;
     return group_masks(svg_data, to_target, shape_group, loc->zones.size());
 }
+
+} // namespace SvgPaint
+
+PaintDecalGroups paint_decal_groups(const std::string& svg_data, const std::vector<PaintDecalZone>& zones,
+                                    const std::vector<PaintDecalPart>& parts)
+{
+    PaintDecalGroups out;
+    if (svg_data.empty()) return out;
+    const std::shared_ptr<const SvgPaint::LocalSvg> loc = SvgPaint::local_svg(svg_data);
+    const size_t n_zones = loc->zones.size();
+    out.groups.resize(n_zones);
+    for (size_t z = 0; z < n_zones; ++z) {
+        out.groups[z].zone = int(z);
+        out.groups[z].rgb  = loc->zones[z].rgb;
+    }
+    for (const PaintDecalZone& dz : zones)
+        if (dz.zone >= 0 && size_t(dz.zone) < n_zones) {
+            out.groups[size_t(dz.zone)].state  = dz.state;
+            out.groups[size_t(dz.zone)].hidden = dz.hidden;
+        }
+    out.shape_group = loc->shape_zone;
+    for (int& g : out.shape_group)
+        if (g >= 0 && (size_t(g) >= n_zones || out.groups[size_t(g)].hidden))
+            g = -1;
+    for (const PaintDecalPart& p : parts) {
+        if (p.shape < 0 || size_t(p.shape) >= out.shape_group.size())
+            continue;
+        if (p.hidden) {
+            out.shape_group[size_t(p.shape)] = -1;
+        } else if (p.state >= 0) {
+            PaintDecalZone g;
+            g.zone  = int(out.groups.size());
+            const int z = loc->shape_zone[size_t(p.shape)];
+            g.rgb   = (z >= 0 && size_t(z) < n_zones) ? loc->zones[size_t(z)].rgb : 0;
+            g.state = p.state;
+            out.shape_group[size_t(p.shape)] = g.zone;
+            out.groups.push_back(g);
+        }
+    }
+    return out;
+}
+
+namespace SvgPaint {
 
 std::string inline_css_classes(const std::string& svg)
 {

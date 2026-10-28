@@ -589,6 +589,126 @@ bool bbs_is_valid_object_type(const std::string& type)
     return false;
 }
 
+static constexpr const char* PAINT_DECALS_KEY   = "neotko_paint_decals_b64";
+static constexpr const char* PAINT_SYMMETRY_KEY = "neotko_paint_symmetry"; // "x y z custom brush"
+
+static inline std::string paint_decals_b64_encode(const std::string& json)
+{
+    if (json.empty()) return std::string();
+    std::string out;
+    out.resize(boost::beast::detail::base64::encoded_size(json.size()));
+    out.resize(boost::beast::detail::base64::encode(&out[0], json.data(), json.size()));
+    return out;
+}
+static inline std::string paint_decals_b64_decode(const std::string& b64)
+{
+    if (b64.empty()) return std::string();
+    std::string out;
+    out.resize(boost::beast::detail::base64::decoded_size(b64.size()));
+    const auto pr = boost::beast::detail::base64::decode(&out[0], b64.data(), b64.size());
+    out.resize(pr.first);
+    return out;
+}
+
+// Paint decals (struct PaintDecal) as JSON wrapped in base64, so the SVG text never meets the XML
+// escaper. Defaults are omitted to keep the metadata short.
+static inline std::string serialize_paint_decals(const std::vector<Slic3r::PaintDecal>& decals)
+{
+    if (decals.empty()) return std::string();
+    nlohmann::json arr = nlohmann::json::array();
+    for (const Slic3r::PaintDecal& d : decals) {
+        nlohmann::json j;
+        j["n"] = d.name;
+        j["s"] = paint_decals_b64_encode(d.svg_data);
+        j["c"] = { d.centre[0], d.centre[1], d.centre[2] };
+        j["d"] = { d.dir[0], d.dir[1], d.dir[2] };
+        j["u"] = { d.up[0], d.up[1], d.up[2] };
+        if (d.perspective) { j["p"] = 1; j["e"] = d.eye_dist; }
+        j["l"] = { d.lin[0], d.lin[1], d.lin[2], d.lin[3] };
+        j["o"] = { d.off[0], d.off[1] };
+        if (d.through) j["t"] = 1;
+        if (d.warp != Slic3r::PaintDecal().warp)
+            j["w"] = { d.warp[0], d.warp[1], d.warp[2], d.warp[3], d.warp[4], d.warp[5], d.warp[6], d.warp[7], d.warp[8] };
+        if (d.mirror != 0) j["m"] = d.mirror;
+        if (d.mirror_readable) j["mr"] = 1;
+        nlohmann::json zs = nlohmann::json::array();
+        for (const Slic3r::PaintDecalZone& z : d.zones) {
+            nlohmann::json jz = { { "z", z.zone }, { "rgb", z.rgb }, { "st", z.state } };
+            if (z.hidden) jz["h"] = 1;
+            zs.push_back(std::move(jz));
+        }
+        j["z"] = std::move(zs);
+        if (!d.parts.empty()) {
+            nlohmann::json ps = nlohmann::json::array();
+            for (const Slic3r::PaintDecalPart& p : d.parts) {
+                nlohmann::json jp = { { "i", p.shape }, { "st", p.state } };
+                if (p.hidden) jp["h"] = 1;
+                ps.push_back(std::move(jp));
+            }
+            j["pt"] = std::move(ps);
+        }
+        if (d.hidden) j["h"] = 1;
+        if (d.locked) j["k"] = 1;
+        arr.push_back(std::move(j));
+    }
+    return paint_decals_b64_encode(arr.dump());
+}
+
+static inline void parse_paint_decals(const std::string& b64, std::vector<Slic3r::PaintDecal>& decals)
+{
+    decals.clear();
+    const std::string json_str = paint_decals_b64_decode(b64);
+    if (json_str.empty()) return;
+    try {
+        const nlohmann::json arr = nlohmann::json::parse(json_str);
+        if (!arr.is_array()) return;
+        auto read = [](const nlohmann::json& j, const char* key, double* out, size_t n) {
+            if (j.contains(key) && j[key].is_array() && j[key].size() == n)
+                for (size_t i = 0; i < n; ++i) out[i] = j[key][i].get<double>();
+        };
+        for (const auto& j : arr) {
+            Slic3r::PaintDecal d;
+            d.name     = j.value("n", std::string());
+            d.svg_data = paint_decals_b64_decode(j.value("s", std::string()));
+            read(j, "c", d.centre.data(), 3);
+            read(j, "d", d.dir.data(), 3);
+            read(j, "u", d.up.data(), 3);
+            d.perspective = j.value("p", 0) != 0;
+            d.eye_dist    = j.value("e", 0.);
+            read(j, "l", d.lin.data(), 4);
+            read(j, "o", d.off.data(), 2);
+            d.through = j.value("t", 0) != 0;
+            read(j, "w", d.warp.data(), 9);
+            d.mirror = j.value("m", 0) & 7;
+            d.mirror_readable = j.value("mr", 0) != 0;
+            if (j.contains("z") && j["z"].is_array())
+                for (const auto& jz : j["z"]) {
+                    Slic3r::PaintDecalZone z;
+                    z.zone   = jz.value("z", -1);
+                    z.rgb    = jz.value("rgb", 0u);
+                    z.state  = jz.value("st", 1);
+                    z.hidden = jz.value("h", 0) != 0;
+                    d.zones.push_back(z);
+                }
+            if (j.contains("pt") && j["pt"].is_array())
+                for (const auto& jp : j["pt"]) {
+                    Slic3r::PaintDecalPart p;
+                    p.shape  = jp.value("i", -1);
+                    p.state  = jp.value("st", -1);
+                    p.hidden = jp.value("h", 0) != 0;
+                    if (p.shape >= 0)
+                        d.parts.push_back(p);
+                }
+            d.hidden = j.value("h", 0) != 0;
+            d.locked = j.value("k", 0) != 0;
+            if (!d.svg_data.empty())
+                decals.push_back(std::move(d));
+        }
+    } catch (const std::exception&) {
+        decals.clear();
+    }
+}
+
 namespace Slic3r {
 
 static size_t physical_filament_count_from_project_config(const DynamicPrintConfig &config)
@@ -2067,6 +2187,20 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
+                    else if (metadata.key == PAINT_DECALS_KEY)
+                        parse_paint_decals(metadata.value, model_object->paint_decals);
+                    else if (metadata.key == PAINT_SYMMETRY_KEY) {
+                        std::istringstream in(metadata.value);
+                        Slic3r::PaintSymmetry sym;
+                        if (in >> sym.centre[0] >> sym.centre[1] >> sym.centre[2]) {
+                            int custom = 1, brush = 0;
+                            if (in >> custom)
+                                in >> brush;
+                            sym.custom_centre = custom != 0;
+                            sym.brush         = brush & 7;
+                            model_object->paint_symmetry = sym;
+                        }
+                    }
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -7693,6 +7827,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //BBS: store object's module name
                 if (!obj->module_name.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
+
+                // The paint decals (base64 JSON, no xml_escape needed), omitted when there are none.
+                {
+                    const std::string decals_b64 = serialize_paint_decals(obj->paint_decals);
+                    if (!decals_b64.empty())
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PAINT_DECALS_KEY
+                               << "\" " << VALUE_ATTR << "=\"" << decals_b64 << "\"/>\n";
+                    if (obj->paint_symmetry.custom_centre || obj->paint_symmetry.brush != 0) {
+                        std::ostringstream c;
+                        c.precision(10);
+                        c << obj->paint_symmetry.centre[0] << ' ' << obj->paint_symmetry.centre[1] << ' ' << obj->paint_symmetry.centre[2]
+                          << ' ' << (obj->paint_symmetry.custom_centre ? 1 : 0) << ' ' << obj->paint_symmetry.brush;
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PAINT_SYMMETRY_KEY
+                               << "\" " << VALUE_ATTR << "=\"" << c.str() << "\"/>\n";
+                    }
+                }
 
                 // stores object's config data
                 for (const std::string& key : obj->config.keys()) {
