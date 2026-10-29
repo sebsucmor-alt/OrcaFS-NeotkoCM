@@ -1067,14 +1067,14 @@ const GLGizmoPainterBase::SurfaceCard &GLGizmoPainterBase::decal_surface(const P
         obj_to_mesh.push_back(mesh_to_obj.back().inverse());
     }
     const BoundingBoxf3 box = m_c->selection_info()->model_object()->raw_mesh_bounding_box();
-    const double        far = box.size().norm() * 2. + 10.;
+    const double        far_off = box.size().norm() * 2. + 10.;
     const Vec3d         dn  = Vec3d(d.dir[0], d.dir[1], d.dir[2]).normalized();
     const bool          persp = d.perspective && d.eye_dist > 0.;
     const Vec3d         eye   = d.eye_object();
     const Vec3d         nan3  = Vec3d::Constant(std::numeric_limits<double>::quiet_NaN());
     auto hit = [&](const Vec2d &svg) {
         const Vec3d P   = d.svg_to_object(svg);
-        const Vec3d o   = persp ? eye : Vec3d(P + dn * (dn.dot(box.center() - P) + far));
+        const Vec3d o   = persp ? eye : Vec3d(P + dn * (dn.dot(box.center() - P) + far_off));
         const Vec3d dir = persp ? Vec3d((P - eye).normalized()) : Vec3d(-dn);
         double best = std::numeric_limits<double>::max();
         Vec3d  out  = nan3;
