@@ -23980,7 +23980,10 @@ std::vector<std::string> Plater::get_extruder_colors_from_plater_config(const GC
     // pintaba con los colores del ÚLTIMO PROYECTO más sus filamentos mezclados, no con los suyos
     // (Sebas: el Cube_PLA de Discord salía con los colores exactos de la babosa). Los del G-code ya
     // vienen leídos de su `extruder_colour` / `filament_colour` (GCodeProcessor::apply_config).
-    else if (m_only_gcode && result != nullptr && !result->extruder_colors.empty())
+    // NEOTKO 29-oct-2026: `result` va PRIMERO. MenuFactory::init() llama aquí vía
+    // wxGetApp().plater() mientras el Plater aún se construye (plater() == nullptr): leer
+    // m_only_gcode con this nulo tumbaba la 2_49 en Windows al arrancar (crash tras el splash).
+    else if (result != nullptr && !result->extruder_colors.empty() && m_only_gcode)
         return result->extruder_colors;
     else {
         if (wxGetApp().preset_bundle == nullptr)
