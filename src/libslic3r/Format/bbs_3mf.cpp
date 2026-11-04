@@ -1,5 +1,6 @@
 #include "../libslic3r.h"
 #include "../Exception.hpp"
+#include "../PaintClay.hpp"
 #include "../Model.hpp"
 #include "../MixedFilament.hpp"
 #include "../Preset.hpp"
@@ -623,6 +624,7 @@ static inline std::string serialize_paint_decals(const std::vector<Slic3r::Paint
         j["l"] = { d.lin[0], d.lin[1], d.lin[2], d.lin[3] };
         j["o"] = { d.off[0], d.off[1] };
         if (d.through) j["t"] = 1;
+        if (d.through_depth > 0.) j["td"] = d.through_depth;
         if (d.warp != Slic3r::PaintDecal().warp)
             j["w"] = { d.warp[0], d.warp[1], d.warp[2], d.warp[3], d.warp[4], d.warp[5], d.warp[6], d.warp[7], d.warp[8] };
         if (d.mirror != 0) j["m"] = d.mirror;
@@ -645,6 +647,21 @@ static inline std::string serialize_paint_decals(const std::vector<Slic3r::Paint
         }
         if (d.hidden) j["h"] = 1;
         if (d.locked) j["k"] = 1;
+        if (d.clay != Slic3r::PaintDecalClay())
+            j["cl"] = { { "on", d.clay.on ? 1 : 0 }, { "h", d.clay.height }, { "pf", d.clay.profile },
+                        { "f", d.clay.falloff }, { "pu", d.clay.paint_under ? 1 : 0 }, { "an", d.clay.anchor ? 1 : 0 }, { "sg", d.clay.straight ? 1 : 0 }, { "ss", d.clay.smooth_surface }, { "fs", d.clay.follow_surface }, { "st", d.clay.stretch }, { "sk", d.clay.stretch_slope }, { "mt", d.clay.min_thick }, { "sm", d.clay.smooth },
+                        { "gh", d.clay.group_height }, { "gm", d.clay.group_mode }, { "fz", d.clay.frozen ? 1 : 0 }, { "fl", d.clay.frozen_was_locked ? 1 : 0 } };
+        if (!d.surface.clicks.empty()) {
+            nlohmann::json cs = nlohmann::json::array();
+            for (const Slic3r::PaintSurfaceClick& k : d.surface.clicks)
+                cs.push_back({ k.p[0], k.p[1], k.p[2], k.n[0], k.n[1], k.n[2], k.out[0], k.out[1], k.out[2], k.in[0], k.in[1], k.in[2] });
+            j["sf"] = { { "k", std::move(cs) }, { "c", d.surface.closed ? 1 : 0 }, { "w", d.surface.width } };
+            if (d.surface.wrap) {
+                const Slic3r::stroke::Params& b = d.surface.brush;
+                j["sf"]["wr"] = 1;
+                j["sf"]["bp"] = { int(b.engine), b.size, b.stream, int(b.curve), b.tin, b.tout, b.minw, b.speed, b.step, b.simplify, int(b.width), b.inertia, b.drops };
+            }
+        }
         arr.push_back(std::move(j));
     }
     return paint_decals_b64_encode(arr.dump());
@@ -674,6 +691,7 @@ static inline void parse_paint_decals(const std::string& b64, std::vector<Slic3r
             read(j, "l", d.lin.data(), 4);
             read(j, "o", d.off.data(), 2);
             d.through = j.value("t", 0) != 0;
+            d.through_depth = std::clamp(j.value("td", 0.0), 0.0, 1000.0);
             read(j, "w", d.warp.data(), 9);
             d.mirror = j.value("m", 0) & 7;
             d.mirror_readable = j.value("mr", 0) != 0;
@@ -697,6 +715,60 @@ static inline void parse_paint_decals(const std::string& b64, std::vector<Slic3r
                 }
             d.hidden = j.value("h", 0) != 0;
             d.locked = j.value("k", 0) != 0;
+            if (j.contains("cl") && j["cl"].is_object()) {
+                const nlohmann::json& c = j["cl"];
+                d.clay.on          = c.value("on", 0) != 0;
+                d.clay.height      = c.value("h", 0.4);
+                d.clay.profile     = std::clamp(c.value("pf", 2), 0, 3);
+                d.clay.falloff     = c.value("f", 0.6);
+                d.clay.paint_under = c.value("pu", 0) != 0;
+                d.clay.anchor      = c.value("an", 1) != 0;
+                d.clay.straight    = c.value("sg", 1) != 0;
+                d.clay.smooth_surface = std::clamp(c.value("ss", 0.0), 0.0, 5.0);
+                d.clay.follow_surface = std::clamp(c.value("fs", 0.0), 0.0, 50.0);
+                d.clay.stretch        = std::clamp(c.value("st", 0.0), 0.0, 50.0);
+                d.clay.stretch_slope  = std::clamp(c.value("sk", 1.0), 0.1, 5.0);
+                d.clay.min_thick      = std::clamp(c.value("mt", 0.42), 0.0, 3.0);
+                d.clay.smooth      = std::clamp(c.value("sm", 20), 0, 30);
+                d.clay.frozen            = c.value("fz", 0) != 0;
+                d.clay.frozen_was_locked = c.value("fl", 0) != 0;
+                if (c.contains("gh") && c["gh"].is_array())
+                    for (const nlohmann::json& h : c["gh"])
+                        d.clay.group_height.push_back(h.is_number() ? h.get<double>() : 0.);
+                if (c.contains("gm") && c["gm"].is_array())
+                    for (const nlohmann::json& m : c["gm"])
+                        d.clay.group_mode.push_back(m.is_number_integer() ? m.get<int>() : 0);
+            }
+            if (j.contains("sf") && j["sf"].is_object()) {
+                const nlohmann::json& sf = j["sf"];
+                d.surface.closed = sf.value("c", 0) != 0;
+                d.surface.width  = std::clamp(sf.value("w", 2.0), 0.1, 50.0);
+                d.surface.wrap   = sf.value("wr", 0) != 0;
+                if (sf.contains("bp") && sf["bp"].is_array() && sf["bp"].size() >= 13) {
+                    const nlohmann::json& b = sf["bp"];
+                    Slic3r::stroke::Params& p = d.surface.brush;
+                    p.engine = Slic3r::stroke::Engine(std::clamp(b[0].get<int>(), 0, 1));
+                    p.size = b[1].get<double>(); p.stream = b[2].get<double>();
+                    p.curve = Slic3r::stroke::Curve(std::clamp(b[3].get<int>(), 0, 2));
+                    p.tin = b[4].get<double>(); p.tout = b[5].get<double>(); p.minw = b[6].get<double>(); p.speed = b[7].get<double>();
+                    p.step = b[8].get<double>(); p.simplify = b[9].get<double>();
+                    p.width = Slic3r::stroke::Width(std::clamp(b[10].get<int>(), 0, 2));
+                    p.inertia = b[11].get<double>(); p.drops = b[12].get<double>();
+                }
+                if (sf.contains("k") && sf["k"].is_array())
+                    for (const nlohmann::json& k : sf["k"]) {
+                        if (!k.is_array() || k.size() < 12)
+                            continue;
+                        Slic3r::PaintSurfaceClick c;
+                        for (int i = 0; i < 3; ++i) {
+                            c.p[i]   = k[i].get<double>();
+                            c.n[i]   = k[3 + i].get<double>();
+                            c.out[i] = k[6 + i].get<double>();
+                            c.in[i]  = k[9 + i].get<double>();
+                        }
+                        d.surface.clicks.push_back(c);
+                    }
+            }
             if (!d.svg_data.empty())
                 decals.push_back(std::move(d));
         }
@@ -2170,8 +2242,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
-                    else if (metadata.key == PAINT_DECALS_KEY)
+                    else if (metadata.key == PAINT_DECALS_KEY) {
                         parse_paint_decals(metadata.value, model_object->paint_decals);
+                        for (size_t di = 0; di < model_object->paint_decals.size(); ++di) // older files: repeated names
+                            paint_decal_unique_name(model_object->paint_decals, di);
+                    }
                     else if (metadata.key == PAINT_SYMMETRY_KEY) {
                         std::istringstream in(metadata.value);
                         Slic3r::PaintSymmetry sym;
