@@ -226,6 +226,8 @@ private:
     int         m_remesh_max_tris     = 500000;
     float       m_remesh_adaptive     = 0.1f;   // merges triangles where the surface is flat (0..1)
     bool        m_remesh_keep_paint   = true;
+    bool        m_remesh_keep_extras  = true;   // decals, Clay settings, symmetry, object settings
+    bool        m_remesh_keep_parts   = true;   // whole object: rebuild only its plain parts, carry the rest
     bool        m_remesh_drop_bits    = true;   // delete tiny loose shells
     bool        m_remesh_fast_smooth  = true;   // the inside on coarser voxels
     bool        m_remesh_running      = false;  // the worker is busy (the progress window pumps events)

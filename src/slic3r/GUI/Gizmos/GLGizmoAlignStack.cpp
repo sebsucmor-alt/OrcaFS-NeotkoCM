@@ -8,6 +8,7 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/I18N.hpp"
 
+#include "libslic3r/PaintClay.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/SurfaceExtrude.hpp"
 #include "libslic3r/MeshBoolean.hpp"
@@ -1287,6 +1288,46 @@ void GLGizmoAlignStack::on_render_input_window(float x, float y, float bottom_li
 // solid: holes, open shells and flipped faces are gone (Orca's repair is Windows only). Offset moves
 // the surface; Hollow takes the inside away, Wall under the new surface, and with a picked face
 // opens it through that face (a mouth: the face shrunk by the wall, from 2 walls deep to 1 mm out).
+// What lives on the OBJECT and not in the mesh, carried from the object a whole-object Remesh replaces
+// to the new one: painter decals (Vector, Clay, layers), symmetry and the object's settings. Positions
+// are in the object frame, so they go through old instance -> world -> new instance.
+static void carry_object_extras(const ModelObject &from, ModelObject &to)
+{
+    if (from.instances.empty() || to.instances.empty())
+        return;
+    const Transform3d M = to.instances.front()->get_matrix().inverse() * from.instances.front()->get_matrix();
+    const Matrix3d    L = M.linear();
+    const double      s = std::cbrt(std::abs(L.determinant()));
+    auto pt  = [&M](std::array<double, 3> &a) { const Vec3d p = M * Vec3d(a[0], a[1], a[2]); a = { p.x(), p.y(), p.z() }; };
+    auto dir = [&L](std::array<double, 3> &a) { Vec3d v = L * Vec3d(a[0], a[1], a[2]); if (v.norm() > 1e-12) v.normalize(); a = { v.x(), v.y(), v.z() }; };
+    to.paint_decals = from.paint_decals;
+    for (PaintDecal &d : to.paint_decals) {
+        pt(d.centre);
+        dir(d.dir);
+        dir(d.up);
+        if (std::abs(s - 1.) > 1e-9) {   // the card in mm scales with the object
+            for (double &v : d.lin) v *= s;
+            for (double &v : d.off) v *= s;
+            d.eye_dist      *= s;
+            d.through_depth *= s;
+        }
+    }
+    to.paint_symmetry = from.paint_symmetry;
+    if (to.paint_symmetry.custom_centre)
+        pt(to.paint_symmetry.centre);
+    // Object settings (layer heights, per-object overrides). The extruder the Remesh chose wins.
+    const bool had_extruder = to.config.has("extruder");
+    const int  extruder     = had_extruder ? to.config.opt_int("extruder") : 0;
+    to.config.assign_config(from.config);
+    if (had_extruder)
+        to.config.set_key_value("extruder", new ConfigOptionInt(extruder));
+    // Height ranges are in the object's Z: only where Z did not move (no rotation, same bottom).
+    if ((L - Matrix3d::Identity()).norm() < 1e-6 && std::abs(M.translation().z()) < 1e-3) {
+        to.layer_config_ranges = from.layer_config_ranges;
+        to.layer_height_profile.assign(from.layer_height_profile);
+    }
+}
+
 void GLGizmoAlignStack::apply_remesh()
 {
     if (m_remesh_running)
@@ -1375,6 +1416,21 @@ void GLGizmoAlignStack::apply_remesh()
     }
 
     TriangleMesh mesh_a = pick_mesh(pa);
+    // Whole object: only its plain parts are rebuilt; the Clay parts (and the engraves, modifiers...
+    // which raw_mesh() already leaves out) are carried to the new object as they are, so they don't
+    // melt into the skin and no split / re-assemble is needed.
+    if (!pa.is_part() && m_remesh_keep_parts && out == RemeshOut::Replace)
+        if (const ModelObject *mo_a = pick_object(pa)) {
+            TriangleMesh plain;
+            for (const ModelVolume *v : mo_a->volumes)
+                if (v->is_model_part() && !paint_clay_is_volume(*v)) {
+                    TriangleMesh m = v->mesh();
+                    m.transform(v->get_matrix());
+                    plain.merge(m);
+                }
+            if (!plain.empty())
+                mesh_a = std::move(plain);
+        }
     mesh_a.transform(pick_trafo(pa));
 
     const size_t mouth_tris = mouth.indices.size();
@@ -1530,8 +1586,14 @@ void GLGizmoAlignStack::apply_remesh()
             src.to_world = pick_trafo(pa);
             src.filament = PaintTransfer::effective_filament(*src.volume);
             paint_sources.push_back(src);
-        } else
+        } else {
             PaintTransfer::append_object_sources(*a, false, paint_sources);
+            // Clay parts carried as they are don't paint the new skin (their colour would bleed onto it).
+            if (m_remesh_keep_parts && out == RemeshOut::Replace)
+                paint_sources.erase(std::remove_if(paint_sources.begin(), paint_sources.end(),
+                                                   [](const PaintTransfer::Source &src) { return src.volume != nullptr && paint_clay_is_volume(*src.volume); }),
+                                    paint_sources.end());
+        }
     }
     const bool         replace = out == RemeshOut::Replace;
     const ModelObject* del_obj = a;
@@ -1569,6 +1631,34 @@ void GLGizmoAlignStack::apply_remesh()
                                                                              PaintTransfer::effective_filament(*res_vol), reach);
             if (paint_stats.layers > 0)
                 wxGetApp().obj_list()->update_info_items(size_t(result_obj));
+        }
+
+        // Decals, Clay and the object's settings live on the object, not in the mesh: a whole object
+        // rebuilt as a new one takes them along, before #1 is deleted.
+        if (m_remesh_keep_extras && !pa.is_part() && result_obj >= 0 && size_t(result_obj) < model.objects.size() &&
+            model.objects[size_t(result_obj)] != del_obj) {
+            carry_object_extras(*del_obj, *model.objects[size_t(result_obj)]);
+            wxGetApp().obj_list()->update_info_items(size_t(result_obj));
+        }
+
+        // The parts that were not rebuilt go along, placed where they were.
+        if (m_remesh_keep_parts && replace && !pa.is_part() && result_obj >= 0 && size_t(result_obj) < model.objects.size() &&
+            model.objects[size_t(result_obj)] != del_obj && !del_obj->instances.empty()) {
+            ModelObject      *to = model.objects[size_t(result_obj)];
+            const Transform3d M  = to->instances.front()->get_matrix().inverse() * del_obj->instances.front()->get_matrix();
+            int carried = 0;
+            for (const ModelVolume *v : del_obj->volumes) {
+                if (v->is_model_part() && !paint_clay_is_volume(*v))
+                    continue;
+                ModelVolume *nv = to->add_volume(*v);
+                nv->set_transformation(Geometry::Transformation(M * v->get_matrix()));
+                ++carried;
+            }
+            if (carried > 0) {
+                to->invalidate_bounding_box();
+                wxGetApp().obj_list()->reorder_volumes_and_get_selection(result_obj);
+                wxGetApp().plater()->changed_object(result_obj);
+            }
         }
 
         // Replace: delete #1 (by pointer: indices may have moved).
@@ -1903,6 +1993,17 @@ void GLGizmoAlignStack::render_panel_body()
 
         ImGui::Checkbox(_u8L("Keep painting").c_str(), &m_remesh_keep_paint);
         tip(_u8L("Paints the new mesh like #1.\nBorders between colours follow the\nnew triangles."));
+        ImGui::Checkbox(_u8L("Keep Clay & extra parts").c_str(), &m_remesh_keep_parts);
+        tip(_u8L("Whole object, Replace: only its plain parts are rebuilt.\n"
+                 "Clay parts, engraves (negative parts), modifiers and\n"
+                 "blockers move to the new object as they are, instead of\n"
+                 "melting into the new skin or being lost. Rebuild the Clay\n"
+                 "after if the surface under it changed a lot."));
+        ImGui::Checkbox(_u8L("Keep decals & recipes").c_str(), &m_remesh_keep_extras);
+        tip(_u8L("When the whole object is rebuilt, the new one keeps\n"
+                 "the painter's decals and layers (Vector, Clay settings),\n"
+                 "the mirror centre and the object's own settings\n"
+                 "(layer ranges, per-object overrides)."));
 
         // Fine tuning, folded: the defaults work.
         if (ImGui::TreeNode(_u8L("Advanced").c_str())) {
