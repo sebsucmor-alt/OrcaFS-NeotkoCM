@@ -278,6 +278,8 @@ public:
 
     bool is_in_editing_mode(bool error_notification = false) const;
     bool is_hiding_instances() const;
+    // the current gizmo wants the camera frozen (GLGizmoBase::locks_camera)
+    bool is_camera_locked() const;
 
     void on_change_color_mode(bool is_dark);
     void render_current_gizmo() const;
