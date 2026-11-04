@@ -2444,7 +2444,7 @@ void ObjectList::load_shape_object(const std::string &type_name)
 
 // A mesh given in WORLD coordinates becomes a new part of object obj_idx, exactly where it is
 // (used by Align & Construct). Returns the new part, nullptr when nothing was added.
-ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name, bool negative)
+ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name, bool negative, int extruder)
 {
     if (m_objects == nullptr || obj_idx < 0 || obj_idx >= (int)m_objects->size() || mesh_world.empty())
         return nullptr;
@@ -2458,7 +2458,8 @@ ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_w
     const Transform3d placed = model_object.instances.front()->get_matrix().inverse() * new_volume->get_matrix();
     new_volume->set_transformation(placed);
     new_volume->name = name;
-    const int extruder_id = model_object.config.has("extruder") ? model_object.config.opt_int("extruder") : 0;
+    // extruder >= 0: the part's own filament (Clay parts), set before the list rows are rebuilt below
+    const int extruder_id = extruder >= 0 ? extruder : (model_object.config.has("extruder") ? model_object.config.opt_int("extruder") : 0);
     if (!negative)
         new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
     new_volume->source.is_from_builtin_objects = true;

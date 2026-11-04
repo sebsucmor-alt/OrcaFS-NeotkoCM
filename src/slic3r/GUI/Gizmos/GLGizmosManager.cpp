@@ -999,7 +999,9 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                         processed = mmu_seg->on_number_key_down(keyCode - '0');
                     }
                 }
-                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G') {
+                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G' ||
+                         keyCode == 'B' || keyCode == 'V' || keyCode == 'K' || keyCode == 'P' || keyCode == 'E' ||
+                         keyCode == WXK_RETURN || keyCode == WXK_NUMPAD_ENTER) {   // B / V / K / P: Brush, Vector, Clay, Vector Brush; E: eraser
                     processed = mmu_seg->on_key_down_select_tool_type(keyCode);
                     if (processed) {
                         // force extra frame to automatically update window size
@@ -1427,6 +1429,11 @@ bool GLGizmosManager::is_in_editing_mode(bool error_notification) const
 
 }
 
+
+bool GLGizmosManager::is_camera_locked() const
+{
+    return m_current != Undefined && m_gizmos[m_current]->locks_camera();
+}
 
 bool GLGizmosManager::is_hiding_instances() const
 {

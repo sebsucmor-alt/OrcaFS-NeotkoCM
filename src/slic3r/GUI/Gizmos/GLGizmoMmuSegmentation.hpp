@@ -3,6 +3,12 @@
 
 #include "GLGizmoPainterBase.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/ObjectID.hpp"
+#include "libslic3r/PaintClay.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <memory>
 
 namespace Slic3r::GUI {
 
@@ -101,9 +107,9 @@ protected:
     bool on_is_activable() const override;
 
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
-    // Shape mask preview fill in the selected filament colour.
+    // Painter Pro Mode F5: shape mask preview fill in the selected filament colour.
     ColorRGBA get_shape_fill_color() const override;
-    // Colour of a filament id, and the filament closest to an SVG colour.
+    // F2: colour of a filament id, and the filament closest to an SVG colour.
     ColorRGBA get_state_color(int state) const override;
     int       svg_default_state(uint32_t rgb) const override;
 
@@ -128,34 +134,16 @@ protected:
     // Minimal context for gradient rendering; only physical_colors is used
     MixedFilamentDisplayContext       m_mixed_display_context;
 
+    // Painter Pro Mode F4, Sesion A/B: rectangle/polygon mask toggles.
+    // Mutually exclusive (like the existing Vertical/Horizontal checkboxes below). Override
+    // m_tool_type regardless of which toolbar icon is selected (mirrors how F1/F2/F3 live as Pro
+    // Mode toggles rather than new toolbar buttons - a new toolbar icon needs a new glyph in the
+    // ImGui icon font, out of scope here).
     bool                              m_rectangle_mask_active = false;
-    bool                              m_polygon_mask_active = false;
-
-    // The panel has two modes. Brush: Orca's tools (brushes, fill, height range) and the
-    // rectangle mask. Vector: shapes drawn on screen and SVG decals. Keys B / V.
-    enum class PaintMode { Brush, Vector };
-    PaintMode m_paint_mode     = PaintMode::Brush;
-    bool shape_draw_needs_arming() const override { return m_paint_mode == PaintMode::Vector; }
-    bool m_show_decals_in_brush = false;
-    int  selected_decal_index() const override { return m_selected_decal; }
-    PaintDecal m_decal_ts_start;          // the decal when a Turn / Size slider was grabbed
-    float      m_decal_turn_ui = 0.f;     // relative to that start, reset on release
-    float      m_decal_size_ui = 100.f;
-    bool show_decal_cards_while_brushing() const override { return m_paint_mode == PaintMode::Brush && m_show_decals_in_brush; }
-    int       m_selected_decal = -1;   // decal row picked in the Vector panel's layer list
-    float     m_colour_row_w   = 0.f;  // measured width of one SVG colour row (0 until drawn once)
-    void set_paint_mode(PaintMode mode);
-    void render_vector_panel();
-    // One SVG colour row: its colour, the filament it paints with (combo) and its eye.
-    // Returns true when the filament or the eye changed.
-    bool render_svg_colour_row(int id, uint32_t rgb, bool grad, int &state, bool &hidden);
-    // Parts of the SVG on screen: pick on the canvas, the selection's filament and eye, and the
-    // list. True when the paint groups changed (masks to rebuild).
-    bool render_svg_parts();
-    void render_mirror_centre_controls();
-    // Filament combo with a first entry "Colour" (state -1 = follow the colour of the part).
-    bool render_part_filament_combo(const char *id, int &state);
-    int  m_svg_parts_filter = 0;   // list shows: 0 = changed and selected, 1 = all
+    bool                              m_polygon_mask_active   = false;
+    // when true, "Extra walls" / "Surface depth" edit the per-color
+    // override of the currently selected paint color instead of the global value.
+    bool                              m_per_color_values      = false;
 
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 
@@ -182,6 +170,97 @@ private:
     // Filament remapping methods
     void remap_filament_assignments();
     void render_filament_remap_ui(float window_width, float max_tooltip_width);
+
+    // Pro Mode section: brush precision (F3), paint-perimeters-only
+    // (F1), extra walls on painted regions (F2), rectangle/polygon masks (F4).
+    void render_pro_mode_section(float sliders_left_width, float sliders_width, float slider_icon_width);
+    // the panel has two modes. Brush: Orca's tools (brushes, fill, height
+    // range) and the rectangle mask. Vector: shapes drawn on screen and SVG decals. Keys B / V.
+    // 2_50: third mode, Clay. Decals raised over the surface as parts of their own.
+    // 2_50: VectorBrush, free-hand strokes saved as decals (edited in Vector).
+    enum class PaintMode { Brush, Vector, Clay, VectorBrush };
+    PaintMode m_paint_mode     = PaintMode::Brush;
+    bool shape_draw_needs_arming() const override { return m_paint_mode == PaintMode::Vector || m_paint_mode == PaintMode::Clay; }
+    bool m_show_decals_in_brush = false;
+    bool vector_brush_on() const override { return m_paint_mode == PaintMode::VectorBrush; }
+    void render_vector_brush_panel();
+    void render_surface_controls();   // Draw on surface / Wrap: width, status, Finish / Cancel
+    std::string m_vb_wrap_msg;        // why Wrap could not be picked
+    int  selected_decal_index() const override { return m_selected_decal; }
+    PaintDecal m_decal_ts_start;          // F4b: the decal when a Turn / Size slider was grabbed
+    float      m_decal_turn_ui = 0.f;     // relative to that start, reset on release
+    float      m_decal_size_ui = 100.f;
+    bool show_decal_cards_while_brushing() const override { return (m_paint_mode == PaintMode::Brush && m_show_decals_in_brush) || m_paint_mode == PaintMode::VectorBrush; }
+    int       m_selected_decal = -1;   // decal row picked in the Vector panel's layer list
+    // 2b: Shift + click picks more rows; Merge joins them into the topmost one.
+    std::vector<int> m_decal_multi;
+    std::string      m_decal_merge_msg;
+    void decal_merge();
+    float     m_colour_row_w   = 0.f;  // measured width of one SVG colour row (0 until drawn once)
+    void set_paint_mode(PaintMode mode);
+    void render_rectangle_mask_option();
+    void render_vector_panel();
+    // Clay panel: the decals with their Clay settings, Build / Remove.
+    void render_clay_panel();
+    void render_decal_layers(bool clay);
+    void render_decal_overlay();
+    // Builds (or rebuilds) the Clay parts of decal idx: removes its old ones, bakes, adds the new
+    // ones as normal parts, and paints the decal under them when paint_under. Returns the parts added.
+    // Build runs on a worker thread (clay_build starts it, clay_poll finishes it on the GUI thread):
+    // the panel shows progress and Cancel instead of freezing for seconds.
+    struct ClayJob {
+        std::atomic<bool>           cancel { false };
+        std::atomic<bool>           finished { false };
+        std::atomic<int>            done { 0 }, total { 0 };
+        std::vector<PaintClayPiece> pieces;   // written by the worker, read after `finished`
+    };
+    std::shared_ptr<ClayJob> m_clay_job;
+    size_t                   m_clay_job_decal = 0;
+    std::string              m_clay_job_name;   // decal name when started: the decal must still be there
+    ObjectID                 m_clay_job_object;
+    std::chrono::steady_clock::time_point m_clay_job_start;
+    bool                     m_clay_job_rebuild = false;
+    bool                     m_clay_show_decal    = false;   // Clay's own "Show decal"
+    bool                     m_clay_saved_preview = true;    // Vector's "Preview colours" while in Clay
+    // Decals with Clay parts are watched: moved or edited (in Vector, by undo...) = rebuilt once the
+    // mouse is let go. Key = the decal without its Clay settings (those rebuild from the panel).
+    std::map<std::string, PaintDecal> m_clay_watch;
+    std::vector<std::string>          m_clay_queue;   // Rebuild all: decal names still to build, one job at a time
+    // X-ray of the engrave parts (negative Clay volumes): red, see-through, drawn over the object so the
+    // hole they will cut is seen inside it. The painter draws none of the object's other volumes.
+    // The model behind a pointer: a moved-from GLModel frees the GPU buffers the moved-to one still
+    // draws from.
+    struct ClayXray { ObjectID volume; size_t tris = 0; std::unique_ptr<GLModel> model; };
+    std::vector<ClayXray> m_clay_xray;
+    bool                  m_clay_xray_on = true;
+    bool                  m_clay_arrow_on = true;
+    bool                  m_clay_repair   = false;  // option (off): voxel-rebuild each part after Build: no self-crossings left for the slicer
+    void                  render_clay_xray();
+    ObjectID                          m_clay_watch_object;
+    void clay_watch_decals();
+    void clay_build(size_t idx);
+    void clay_cancel();
+    void clay_poll();
+    int  clay_finish(size_t idx, const std::vector<PaintClayPiece> &pieces);
+    int  clay_remove_parts(size_t idx);   // removes the Clay parts of decal idx; returns how many
+    int  clay_detach_parts(size_t idx);   // they become normal parts: Rebuild / Remove leave them alone
+    bool clay_apply_engrave(size_t idx);  // cuts the engrave part out of the object (keeps the painting) and deletes it
+    std::string m_clay_status;
+    std::string m_clay_warning;   // folded faces of the last build
+    // Groups of the decal shown in Clay, kept while its SVG / zones / parts do not change (parsing every frame is slow).
+    std::string      m_clay_groups_key;
+    PaintDecalGroups m_clay_groups;
+    // One SVG colour row: its colour, the filament it paints with (combo) and its eye.
+    // Returns true when the filament or the eye changed.
+    bool render_svg_colour_row(int id, uint32_t rgb, bool grad, int &state, bool &hidden);
+    // parts of the SVG on screen: pick on the canvas, the selection's filament
+    // and eye, and the list. True when the paint groups changed (masks to rebuild).
+    bool render_svg_parts();
+    void render_mirror_centre_controls();
+    // Filament combo with a first entry "Colour" (state -1 = follow the colour of the part).
+    bool render_part_filament_combo(const char *id, int &state);
+    int  m_svg_parts_filter = 0;   // list shows: 0 = changed and selected, 1 = all
+
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.

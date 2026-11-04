@@ -2842,6 +2842,9 @@ void GLCanvas3D::ZoomToFit()
 
 void GLCanvas3D::select_view(const std::string& direction)
 {
+    // The painter can freeze the camera (Lock view, unsaved brush strokes): view keys and the cube wait too.
+    if (m_gizmos.is_camera_locked())
+        return;
     wxGetApp().plater()->get_camera().select_view(direction);
     if (m_canvas != nullptr)
         m_canvas->Refresh();
@@ -5086,6 +5089,9 @@ void GLCanvas3D::on_gesture(wxGestureEvent &evt)
 {
     if (!m_initialized || !_set_current())
         return;
+    // a frozen camera (painter): trackpad pan, zoom and rotate wait too
+    if (m_gizmos.is_camera_locked())
+        return;
 
     auto & camera = wxGetApp().plater()->get_camera();
     if (evt.GetEventType() == wxEVT_GESTURE_PAN) {
@@ -6981,7 +6987,8 @@ void GLCanvas3D::_render_3d_navigator()
                                                  camDistance, ImVec2(viewManipulateLeft, viewManipulateTop - size), ImVec2(size, size),
                                                  0x00101010);
 
-    if (result.changed) {
+    // a frozen camera (painter): dragging the view cube does not turn it
+    if (result.changed && !m_gizmos.is_camera_locked()) {
         for (unsigned int c = 0; c < 4; ++c) {
             for (unsigned int r = 0; r < 4; ++r) {
                 m(r, c) = cameraView[c * 4 + r];

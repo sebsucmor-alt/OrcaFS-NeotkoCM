@@ -8,6 +8,8 @@
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PaintStroke.hpp"
+#include "libslic3r/PaintClay.hpp"     // (PaintSurfaceSample)
 
 #include <cereal/types/vector.hpp>
 #include <GL/glew.h>
@@ -17,6 +19,8 @@
 #include <set>   // selected SVG parts
 #include <functional>
 #include <unordered_map>
+
+struct ImDrawList;
 
 
 namespace Slic3r::GUI {
@@ -119,6 +123,7 @@ public:
     void set_ebt_colors(const std::vector<ColorRGBA> ebt_colors) { m_ebt_colors = ebt_colors; }
     void set_filter_state(bool is_filter_state);
 
+
     constexpr static float GapAreaMin = 0.f;
     constexpr static float GapAreaMax = 5.f;
     constexpr static float GapAreaStep = 0.2f;
@@ -195,6 +200,31 @@ public:
     ~GLGizmoPainterBase() override;
     void data_changed(bool is_serializing) override;
     virtual bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
+    // Ctrl+Z on what is still on screen and not saved: the last Vector Brush stroke, or the
+    // last point of a shape being drawn (same as Undo stroke / Undo point), not the project's last
+    // step (which was the decal saved before). True when it took the key.
+    bool local_undo()
+    {
+        if (m_sf_tool != 0 && (!m_sf_undo.empty() || m_sf_edit_decal >= 0)) {   // On surface: the last gesture
+            if (!m_sf_undo.empty()) {
+                m_sf_path = m_sf_undo.back();
+                m_sf_undo.pop_back();
+                m_sf_move = m_sf_pull = -1;
+                sf_update();
+            }
+            return true;   // editing a saved line: never the project's step
+        }
+        if (m_vb_line && !m_vb_nodes.empty()) {   // the line being drawn: its last point
+            if (m_vb_line_closed) m_vb_line_closed = false; else m_vb_nodes.pop_back();
+            return true;
+        }
+        if (!m_vb_strokes.empty() && !m_vb_history.empty()) { vb_undo(); return true; }
+        // only while the shape is still being drawn (open): a closed one may have been applied, and
+        // Ctrl+Z then means the paint
+        if (!m_shape_nodes.empty() && !m_shape_closed) { shape_undo_point(); return true; }
+        return false;
+    }
+    void shape_undo_point();
 
     // Following function renders the triangles and cursor. Having this separated
     // from usual on_render method allows to render them before transparent
@@ -227,6 +257,8 @@ protected:
     void render_cursor_sphere(const Transform3d& trafo) const;
     // BBS
     void render_cursor_height_range(const Transform3d& trafo) const;
+    // Painter Pro Mode F4: screen-space overlays, independent of any
+    // mesh raycast (the user can drag past the object's silhouette while masking).
     void render_cursor_rectangle();
     void render_cursor_polygon();
     //BBS: add logic to distinguish the first_time_update and later_update
@@ -247,9 +279,14 @@ protected:
     static constexpr float CursorRadiusMin  = 0.4f; // cannot be zero
     static constexpr float CursorRadiusMax  = 8.f;
     static constexpr float CursorRadiusStep = 0.2f;
+
+    // Pro Mode "brush precision" (GLGizmoMmuSegmentation only;
+    // default 1.f leaves every other painter gizmo derived from this base unaffected).
+    // See TriangleSelector::set_precision_factor().
     float m_precision_factor = 1.f;
-    static constexpr float PrecisionFactorMin = 1.f;
-    static constexpr float PrecisionFactorMax = 8.f;
+    static constexpr float PrecisionFactorMin  = 1.f;
+    static constexpr float PrecisionFactorMax  = 8.f;
+    static constexpr float PrecisionFactorStep = 1.f;
     static constexpr float CursorHeightMin = 0.1f; // cannot be zero
     static constexpr float CursorHeightMax = 8.f;
     static constexpr float CursorHeightStep = 0.2f;
@@ -265,7 +302,11 @@ protected:
         SMART_FILL,
         // BBS
         GAP_FILL,
+        // Painter Pro Mode F4, Sesion A: screen-space rectangle mask.
+        // See TriangleSelector::RectangleProjectionCursor.
         RECTANGLE,
+        // Painter Pro Mode F4, Sesion B: screen-space free polygon mask.
+        // See TriangleSelector::PolygonProjectionCursor.
         POLYGON,
     };
 
@@ -288,11 +329,15 @@ protected:
     ToolType m_tool_type                  = ToolType::BRUSH;
     float    m_smart_fill_angle           = 30.f;
 
+    // Painter Pro Mode F4, Sesion A: RECTANGLE tool state. Unlike
+    // BRUSH/BUCKET_FILL/SMART_FILL, it doesn't paint on every Dragging event: it just tracks the
+    // screen-space rectangle while the button is held and applies the mask once on release
+    // (see gizmo_event()'s LeftUp/RightUp handling and apply_rectangle_mask()).
     Vec2d m_rect_start_corner = Vec2d::Zero();
     Vec2d m_rect_end_corner   = Vec2d::Zero();
     bool  m_rect_dragging     = false;
 
-    // POLYGON tool state, a closed shape
+    // Painter Pro Mode F5 (commit 4): POLYGON tool state, a closed shape
     // made of nodes with optional Bezier handles (screen-space, canvas-local coords). Click adds a
     // corner node, click+drag adds a curved one. Closing the shape (click the first node with 3+
     // placed) no longer paints: the shape stays editable until shape_apply() (panel Apply), and
@@ -313,7 +358,7 @@ protected:
     Vec2d m_shape_move_last = Vec2d::Zero();
     std::vector<ShapeNode> m_shape_nodes;
     bool      m_shape_closed           = false;
-    bool      m_shape_view_lock        = true;
+    bool      m_shape_view_lock        = false;
     bool      m_shape_keep_after_apply = false;
     // Set when the camera moved under an unlocked, unfinished shape and it had to be dropped.
     bool      m_shape_lost_to_camera   = false;
@@ -332,6 +377,11 @@ protected:
     std::vector<Vec2d> shape_flatten(bool closed) const;
     // Camera input is swallowed while drawing a shape with Lock view on.
     bool shape_view_locked() const { return m_tool_type == ToolType::POLYGON && m_shape_view_lock; }
+    // strokes are kept in screen px and pinned from the view on ✓: while some
+    // are unsaved the camera stays put, or the earlier ones would land elsewhere.
+    bool vb_camera_locked() const { return vector_brush_on() && (!m_vb_strokes.empty() || m_vb_drawing || !m_vb_nodes.empty()); }
+    bool camera_frozen() const { return shape_view_locked() || vb_camera_locked(); }
+    bool locks_camera() const override { return camera_frozen(); }
     // Where the right button went down: a right CLICK cancels a drawn shape, a right DRAG pans.
     Vec2d m_shape_right_down_pos = Vec2d::Zero();
     // Paints the closed shape with new_state as a single undo step.
@@ -359,7 +409,7 @@ protected:
     };
     std::string          m_svg_data;          // the cleaned SVG text
     std::vector<SvgZone> m_svg_zones;
-    // Parts: the shapes set apart from their colour (own filament or off),
+    // parts: the shapes set apart from their colour (own filament or off),
     // stored as in the decal, and the paint groups they give (paint_decal_groups: the colours,
     // then one group per part with its own filament). SvgRing::zone is a GROUP index.
     std::vector<PaintDecalPart> m_svg_parts;
@@ -376,7 +426,7 @@ protected:
     void            svg_prune_parts();         // drops overrides that change nothing
     // Topmost shape under a screen point (hidden parts included, so they can be turned back on).
     int             svg_pick_part(const Vec2d &screen) const;
-    // A hand-drawn shape saved as a decal turned back into points to edit
+    // a hand-drawn shape saved as a decal turned back into points to edit
     // (only SVGs written by shape_to_svg_session). The SVG session keeps its decal, filament and
     // mirror, so saving the shape updates the same decal.
     bool            svg_is_drawn_shape() const;
@@ -396,7 +446,7 @@ protected:
     std::vector<SvgRing> m_svg_local_rings;
     Matrix2d             m_svg_lin = Matrix2d::Identity();
     Vec2d                m_svg_off = Vec2d::Zero();
-    // Corner deform, a homography in the SVG frame applied before the
+    // F4: corner deform, a homography in the SVG frame applied before the
     // placement: screen = m_svg_lin * warp(local) + m_svg_off. Identity = not deformed.
     Matrix3d             m_svg_warp   = Matrix3d::Identity();
     bool                 m_svg_deform = false;   // corner handles shown and grabbed
@@ -421,7 +471,7 @@ protected:
     void svg_update_screen_rings();
     std::string          m_svg_name;           // file stem, becomes the decal's name
 
-    // Paint decals (ModelObject::paint_decals). The SVG on screen is the
+    // F3: paint decals (ModelObject::paint_decals). The SVG on screen is the
     // editing session: "Pin to this view" turns it into a decal card anchored to the object, and
     // "Edit" brings a decal back to the screen from its own view. m_svg_edit_decal = the decal
     // being edited (-1: a new one); m_svg_pending_edit = a decal to load on the next frame, once
@@ -432,6 +482,93 @@ protected:
     // translation), as the masks use them.
     Transform3d model_part_trafos(std::vector<Transform3d> &trafos, std::vector<Transform3d> &trafos_no_translate) const;
     bool svg_pin_to_view();
+    // Vector Brush (2_50): free-hand strokes on screen, made natural by
+    // stroke::build, saved as one decal with ✓ (vb_save).
+    virtual bool vector_brush_on() const { return false; }
+    // A stroke and the eraser passes made on it (non-destructive: the shape is stroke minus erasers,
+    // rebuilt whenever a knob changes; the eraser only touches the selected stroke).
+    // Each stroke keeps the knobs it was drawn with (2a, 3-nov): changing Size or Style only touches the
+    // next strokes, or with the eraser the selected one. Each eraser pass keeps its own knobs too.
+    struct VbStroke {
+        std::vector<stroke::Pt>              raw;
+        std::vector<std::vector<stroke::Pt>> erase;
+        stroke::Params                       p;
+        std::vector<stroke::Params>          ep;   // one per eraser pass
+        int                                  state = -1;   // the filament it was painted with (-1 = the current one)
+        // vb_shape() is a union (and with an effect, of thousands of strands) asked for on
+        // every frame and click; it is kept until the stroke, its knobs or its eraser passes change.
+        mutable ExPolygons                   shape;
+        mutable stroke::Params               shape_p;
+        mutable std::vector<stroke::Params>  shape_ep;
+        mutable size_t                       shape_n = size_t(-1), shape_raw = 0;
+    };
+    std::vector<VbStroke>                m_vb_strokes;   // finished strokes, screen px
+    // for Undo: -1 = a stroke, i >= 0 = an eraser pass on stroke i, <= -2 = knobs changed on a stroke
+    // (m_vb_knob_undo[-2 - h] holds the stroke and its knobs before)
+    std::vector<int>                     m_vb_history;
+    std::vector<std::vector<int>>        m_vb_erase_groups;   // strokes one eraser pass went over
+    static constexpr int                 VB_ERASE_GROUP = 1 << 20;   // history code: VB_ERASE_GROUP + group index
+    std::vector<std::pair<int, stroke::Params>> m_vb_knob_undo;
+    bool                                 m_vb_knob_gesture = false;   // a knob drag in progress: one undo step
+    // Line tool: a click is a point, click and drag pulls out a curve (Pen-like, cubic Bezier
+    // between points; Alt while dragging = the curve only goes out, a corner). Enter or "Finish line"
+    // makes it one more stroke; a click on the first point closes it.
+    bool                                 m_vb_line      = false;
+    std::vector<ShapeNode>               m_vb_nodes;
+    bool                                 m_vb_node_drag = false;
+    bool                                 m_vb_line_closed = false;
+    std::vector<stroke::Pt> vb_line_samples() const;   // the line as dense screen samples, constant speed
+    void                    vb_line_finish();
+    // Line "On surface": each click pasted on the
+    // object (object frame, with its normal), the camera free between clicks. A click is a corner,
+    // click and drag pulls out a curve on the surface's tangent plane (Alt = only the way out); a
+    // point already placed slides along the surface when dragged. Finish makes a decal whose Clay
+    // grows piece by piece (PaintClay.cpp bake_surface), not from one view.
+    // 0 = off, 1 = Draw on surface (Vector: may close into a shape, even width), 2 = Wrap (Vector
+    // Brush: open only, the width follows the brush knobs). The Mmu gizmo sets it to 0 on a mode change.
+    int                                  m_sf_tool      = 0;
+    PaintSurfacePath                     m_sf_path;
+    std::vector<PaintSurfaceSample>      m_sf_curve;
+    int                                  m_sf_gaps      = 0;
+    int                                  m_sf_move      = -1;   // the point being slid
+    int                                  m_sf_pull      = -1;   // the point whose curve the drag pulls out
+    bool                                 m_sf_dirty     = true; // the 3D line needs rebuilding
+    std::string                          m_sf_warn;
+    float                                m_sf_width     = 2.f;  // mm, open lines
+    int                                  m_sf_edit_decal = -1;  // Edit of a saved surface decal: Finish updates it
+    std::string                          m_sf_edit_name;        // ...found again by name (the list moves, decals go)
+    void         sf_check_edit();          // re-finds the decal being edited; gone = the edit ends
+    std::vector<PaintSurfacePath>        m_sf_undo;             // the line before each gesture (add, insert, slide)
+    std::shared_ptr<indexed_triangle_set> m_sf_base;   // AABBMesh keeps a pointer to it: must outlive it
+    std::shared_ptr<AABBMesh>            m_sf_aabb;
+    size_t                               m_sf_aabb_key  = 0;
+    GLModel                              m_sf_model, m_sf_ribbon;
+    // Draw on surface steps aside while an SVG or a shape is on screen (being placed or edited)
+    bool         sf_on() const { return (m_sf_tool == 1 && m_svg_zones.empty() && m_shape_nodes.empty() && !m_shape_draw_armed) ||
+                                        (m_sf_tool == 2 && vector_brush_on() && !m_vb_eraser); }
+    const AABBMesh *sf_mesh();
+    bool         sf_ray(const Vec2d &mouse, Vec3d &a, Vec3d &dir) const;   // the mouse ray, object frame
+    bool         sf_pick(const Vec2d &mouse, Vec3d &p, Vec3d &n);
+    bool         sf_screen(const Vec3d &p, Vec2d &px) const;               // object point -> mouse coords
+    bool         sf_visible(const Vec3d &p);                               // not hidden behind the object
+    void         sf_update();
+    bool         sf_finish();
+    bool         sf_edit_decal(int idx);   // a surface decal: its points back on screen (call after the mode is set)
+    void         sf_cancel();
+    void         sf_render_line();                                         // 3D, with depth
+    void         sf_render_points(ImDrawList *dl);                         // 2D, the points and handles
+    std::vector<stroke::Pt>              m_vb_cur;       // the stroke (or eraser pass) being drawn
+    bool                                 m_vb_drawing = false;
+    bool                                 m_vb_eraser  = false;   // tool: brush / eraser
+    int                                  m_vb_sel     = -1;      // the stroke the eraser works on
+    stroke::Params                       m_vb_params;
+    double vb_now_ms() const;
+    ExPolygons vb_shape(const VbStroke &s) const;   // scaled screen px: stroke minus its erasers
+    ExPolygons vb_shape_build(const VbStroke &s, int tone = -1) const;   // vb_shape without its cache; tone 0/1 = one Two-tone colour
+    int        m_vb_tone_b = 2;   // Two-tone: the second colour's filament (state)
+    int        vb_hit(const Vec2d &px) const;       // topmost stroke under the pointer, -1 if none
+    void       vb_undo();
+    bool   vb_save();   // the strokes as an SVG in the selected filament, pinned to this view as a decal
     // The decal the SVG on screen would become if pinned now (current camera); false if it can't.
     bool svg_build_decal(PaintDecal &decal);
     int  m_svg_mirror = 0;
@@ -439,16 +576,16 @@ protected:
     // Vector mode: a click only starts a shape after "Draw shape", so a
     // plain left drag (on the object or the empty canvas) orbits the camera as usual.
     bool m_shape_draw_armed = false;
-    virtual bool shape_draw_needs_arming() const { return false; }
+    virtual bool shape_draw_needs_arming() const { return false; }   // F5: mirror planes of the SVG on screen (PaintDecal::mirror bits)
     void svg_edit_decal(int idx);
     void svg_finish_pending_edit();
     // Paints decals idxs (in that order) onto the object; erase = remove their paint instead.
     void decal_apply(const std::vector<size_t> &idxs, bool erase);
     // Zone areas of a decal in its SVG frame (hidden zones transparent), cached per decal.
     const std::vector<SvgRing> &decal_rings(size_t idx);
-    // centre of the object's box in the object frame, where the decal mirror planes cross.
+    // F5: centre of the object's box in the object frame, where the decal mirror planes cross.
     Vec3d decal_mirror_centre() const;
-    // "Pick centre" armed: the next left click on the object sets the mirror centre there.
+    // F5: "Pick centre" armed: the next left click on the object sets the mirror centre there.
     bool  m_mirror_pick_armed = false;
     // Decal cards: floating on a sphere, or laid on the surface as they will paint.
     bool m_decal_on_surface = true;
@@ -456,7 +593,7 @@ protected:
     void render_decal_cards_body(const ModelObject *decal_mo, const PaintDecal *on_screen,
                                  const std::function<Vec2f(const Vec2d &)> &to_ndc, float cnv_width, float cnv_height);
     void render_mirror_marker();
-    // Brush symmetry (ModelObject::paint_symmetry.brush): every brush
+    // F5b brush symmetry (ModelObject::paint_symmetry.brush): every brush
     // stroke repeated through the mirror centre, on the surface point nearest to the mirrored one
     // (skipped where the object has nothing there). Ghost cursors show where the copies land.
     void brush_paint_mirrored(const std::vector<ProjectedMousePosition> &positions, const Transform3d &src_trafo,
@@ -470,7 +607,7 @@ protected:
     void render_brush_symmetry(const std::vector<Transform3d> &trafos, bool hovering);
     GLModel m_brush_ghost_model;
     virtual bool show_decal_cards_while_brushing() const { return false; }
-    // "Move on object" armed: a left drag on the object slides the selected decal over it,
+    // F4b: "Move on object" armed: a left drag on the object slides the selected decal over it,
     // turning it around the object's centre so the grabbed point follows the mouse.
     bool       m_decal_move_armed = false;
     int        m_decal_drag       = -1;     // decal being slid, -1 = none
@@ -503,7 +640,7 @@ protected:
     std::vector<GLModel> m_decal_fill_models;
     // Scale (percent) and rotation (degrees) of the SVG set, as set by the panel sliders.
     float m_shape_scale_pct  = 100.f;
-    // width / height of the SVG on screen, along its own axes.
+    // F4b: width / height of the SVG on screen, along its own axes.
     float m_svg_width_pct    = 100.f;
     float m_svg_height_pct   = 100.f;
     void  svg_stretch(int axis, double factor);
@@ -525,6 +662,9 @@ protected:
     GLModel m_circle;
     Vec2d m_old_center{ Vec2d::Zero() };
     float m_old_cursor_radius{ 0.0f };
+
+    // Painter Pro Mode F4: rectangle/polygon screen overlays. Rebuilt
+    // whenever the corners/points differ from last frame, same caching pattern as m_circle above.
     GLModel m_rect_overlay;
     Vec2d   m_old_rect_start_corner = Vec2d::Zero();
     Vec2d   m_old_rect_end_corner   = Vec2d::Zero();
@@ -567,10 +707,13 @@ private:
 
     std::vector<ProjectedHeightRange> get_projected_height_range(const Vec2d& mouse_position, double resolution, const std::vector<const ModelVolume*>& part_volumes, const std::vector<Transform3d>& trafo_matrices) const;
 
+    // Painter Pro Mode F4, Sesion A: applies the RECTANGLE mask
+    // (m_rect_start_corner..m_rect_end_corner) to every mesh, called once on mouse release.
     void apply_rectangle_mask(EnforcerBlockerType new_state);
-    // Applies the POLYGON mask (m_shape_nodes, flattened) to every mesh, called from shape_apply().
+    // Painter Pro Mode F4, Sesion B: applies the POLYGON mask
+    // (m_shape_nodes, flattened) to every mesh, called from shape_apply().
     void apply_polygon_mask(EnforcerBlockerType new_state, const std::vector<Vec2d> &flat);
-    // All rings of an SVG (outers + holes) in one pass per mesh.
+    // F1: all rings of an SVG (outers + holes) in one pass per mesh.
     void apply_polygon_set_mask(EnforcerBlockerType new_state, const std::vector<std::vector<Vec2d>> &rings, const std::vector<bool> &is_hole);
     // Builds the cursor for one model part: mesh-local camera points, view*projection, viewport,
     // part transform and clipping plane.
@@ -578,13 +721,14 @@ private:
         const Vec3f &, const Vec3f &, const Matrix4d &, const std::array<int, 4> &, const Transform3d &, const TriangleSelector::ClippingPlane &)>;
     // One select_patch() per model part of the object, with the cursor make_cursor builds.
     void apply_area_cursor(EnforcerBlockerType new_state, const AreaCursorFactory &make_cursor);
-    // Occlusion test for the rectangle / polygon masks on mesh mesh_idx (mesh coords): a ray from the point towards the camera must
+    // Painter Pro Mode F5 (commit 4): occlusion test for the rectangle /
+    // polygon masks on mesh mesh_idx (mesh coords): a ray from the point towards the camera must
     // not hit any model part of the object. Results are cached per point.
     TriangleSelector::Cursor::VisibilityTest make_visibility_test(size_t mesh_idx, const std::vector<Transform3d> &trafo_matrices) const;
-    // The same test towards any viewer: rays to eye_world (perspective)
+    // F3: the same test towards any viewer: rays to eye_world (perspective)
     // or along to_eye_world (ortho). The camera version above calls it with the camera.
     TriangleSelector::Cursor::VisibilityTest make_visibility_test_toward(size_t mesh_idx, const std::vector<Transform3d> &trafo_matrices,
-        bool perspective, const Vec3d &eye_world, const Vec3d &to_eye_world) const;
+        bool perspective, const Vec3d &eye_world, const Vec3d &to_eye_world, double through_depth = -1.) const;
 
     bool is_mesh_point_clipped(const Vec3d& point, const Transform3d& trafo) const;
     void update_raycast_cache(const Vec2d& mouse_position,

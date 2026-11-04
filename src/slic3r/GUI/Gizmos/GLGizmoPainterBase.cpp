@@ -10,6 +10,9 @@
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PaintClay.hpp"
+#include "libslic3r/AABBMesh.hpp"
+#include <imgui/imgui.h>
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/ClipperUtils.hpp" // shape mask fill
@@ -17,6 +20,7 @@
 #include "libslic3r/SvgPaint.hpp"
 #include <fstream>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/fstream.hpp> // UTF-8 paths on Windows
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -145,7 +149,7 @@ void GLGizmoPainterBase::render_triangles(const Selection& selection) const
 
 void GLGizmoPainterBase::render_cursor()
 {
-    // Painter Pro Mode RECTANGLE/POLYGON are pure screen-space
+    // Painter Pro Mode F4: RECTANGLE/POLYGON are pure screen-space
     // overlays, independent of whatever the raycast below finds under the mouse (the user can
     // drag/click past the object's silhouette while masking), so handle them before it.
     // the decal cards as a reference while painting by hand.
@@ -183,7 +187,7 @@ void GLGizmoPainterBase::render_cursor()
     }
     // Raycast and return if there's no hit.
     update_raycast_cache(m_parent.get_local_mouse_position(), camera, trafo_matrices);
-    // The mirror centre always, the ghost cursors over the object.
+    // F5b: the mirror centre always, the ghost cursors over the object.
     if (mo->paint_symmetry.brush != 0 && m_tool_type == ToolType::BRUSH)
         render_brush_symmetry(trafo_matrices, m_rr.mesh_id != -1
             && (m_cursor_type == TriangleSelector::SPHERE || m_cursor_type == TriangleSelector::CIRCLE));
@@ -367,69 +371,76 @@ void GLGizmoPainterBase::render_cursor_height_range(const Transform3d& trafo) co
     shader->stop_using();
 }
 
+// Painter Pro Mode: screen-space quad outline while dragging, same NDC-from-
+// pixels/"flat" shader pattern as render_cursor_circle() above and GLSelectionRectangle.
 void GLGizmoPainterBase::render_cursor_rectangle()
 {
     if (!m_rect_dragging)
         return;
 
-    const Size canvas_size = m_parent.get_canvas_size();
-    const float width = float(canvas_size.get_width());
-    const float height = float(canvas_size.get_height());
-    if (width <= 0.f || height <= 0.f)
+    const Size cnv_size = m_parent.get_canvas_size();
+    const float cnv_width  = float(cnv_size.get_width());
+    const float cnv_height = float(cnv_size.get_height());
+    if (cnv_width == 0.0f || cnv_height == 0.0f)
         return;
+    const float cnv_inv_width  = 1.0f / cnv_width;
+    const float cnv_inv_height = 1.0f / cnv_height;
+
+    glsafe(::glLineWidth(1.5f));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glPushAttrib(GL_ENABLE_BIT));
+    glsafe(::glLineStipple(4, 0xAAAA));
+    glsafe(::glEnable(GL_LINE_STIPPLE));
 
     if (!m_rect_overlay.is_initialized() || !m_old_rect_start_corner.isApprox(m_rect_start_corner)
-        || !m_old_rect_end_corner.isApprox(m_rect_end_corner)) {
+     || !m_old_rect_end_corner.isApprox(m_rect_end_corner)) {
         m_old_rect_start_corner = m_rect_start_corner;
-        m_old_rect_end_corner = m_rect_end_corner;
+        m_old_rect_end_corner   = m_rect_end_corner;
         m_rect_overlay.reset();
 
-        const float left = float(std::min(m_rect_start_corner.x(), m_rect_end_corner.x()));
-        const float right = float(std::max(m_rect_start_corner.x(), m_rect_end_corner.x()));
-        const float top = float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y()));
+        const float left   = float(std::min(m_rect_start_corner.x(), m_rect_end_corner.x()));
+        const float right  = float(std::max(m_rect_start_corner.x(), m_rect_end_corner.x()));
+        const float top    = float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y()));
         const float bottom = float(std::max(m_rect_start_corner.y(), m_rect_end_corner.y()));
-        const auto to_ndc = [width, height](float x, float y) {
-            return Vec2f(2.f * x / width - 1.f, 1.f - 2.f * y / height);
+        auto to_ndc = [cnv_inv_width, cnv_inv_height](float x, float y) {
+            return Vec2f(2.0f * (x * cnv_inv_width - 0.5f), -2.0f * (y * cnv_inv_height - 0.5f));
         };
 
-        GLModel::Geometry geometry;
-        geometry.format = {GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P2};
-        geometry.color = {0.f, 1.f, 0.3f, 1.f};
-        geometry.reserve_vertices(4);
-        geometry.reserve_indices(4);
-        geometry.add_vertex(to_ndc(left, top));
-        geometry.add_vertex(to_ndc(right, top));
-        geometry.add_vertex(to_ndc(right, bottom));
-        geometry.add_vertex(to_ndc(left, bottom));
+        GLModel::Geometry init_data;
+        init_data.format = { GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P2 };
+        init_data.color  = { 0.0f, 1.0f, 0.3f, 1.0f };
+        init_data.reserve_vertices(4);
+        init_data.reserve_indices(4);
+        init_data.add_vertex(to_ndc(left, top));
+        init_data.add_vertex(to_ndc(right, top));
+        init_data.add_vertex(to_ndc(right, bottom));
+        init_data.add_vertex(to_ndc(left, bottom));
         for (unsigned int i = 0; i < 4; ++i)
-            geometry.add_index(i);
-        m_rect_overlay.init_from(std::move(geometry));
+            init_data.add_index(i);
+
+        m_rect_overlay.init_from(std::move(init_data));
     }
 
-    GLShaderProgram *shader = wxGetApp().get_shader("flat");
-    if (shader == nullptr)
-        return;
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader != nullptr) {
+        shader->start_using();
+        shader->set_uniform("view_model_matrix", Transform3d::Identity());
+        shader->set_uniform("projection_matrix", Transform3d::Identity());
+        m_rect_overlay.render();
+        shader->stop_using();
+    }
 
-    glsafe(::glPushAttrib(GL_ENABLE_BIT));
-    glsafe(::glDisable(GL_DEPTH_TEST));
-    glsafe(::glEnable(GL_LINE_STIPPLE));
-    glsafe(::glLineStipple(4, 0xAAAA));
-    glsafe(::glLineWidth(1.5f));
-    shader->start_using();
-    shader->set_uniform("view_model_matrix", Transform3d::Identity());
-    shader->set_uniform("projection_matrix", Transform3d::Identity());
-    m_rect_overlay.render();
-    shader->stop_using();
     glsafe(::glPopAttrib());
+    glsafe(::glEnable(GL_DEPTH_TEST));
 }
 
-// Draws the shape mask: the flattened
+// Painter Pro Mode F5 (commit 4). Draws the shape mask: the flattened
 // outline (exactly the polygon that Apply will paint), a rubber-band segment to the mouse while
 // the shape is open, node squares and handle lines, and a translucent fill in the selected
 // filament colour once it's closed. Also drops an unfinished shape if the camera moved under it
 // (nodes are screen-space, they'd no longer match the object). Rebuilt every frame (see
 // m_polygon_overlay's declaration for why that's fine here).
-// /the decal cards (and their mirrored copies, and the copies of the SVG
+// F3/F5: the decal cards (and their mirrored copies, and the copies of the SVG
 // being placed, on_screen). Floating on a sphere around the object, or laid on the surface as they
 // will paint (m_decal_on_surface). Draws with its own GL state; the caller's shader is left stopped.
 void GLGizmoPainterBase::render_decal_cards(const PaintDecal *on_screen)
@@ -503,7 +514,7 @@ bool GLGizmoPainterBase::mouse_on_object(const Vec2d &mouse, Vec3d &obj_pt)
     return true;
 }
 
-// Brush symmetry. Every combination of the planes in `bits`, as the
+// F5b brush symmetry. Every combination of the planes in `bits`, as the
 // diagonal of the reflection (one plane: one copy; two: three; three: seven), like the decals.
 static std::vector<Vec3d> symmetry_reflections(int bits)
 {
@@ -695,7 +706,7 @@ void GLGizmoPainterBase::render_brush_symmetry(const std::vector<Transform3d> &t
     shader->stop_using();
 }
 
-// Where the mirror planes cross, an orange ring and cross, while any mirror is on.
+// F5: where the mirror planes cross, an orange ring and cross, while any mirror is on.
 void GLGizmoPainterBase::render_mirror_marker()
 {
     const ModelObject *decal_mo = m_c->selection_info()->model_object();
@@ -752,7 +763,7 @@ void GLGizmoPainterBase::render_decal_cards_body(const ModelObject *decal_mo, co
     const Transform3d inst   = model_part_trafos(trafos, trafos_no_translate);
     const Camera     &camera = wxGetApp().plater()->get_camera();
     const Matrix4d    vpm    = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
-    const Vec3d       mirror_centre = decal_mirror_centre();   // mirrored copies drawn like the decal
+    const Vec3d       mirror_centre = decal_mirror_centre();   // F5: mirrored copies drawn like the decal
     // Cards are drawn on a sphere around the object (its box's bounding sphere), each one
     // slid out along its own direction, so a card and its mirrored copies sit on the side
     // they paint. Only the drawing moves: sliding along the rays (towards the eye in
@@ -1162,13 +1173,13 @@ const GLGizmoPainterBase::SurfaceCard &GLGizmoPainterBase::decal_surface(const P
 
 void GLGizmoPainterBase::render_cursor_polygon()
 {
-    svg_finish_pending_edit();   // "Edit" lands here, with the new view's matrices
+    svg_finish_pending_edit();   // F3: "Edit" lands here, with the new view's matrices
     const ModelObject *decal_mo = m_c->selection_info()->model_object();
     bool has_cards = false;
     if (decal_mo != nullptr)
         for (size_t i = 0; i < decal_mo->paint_decals.size() && !has_cards; ++i)
             has_cards = !decal_mo->paint_decals[i].hidden && int(i) != editing_decal();
-    // The SVG on screen shows its mirrored copies live, where they will land once saved.
+    // F5: the SVG on screen shows its mirrored copies live, where they will land once saved.
     PaintDecal on_screen_decal;
     const bool on_screen_mirror = m_svg_mirror != 0 && !m_svg_local_rings.empty() && svg_build_decal(on_screen_decal);
     has_cards = has_cards || on_screen_mirror;
@@ -1196,6 +1207,7 @@ void GLGizmoPainterBase::render_cursor_polygon()
     if (shader == nullptr)
         return;
 
+    glsafe(::glDisable(GL_CULL_FACE));   // screen overlay: its quads come in either winding
     glsafe(::glDisable(GL_DEPTH_TEST));
     glsafe(::glPushAttrib(GL_ENABLE_BIT));
     shader->start_using();
@@ -1245,7 +1257,7 @@ void GLGizmoPainterBase::render_cursor_polygon()
                 add_thick_segment(halo_data, halo_idx, c - d, c + d, 2.5);
                 add_thick_segment(core_data, core_idx, c - d, c + d, 1.0);
             }
-            // Corner handles, squares at the corners of the (deformed) box.
+            // F4: corner handles, squares at the corners of the (deformed) box.
             if (m_svg_deform) {
                 const double h = double(PolygonCloseRadiusPx) * 0.6;
                 for (const Vec2d &p : box) {
@@ -1357,7 +1369,7 @@ void GLGizmoPainterBase::render_cursor_polygon()
         }
     }
 
-    // Outline and handles built from triangles (dark halo under a light core),
+    // outline and handles built from triangles (dark halo under a light core),
     // like the SVG: a 1 px dashed line got lost on the model. Green outline, white handles.
     {
         GLModel::Geometry halo_data, line_data, handle_data;
@@ -1680,7 +1692,7 @@ std::vector<GLGizmoPainterBase::ProjectedHeightRange> GLGizmoPainterBase::get_pr
 // The gizmo has an opportunity to react - if it does, it should return true so that the Canvas3D is
 // aware that the event was reacted to and stops trying to make different sense of it. If the gizmo
 // concludes that the event was not intended for it, it should return false.
-// cubic Bezier helpers for the shape mask.
+// Painter Pro Mode F5 (commit 4): cubic Bezier helpers for the shape mask.
 static Vec2d shape_bezier_point(const std::array<Vec2d, 4> &c, double t)
 {
     const double u = 1. - t;
@@ -1787,7 +1799,14 @@ void GLGizmoPainterBase::shape_apply(EnforcerBlockerType new_state, const std::s
     if (m_svg_rings.empty()) {
         apply_polygon_mask(new_state, shape_flatten(true));
     } else {
-        // One pass per group (colour, or part with its own filament) with its filament (Erase:
+        // F0: time of the SVG Apply in the PROFILE log, for both paths.
+        const auto t0 = std::chrono::steady_clock::now();
+        size_t holes = 0, points = 0;
+        for (const SvgRing &ring : m_svg_rings) {
+            holes  += ring.hole ? 1 : 0;
+            points += ring.pts.size();
+        }
+        // F2: one pass per group (colour, or part with its own filament) with its filament (Erase:
         // every visible group with NONE). Groups are disjoint, so the order does not matter.
         for (size_t z = 0; z < m_svg_groups.size(); ++z) {
             const PaintDecalZone &zone = m_svg_groups[z];
@@ -1816,7 +1835,9 @@ void GLGizmoPainterBase::shape_apply(EnforcerBlockerType new_state, const std::s
 bool GLGizmoPainterBase::shape_load_svg(const std::string &path)
 {
     m_shape_svg_error.clear();
-    std::ifstream file(path, std::ios::binary);
+    // `path` is UTF-8: nowide opens it on Windows too (std::ifstream reads it as ANSI, so a folder
+    // with an accent or an ñ failed there).
+    boost::nowide::ifstream file(path.c_str(), std::ios::binary);
     std::ostringstream text;
     if (file)
         text << file.rdbuf();
@@ -1836,7 +1857,14 @@ bool GLGizmoPainterBase::shape_load_svg(const std::string &path)
 
     shape_clear();
     m_svg_data = svg;
-    m_svg_name = boost::filesystem::path(path).stem().string();
+    {   // the file name without folder or extension, kept in UTF-8 (path::string() is ANSI on Windows)
+        const size_t slash = path.find_last_of("/\\");
+        std::string  stem  = slash == std::string::npos ? path : path.substr(slash + 1);
+        const size_t dot   = stem.find_last_of('.');
+        if (dot != std::string::npos && dot > 0)
+            stem.erase(dot);
+        m_svg_name = stem;
+    }
     for (const SvgPaint::Zone &zone : zones)
         m_svg_zones.push_back({ zone.rgb, zone.grad, svg_default_state(zone.rgb), false });
     svg_rebuild_masks();
@@ -1878,7 +1906,7 @@ bool GLGizmoPainterBase::shape_load_svg(const std::string &path)
     return true;
 }
 
-// Group areas from SvgPaint, with the hidden zones and parts transparent.
+// Zone areas from the Sticker engine, with the hidden zones transparent.
 void GLGizmoPainterBase::svg_rebuild_masks()
 {
     m_svg_local_rings.clear();
@@ -1940,7 +1968,7 @@ void GLGizmoPainterBase::svg_rebuild_masks()
         m_svg_local_lo = m_svg_local_hi = Vec2d::Zero();
 }
 
-// Parts.
+// parts.
 PaintDecalPart *GLGizmoPainterBase::svg_part(int shape, bool create)
 {
     for (PaintDecalPart &p : m_svg_parts)
@@ -2037,7 +2065,7 @@ bool GLGizmoPainterBase::svg_to_shape_nodes()
     if (nodes.size() < 3)
         return false;
 
-    // Path units to the SVG frame: 25.4/96 mm per unit, Y flipped, and SvgPaint centres
+    // Path units to the SVG frame: 25.4/96 mm per unit, Y flipped, and the Sticker engine centres
     // the drawing, so the centres of the two boxes match.
     const double k = 25.4 / 96.0;
     std::vector<ShapeNode> saved_nodes = std::move(m_shape_nodes);
@@ -2128,7 +2156,7 @@ bool GLGizmoPainterBase::shape_contains(const Vec2d &p) const
 {
     if (m_svg_rings.empty())
         return m_shape_closed && !m_shape_nodes.empty() && point_in_shape(shape_flatten(true), p);
-    // Anywhere inside the SVG's box, transparent parts included.
+    // anywhere inside the SVG's box, transparent parts included.
     const std::array<Vec2d, 4> box = svg_screen_box();
     return point_in_shape(std::vector<Vec2d>(box.begin(), box.end()), p);
 }
@@ -2177,7 +2205,7 @@ void GLGizmoPainterBase::shape_scale(double factor)
     }
 }
 
-// Stretch along the SVG's own X (axis 0) or Y (1) about the centre of its box. Without a
+// F4b: stretch along the SVG's own X (axis 0) or Y (1) about the centre of its box. Without a
 // corner deform it goes into the placement (exact); with one, into the deform (Reset corners
 // then also drops the stretch).
 void GLGizmoPainterBase::svg_stretch(int axis, double factor)
@@ -2225,7 +2253,7 @@ void GLGizmoPainterBase::shape_rotate(double degrees)
     }
 }
 
-// The SVG on screen becomes a decal card anchored to the object, seen
+// F3. The SVG on screen becomes a decal card anchored to the object, seen
 // from the current camera. The card plane is perpendicular to the view: through the object's
 // centre (ortho), or at the depth of that centre on the camera axis (perspective, so the stored eye
 // IS the camera). Three points of the SVG are taken from the screen to that plane, which gives the
@@ -2318,6 +2346,7 @@ bool GLGizmoPainterBase::svg_pin_to_view()
         mo->paint_decals[size_t(m_svg_edit_decal)] = std::move(decal);
     else
         mo->paint_decals.push_back(std::move(decal));
+    paint_decal_unique_name(mo->paint_decals, editing ? size_t(m_svg_edit_decal) : mo->paint_decals.size() - 1);
     shape_clear();
     m_parent.set_as_dirty();
     return true;
@@ -2481,7 +2510,7 @@ void GLGizmoPainterBase::decal_apply(const std::vector<size_t> &idxs, bool erase
             continue;
         const std::vector<SvgRing>        &rings  = decal_rings(idx);
         const std::vector<PaintDecalZone> groups = m_decal_rings_cache[idx].groups;   // copied: the cache may move
-        // The decal and its mirrored copies, each painted like a decal of its own.
+        // F5: the decal and its mirrored copies, each painted like a decal of its own.
         for (const PaintDecal &d : mo->paint_decals[idx].with_mirror_copies(decal_mirror_centre())) {
             const Matrix4d    M = d.object_to_svg() * inst_inv.matrix();
             // project_mesh_point_to_screen() with viewport (0, 0, 2, 2) gives x = ndc.x + 1, y = 1 - ndc.y.
@@ -2516,9 +2545,11 @@ void GLGizmoPainterBase::decal_apply(const std::vector<size_t> &idxs, bool erase
                     const Vec3f centre_mesh = Vec3d(trafo_inv * centre_w).cast<float>();
                     auto cursor = std::make_unique<TriangleSelector::PolygonSetProjectionCursor>(eye_mesh, centre_mesh, vp_matrix, viewport,
                         mask, trafo, this->get_clipping_plane_in_volume_coordinates(trafo));
-                    if (d.through)
+                    if (d.through) {
                         cursor->set_any_facing(true);
-                    else
+                        if (d.through_depth > 0.)   // the socket's walls and floor, not the back of the head
+                            cursor->set_visibility_test(make_visibility_test_toward(mesh_idx, trafos, perspective, eye_w, to_eye_w, d.through_depth));
+                    } else
                         cursor->set_visibility_test(make_visibility_test_toward(mesh_idx, trafos, perspective, eye_w, to_eye_w));
                     std::unique_ptr<TriangleSelector::Cursor> base_cursor = std::move(cursor);
                     m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
@@ -2531,8 +2562,8 @@ void GLGizmoPainterBase::decal_apply(const std::vector<size_t> &idxs, bool erase
     }
 }
 
-// The drawn shape as an SVG path in screen pixels (curves kept as cubics),
-// filled with the selected filament's colour. NanoSVG reads px as mm at 96 dpi and SvgPaint
+// the drawn shape as an SVG path in screen pixels (curves kept as cubics),
+// filled with the selected filament's colour. NanoSVG reads px as mm at 96 dpi and the Sticker
 // engine centres the drawing and flips Y, so screen = centre + diag(1/k, -1/k) * svg_mm, k = 25.4/96.
 bool GLGizmoPainterBase::shape_to_svg_session()
 {
@@ -2607,28 +2638,872 @@ bool GLGizmoPainterBase::shape_to_svg_session()
     return true;
 }
 
+double GLGizmoPainterBase::vb_now_ms() const
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// every stroke's outline as a path of one SVG, then the same steps as a shape
+// drawn on screen (shape_to_svg_session) and Pin to view: a decal like any other, edited in Vector.
+// eraser: stroke minus its eraser passes, in scaled screen px.
+ExPolygons GLGizmoPainterBase::vb_shape(const VbStroke &vs) const
+{
+    if (vs.shape_n == vs.erase.size() && vs.shape_raw == vs.raw.size() && vs.shape_p == vs.p && vs.shape_ep == vs.ep)
+        return vs.shape;
+    vs.shape     = vb_shape_build(vs);
+    vs.shape_n   = vs.erase.size();
+    vs.shape_raw = vs.raw.size();
+    vs.shape_p   = vs.p;
+    vs.shape_ep  = vs.ep;
+    return vs.shape;
+}
+
+ExPolygons GLGizmoPainterBase::vb_shape_build(const VbStroke &vs, int tone) const
+{
+    auto poly = [](const stroke::Params &P, const std::vector<stroke::Pt> &raw) {
+        Polygon pg;
+        for (const stroke::XY &q : stroke::stroke_ring(P, raw, false))
+            pg.points.emplace_back(scaled(q.x), scaled(q.y));
+        return pg;
+    };
+    // a stroke can cross itself: union first so its loops don't cancel out. An effect (hair, dots...)
+    // is many pieces: their union is the shape.
+    Polygons pieces;
+    for (const std::vector<stroke::XY> &ring : stroke::effect_rings(vs.p, vs.raw, false, tone)) {
+        Polygon pg;
+        for (const stroke::XY &q : ring)
+            pg.points.emplace_back(scaled(q.x), scaled(q.y));
+        if (pg.points.size() >= 3) {
+            if (vs.p.fx != stroke::Effect::None && pg.is_clockwise())
+                pg.reverse();   // each piece on its own, all one way, so nonzero keeps every one
+            pieces.push_back(std::move(pg));
+        }
+    }
+    Polygons body = union_(pieces, ClipperLib::pftNonZero);
+    if (tone == 1)   // Two-tone: the second colour never covers the core
+        body = diff(body, to_polygons(vb_shape_build(vs, 0)));
+    if (vs.erase.empty())
+        return union_ex(body);
+    Polygons cut;
+    for (size_t i = 0; i < vs.erase.size(); ++i)
+        cut.push_back(poly(i < vs.ep.size() ? vs.ep[i] : vs.p, vs.erase[i]));
+    return diff_ex(body, union_(cut, ClipperLib::pftNonZero));
+}
+
+int GLGizmoPainterBase::vb_hit(const Vec2d &px) const
+{
+    const Point p(scaled(px.x()), scaled(px.y()));
+    for (int i = int(m_vb_strokes.size()) - 1; i >= 0; --i)
+        for (const ExPolygon &ex : vb_shape(m_vb_strokes[i]))
+            if (ex.contains(p))
+                return i;
+    return -1;
+}
+
+// Line tool: each segment a cubic from point a (handle out) to point b (handle in), sampled about
+// every px; time runs at a constant speed so Speed / Ink widths stay even along the line.
+std::vector<stroke::Pt> GLGizmoPainterBase::vb_line_samples() const
+{
+    std::vector<stroke::Pt> out;
+    const size_t n = m_vb_nodes.size();
+    if (n == 0)
+        return out;
+    double t = 0.;
+    out.push_back({ m_vb_nodes[0].p.x(), m_vb_nodes[0].p.y(), 1., t });
+    const size_t segs = m_vb_line_closed && n > 2 ? n : n - 1;
+    for (size_t s = 0; s < segs; ++s) {
+        const ShapeNode &a = m_vb_nodes[s], &b = m_vb_nodes[(s + 1) % n];
+        const Vec2d P0 = a.p, P1 = a.p + a.out, P2 = b.p + b.in, P3 = b.p;
+        const double len = (P1 - P0).norm() + (P2 - P1).norm() + (P3 - P2).norm();
+        const int    k   = std::max(2, int(std::ceil(len)));
+        for (int i = 1; i <= k; ++i) {
+            const double u = double(i) / k, v = 1. - u;
+            const Vec2d  q = v * v * v * P0 + 3. * v * v * u * P1 + 3. * v * u * u * P2 + u * u * u * P3;
+            t += (q - Vec2d(out.back().x, out.back().y)).norm() / 0.6;   // 0.6 px per ms: a calm hand
+            out.push_back({ q.x(), q.y(), 1., t });
+        }
+    }
+    // closed: run ~3 px past the first point. Ending on the start makes Quill read the whole
+    // line as a dot (the eraser then left only that dot); the overlap seals the seam.
+    if (m_vb_line_closed && n > 2)
+        for (size_t i = 1; i < out.size() && std::hypot(out[i].x - out[0].x, out[i].y - out[0].y) < 3.; ++i) {
+            const stroke::Pt &a = out[i];
+            t += std::hypot(a.x - out.back().x, a.y - out.back().y) / 0.6;
+            out.push_back({ a.x, a.y, 1., t });
+        }
+    return out;
+}
+
+void GLGizmoPainterBase::vb_line_finish()
+{
+    if (m_vb_nodes.size() >= 2) {
+        stroke::Params p = m_vb_params;
+        p.stream = 0.;   // the line is already where it should be: no elastic lag
+        if (m_vb_line_closed)
+            p.tin = p.tout = 0.;   // a closed line has no ends to taper
+        m_vb_strokes.push_back({ vb_line_samples(), {}, p, {}, int(get_left_button_state_type()) });
+        m_vb_history.push_back(-1);
+        m_vb_sel = int(m_vb_strokes.size()) - 1;
+    }
+    m_vb_nodes.clear();
+    m_vb_node_drag   = false;
+    m_vb_line_closed = false;
+    m_parent.set_as_dirty();
+}
+
+// Line "On surface". The mesh is the Clay base (model parts, object frame),
+// the same the Clay is baked over, so what is drawn is what grows.
+const AABBMesh *GLGizmoPainterBase::sf_mesh()
+{
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr)
+        return nullptr;
+    size_t key = mo->volumes.size();
+    for (const ModelVolume *v : mo->volumes)
+        key = key * 1000003u + size_t(v->id().id) * 31u + v->mesh().its.vertices.size();
+    if (!m_sf_aabb || key != m_sf_aabb_key) {
+        auto base = std::make_shared<indexed_triangle_set>(paint_clay_base(*mo));
+        if (base->indices.empty())
+            return nullptr;
+        m_sf_aabb.reset();
+        m_sf_base     = std::move(base);
+        m_sf_aabb     = std::make_shared<AABBMesh>(*m_sf_base);
+        m_sf_aabb_key = key;
+    }
+    return m_sf_aabb.get();
+}
+
+bool GLGizmoPainterBase::sf_ray(const Vec2d &mouse, Vec3d &a, Vec3d &dir) const
+{
+    if (m_c->selection_info()->model_object() == nullptr)
+        return false;
+    std::vector<Transform3d> trafos, trafos_no_translate;
+    const Transform3d inst_inv = model_part_trafos(trafos, trafos_no_translate).inverse();
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    const Matrix4d inv_vp = Matrix4d(camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix()).inverse();
+    const std::array<int, 4> &vp = camera.get_viewport();
+    const double nx = 2.0 * (mouse.x() - vp[0]) / double(vp[2]) - 1.0;
+    const double ny = 1.0 - 2.0 * (mouse.y() + vp[1]) / double(vp[3]);
+    Vec4d A = inv_vp * Vec4d(nx, ny, -1.0, 1.0);
+    Vec4d B = inv_vp * Vec4d(nx, ny, 1.0, 1.0);
+    if (std::abs(A.w()) < 1e-12 || std::abs(B.w()) < 1e-12)
+        return false;
+    a = inst_inv * Vec3d((A / A.w()).head<3>());
+    const Vec3d b = inst_inv * Vec3d((B / B.w()).head<3>());
+    dir = b - a;
+    if (dir.squaredNorm() < 1e-20)
+        return false;
+    dir.normalize();
+    return true;
+}
+
+bool GLGizmoPainterBase::sf_pick(const Vec2d &mouse, Vec3d &p, Vec3d &n)
+{
+    const AABBMesh *mesh = sf_mesh();
+    Vec3d a, dir;
+    if (mesh == nullptr || !sf_ray(mouse, a, dir))
+        return false;
+    const AABBMesh::hit_result h = mesh->query_ray_hit(a, dir);
+    if (!h.is_hit())
+        return false;
+    p = h.position();
+    n = h.normal().normalized();
+    if (n.dot(dir) > 0.)
+        n = -n;
+    // on the silhouette the hit may land on the face behind: refuse it (Editor §12)
+    return -n.dot(dir) >= 0.1;
+}
+
+bool GLGizmoPainterBase::sf_screen(const Vec3d &p, Vec2d &px) const
+{
+    std::vector<Transform3d> trafos, trafos_no_translate;
+    const Transform3d inst = model_part_trafos(trafos, trafos_no_translate);
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    const Vec4d c = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix() * Vec4d((inst * p).x(), (inst * p).y(), (inst * p).z(), 1.);
+    if (c.w() <= 1e-12)
+        return false;
+    const std::array<int, 4> &vp = camera.get_viewport();
+    px = Vec2d((c.x() / c.w() + 1.) * 0.5 * vp[2] + vp[0], (1. - c.y() / c.w()) * 0.5 * vp[3] - vp[1]);
+    return true;
+}
+
+bool GLGizmoPainterBase::sf_visible(const Vec3d &p)
+{
+    const AABBMesh *mesh = sf_mesh();
+    Vec2d px;
+    Vec3d a, dir;
+    if (mesh == nullptr || !sf_screen(p, px) || !sf_ray(px, a, dir))
+        return true;
+    const AABBMesh::hit_result h = mesh->query_ray_hit(a, dir);
+    return !h.is_hit() || (h.position() - p).norm() < 0.5;
+}
+
+void GLGizmoPainterBase::sf_update()
+{
+    m_sf_curve.clear();
+    m_sf_gaps = 0;
+    m_sf_dirty = true;
+    m_sf_path.width = m_sf_width;
+    m_sf_path.wrap  = m_sf_tool == 2;
+    if (m_sf_path.wrap) {   // Wrap: never closed, the brush as the knobs are now
+        m_sf_path.closed = false;
+        m_sf_path.brush  = m_vb_params;
+    }
+    if (const AABBMesh *mesh = sf_mesh(); mesh != nullptr && m_sf_path.clicks.size() >= 2)
+        m_sf_curve = paint_surface_curve(*mesh, m_sf_path, &m_sf_gaps);
+    m_parent.set_as_dirty();
+}
+
+// Edit of a surface decal: its clicks come back as the line being drawn, the camera stays where it
+// is (the card of such a decal is only its mean normal: going there turned the view oddly, 3-nov).
+bool GLGizmoPainterBase::sf_edit_decal(int idx)
+{
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr || idx < 0 || size_t(idx) >= mo->paint_decals.size() || mo->paint_decals[size_t(idx)].surface.empty() ||
+        mo->paint_decals[size_t(idx)].locked)
+        return false;
+    sf_cancel();
+    m_sf_path        = mo->paint_decals[size_t(idx)].surface;
+    m_sf_tool        = m_sf_path.wrap ? 2 : 1;
+    if (m_sf_path.wrap) {
+        m_vb_eraser = false;
+        m_vb_params = m_sf_path.brush;   // the knobs show the line's brush
+    }
+    m_sf_width       = float(m_sf_path.width);
+    m_sf_edit_decal  = idx;
+    m_sf_edit_name   = mo->paint_decals[size_t(idx)].name;
+    sf_update();
+    return true;
+}
+
+void GLGizmoPainterBase::sf_check_edit()
+{
+    if (m_sf_edit_decal < 0)
+        return;
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    int found = -1;
+    if (mo != nullptr)
+        for (size_t i = 0; i < mo->paint_decals.size(); ++i)
+            if (mo->paint_decals[i].name == m_sf_edit_name && !mo->paint_decals[i].surface.empty()) {
+                found = int(i);
+                break;
+            }
+    if (found >= 0) {
+        m_sf_edit_decal = found;
+        return;
+    }
+    sf_cancel();   // deleted (or merged) while its points were on screen
+    m_sf_tool = 0;
+}
+
+void GLGizmoPainterBase::sf_cancel()
+{
+    m_sf_edit_decal = -1;
+    m_sf_undo.clear();
+    m_sf_path  = PaintSurfacePath();
+    m_sf_move  = m_sf_pull = -1;
+    if (m_button_down == Button::Left)
+        m_button_down = Button::None;   // Esc / tool change in mid-drag (Editor audit, 4-nov)
+    m_sf_warn.clear();
+    sf_update();
+}
+
+// The decal: its flat SVG is the outline seen along the line's mean normal (the layer icon, the
+// paint); its Clay is baked from the clicks, piece by piece.
+bool GLGizmoPainterBase::sf_finish()
+{
+    ModelObject *mo = m_c->selection_info()->model_object();
+    const size_t need = m_sf_path.closed ? 3 : 2;
+    if (mo == nullptr || m_sf_path.clicks.size() < need)
+        return false;
+    sf_check_edit();
+    sf_update();
+    const std::vector<Vec3d> outline = paint_surface_outline(m_sf_curve, m_sf_path);
+    if (outline.size() < 3)
+        return false;
+    Vec3d nm = Vec3d::Zero(), c = Vec3d::Zero();
+    for (const PaintSurfaceSample &q : m_sf_curve)
+        nm += q.n;
+    for (const Vec3d &q : outline)
+        c += q;
+    c /= double(outline.size());
+    nm = nm.squaredNorm() > 1e-20 ? Vec3d(nm.normalized()) : Vec3d::UnitZ();
+    const Vec3d up0 = nm.cross(std::abs(nm.z()) < 0.9 ? Vec3d::UnitZ() : Vec3d::UnitX());
+    const Vec3d up  = Vec3d(up0 - nm * up0.dot(nm)).normalized();
+    const Vec3d r   = up.cross(nm).normalized();
+    std::vector<Vec2d> uv;
+    Vec2d lo = Vec2d::Constant(1e30), hi = Vec2d::Constant(-1e30);
+    for (const Vec3d &q : outline) {
+        uv.emplace_back(r.dot(q - c), up.dot(q - c));
+        lo = lo.cwiseMin(uv.back());
+        hi = hi.cwiseMax(uv.back());
+    }
+    const int       state = int(get_left_button_state_type());
+    const ColorRGBA col   = get_state_color(state);
+    char hex[8];
+    std::snprintf(hex, sizeof(hex), "#%02X%02X%02X", int(col.r() * 255.f + 0.5f), int(col.g() * 255.f + 0.5f), int(col.b() * 255.f + 0.5f));
+    // svg = (u - lo.x + 1, hi.y + 1 - v): y down for the icon. The masks read it with y negated
+    // (NSVGLineParams::is_y_negative), so in the decal's frame it is (u - lo.x + 1, v - hi.y - 1):
+    // lin is the identity; off is measured on the read masks below.
+    std::string d;
+    for (size_t i = 0; i < uv.size(); ++i) {
+        d += i ? " L " : "M ";
+        stroke::put_num(d, uv[i].x() - lo.x() + 1.);
+        d += ' ';
+        stroke::put_num(d, hi.y() + 1. - uv[i].y());
+    }
+    d += " Z";
+    const std::string svg = std::string("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1000mm\" height=\"1000mm\" viewBox=\"0 0 1000 1000\">") +
+                            "<path fill=\"" + hex + "\" d=\"" + d + "\"/></svg>";
+    const std::vector<SvgPaint::Zone> zones = SvgPaint::zones(svg);
+    if (zones.empty())
+        return false;
+    PaintDecal decal;
+    decal.name     = m_sf_path.wrap ? _u8L("Wrap") : m_sf_path.closed ? _u8L("Surface shape") : _u8L("Surface line");
+    decal.svg_data = svg;
+    decal.centre   = { c.x(), c.y(), c.z() };
+    decal.dir      = { nm.x(), nm.y(), nm.z() };
+    decal.up       = { up.x(), up.y(), up.z() };
+    decal.lin      = { 1., 0., 0., 1. };
+    decal.off      = { lo.x() - 1., hi.y() + 1. };
+    {   // the masks are also moved (centred) when read: put the read outline's middle on the line's
+        Vec2d mlo = Vec2d::Constant(1e30), mhi = Vec2d::Constant(-1e30);
+        for (const ExPolygons &exs : SvgPaint::zone_masks(svg, Transform3d::Identity(), std::vector<bool>(zones.size(), false)))
+            for (const ExPolygon &ex : exs)
+                for (const Point &pt : ex.contour.points) {
+                    const Vec2d q = pt.cast<double>() * SCALING_FACTOR;
+                    mlo = mlo.cwiseMin(q);
+                    mhi = mhi.cwiseMax(q);
+                }
+        if (mlo.x() <= mhi.x()) {
+            const Vec2d o = 0.5 * (lo + hi) - 0.5 * (mlo + mhi);
+            decal.off = { o.x(), o.y() };
+        }
+    }
+    for (size_t z = 0; z < zones.size(); ++z)
+        decal.zones.push_back({ int(z), zones[z].rgb, state, false });
+    decal.surface = m_sf_path;
+    const bool editing = m_sf_edit_decal >= 0 && size_t(m_sf_edit_decal) < mo->paint_decals.size();
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), editing ? _u8L("Update surface line") : _u8L("Add surface line"), UndoRedo::SnapshotType::GizmoAction);
+    if (editing) {   // same decal: name, filament, Clay settings, show / lock stay
+        PaintDecal &old = mo->paint_decals[size_t(m_sf_edit_decal)];
+        decal.name   = old.name;
+        decal.clay   = old.clay;
+        decal.hidden = old.hidden;
+        if (!old.zones.empty())
+            for (PaintDecalZone &z : decal.zones)
+                z.state = old.zones.front().state;
+        old = std::move(decal);
+    } else {
+        mo->paint_decals.push_back(std::move(decal));
+        paint_decal_unique_name(mo->paint_decals, mo->paint_decals.size() - 1);
+    }
+    sf_cancel();
+    if (editing)
+        m_sf_tool = 0;   // an edit ends with its Save: back to the decal list
+    return true;
+}
+
+// The line in 3D, 0.12 mm out along the normal and depth tested (without depth what lies behind
+// seems to float, Editor §3.3). An open line also shows its ribbon, see-through.
+void GLGizmoPainterBase::sf_render_line()
+{
+    if (m_sf_tool == 0 || m_sf_curve.size() < 2)
+        return;
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr)
+        return;
+    if (m_sf_dirty) {
+        auto strip = [&](GLModel &model, const std::vector<double> &half, double lift) {
+            GLModel::Geometry g;
+            g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+            const size_t n = m_sf_curve.size();
+            for (size_t i = 0; i < n; ++i) {
+                const PaintSurfaceSample &q = m_sf_curve[i];
+                const Vec3d t = m_sf_curve[std::min(i + 1, n - 1)].p - m_sf_curve[i > 0 ? i - 1 : 0].p;
+                Vec3d l = t.cross(q.n);
+                l = l.squaredNorm() > 1e-20 ? Vec3d(l.normalized() * half[std::min(i, half.size() - 1)]) : Vec3d::Zero();
+                const Vec3d o = q.p + q.n * lift;
+                g.add_vertex(Vec3f((o + l).cast<float>()));
+                g.add_vertex(Vec3f((o - l).cast<float>()));
+                if (i > 0) {
+                    const unsigned k = unsigned(2 * i);
+                    g.add_triangle(k - 2, k - 1, k);
+                    g.add_triangle(k - 1, k + 1, k);
+                }
+            }
+            model.reset();
+            model.init_from(std::move(g));
+        };
+        strip(m_sf_model, { 0.18 }, 0.12);
+        if (!m_sf_path.closed)
+            strip(m_sf_ribbon, paint_surface_half_widths(m_sf_curve, m_sf_path), 0.08);
+        else
+            m_sf_ribbon.reset();
+        m_sf_dirty = false;
+    }
+    GLShaderProgram *shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+    std::vector<Transform3d> trafos, trafos_no_translate;
+    const Transform3d inst   = model_part_trafos(trafos, trafos_no_translate);
+    const Camera     &camera = wxGetApp().plater()->get_camera();
+    const GLboolean was_cull = ::glIsEnabled(GL_CULL_FACE), was_depth = ::glIsEnabled(GL_DEPTH_TEST), was_blend = ::glIsEnabled(GL_BLEND);
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    shader->start_using();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix() * inst);
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    const ColorRGBA col = get_state_color(int(get_left_button_state_type()));
+    if (m_sf_ribbon.is_initialized()) {
+        glsafe(::glDepthMask(GL_FALSE));
+        m_sf_ribbon.set_color(ColorRGBA(col.r(), col.g(), col.b(), 0.45f));
+        m_sf_ribbon.render();
+        glsafe(::glDepthMask(GL_TRUE));
+    }
+    m_sf_model.set_color(m_sf_gaps > 0 ? ColorRGBA(1.f, 0.35f, 0.2f, 1.f) : ColorRGBA(1.f, 1.f, 1.f, 1.f));
+    m_sf_model.render();
+    shader->stop_using();
+    if (was_depth) glsafe(::glEnable(GL_DEPTH_TEST)); else glsafe(::glDisable(GL_DEPTH_TEST));
+    if (was_cull) glsafe(::glEnable(GL_CULL_FACE)); else glsafe(::glDisable(GL_CULL_FACE));
+    if (was_blend) glsafe(::glEnable(GL_BLEND)); else glsafe(::glDisable(GL_BLEND));
+}
+
+void GLGizmoPainterBase::sf_render_points(ImDrawList *dl)
+{
+    if (m_sf_tool == 0 || dl == nullptr)
+        return;
+    auto v3 = [](const std::array<double, 3> &a) { return Vec3d(a[0], a[1], a[2]); };
+    for (size_t i = 0; i < m_sf_path.clicks.size(); ++i) {
+        const PaintSurfaceClick &k = m_sf_path.clicks[i];
+        Vec2d px;
+        if (!sf_screen(v3(k.p), px) || !sf_visible(v3(k.p)))
+            continue;
+        for (const Vec3d &h : { v3(k.in), v3(k.out) }) {
+            Vec2d hp;
+            if (h.squaredNorm() > 1e-8 && sf_screen(v3(k.p) + h, hp)) {
+                dl->AddLine(ImVec2(float(px.x()), float(px.y())), ImVec2(float(hp.x()), float(hp.y())), IM_COL32(255, 255, 255, 200), 1.f);
+                dl->AddCircleFilled(ImVec2(float(hp.x()), float(hp.y())), 3.f, IM_COL32(255, 255, 255, 230));
+            }
+        }
+        const ImU32 fill = i == 0 ? IM_COL32(0, 190, 170, 255) : IM_COL32(255, 255, 255, 255);
+        dl->AddRectFilled(ImVec2(float(px.x()) - 4.f, float(px.y()) - 4.f), ImVec2(float(px.x()) + 4.f, float(px.y()) + 4.f), fill);
+        dl->AddRect(ImVec2(float(px.x()) - 4.f, float(px.y()) - 4.f), ImVec2(float(px.x()) + 4.f, float(px.y()) + 4.f), IM_COL32(0, 0, 0, 200));
+    }
+}
+
+void GLGizmoPainterBase::shape_undo_point()
+{
+    if (m_shape_closed)
+        m_shape_closed = false;
+    else if (!m_shape_nodes.empty())
+        m_shape_nodes.pop_back();
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoPainterBase::vb_undo()
+{
+    if (m_vb_history.empty())
+        return;
+    const int h = m_vb_history.back();
+    m_vb_history.pop_back();
+    if (h >= VB_ERASE_GROUP) {   // one eraser pass over several strokes
+        const size_t k = size_t(h - VB_ERASE_GROUP);
+        if (k < m_vb_erase_groups.size()) {
+            for (int i : m_vb_erase_groups[k])
+                if (i >= 0 && i < int(m_vb_strokes.size()) && !m_vb_strokes[size_t(i)].erase.empty()) {
+                    m_vb_strokes[size_t(i)].erase.pop_back();
+                    if (!m_vb_strokes[size_t(i)].ep.empty())
+                        m_vb_strokes[size_t(i)].ep.pop_back();
+                }
+            m_vb_erase_groups.resize(k);
+        }
+    } else if (h <= -2) {
+        const size_t k = size_t(-2 - h);
+        if (k < m_vb_knob_undo.size()) {
+            const auto &[i, before] = m_vb_knob_undo[k];
+            if (i >= 0 && i < int(m_vb_strokes.size()))
+                m_vb_strokes[i].p = before;
+            m_vb_knob_undo.resize(k);
+        }
+    } else if (h < 0) {
+        if (!m_vb_strokes.empty())
+            m_vb_strokes.pop_back();
+    } else if (h < int(m_vb_strokes.size()) && !m_vb_strokes[h].erase.empty()) {
+        m_vb_strokes[h].erase.pop_back();
+        if (!m_vb_strokes[h].ep.empty())
+            m_vb_strokes[h].ep.pop_back();
+    }
+    if (m_vb_sel >= int(m_vb_strokes.size()))
+        m_vb_sel = int(m_vb_strokes.size()) - 1;
+    m_parent.set_as_dirty();
+}
+
+bool GLGizmoPainterBase::vb_save()
+{
+    if (!m_vb_nodes.empty())
+        vb_line_finish();   // a line still being drawn goes in too
+    if (m_vb_strokes.empty())
+        return false;
+    const int cur_state = int(get_left_button_state_type());
+    // every stroke keeps its own filament. One colour per filament in the SVG (nudged when two
+    // filaments look the same, so their zones stay apart), and each zone paints with its filament.
+    std::vector<int> st_of(m_vb_strokes.size());
+    std::map<int, std::string> hex_of;
+    std::map<uint32_t, int>    state_of_rgb;
+    for (size_t i = 0; i < m_vb_strokes.size(); ++i) {
+        const int st = m_vb_strokes[i].state >= 0 ? m_vb_strokes[i].state : cur_state;
+        st_of[i] = st;
+        if (hex_of.count(st))
+            continue;
+        const ColorRGBA c = get_state_color(st);
+        int r = int(c.r() * 255.f + 0.5f), g = int(c.g() * 255.f + 0.5f), bl = int(c.b() * 255.f + 0.5f);
+        uint32_t rgb = (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(bl);
+        while (state_of_rgb.count(rgb)) {
+            bl = bl < 255 ? bl + 1 : 0;
+            rgb = (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(bl);
+        }
+        state_of_rgb[rgb] = st;
+        char h[8];
+        std::snprintf(h, sizeof(h), "#%02X%02X%02X", r, g, bl);
+        hex_of[st] = h;
+    }
+    auto ex_path = [](const ExPolygons &exs, std::vector<stroke::XY> &bound) {
+        std::string d;
+        for (const ExPolygon &ex : exs)
+            for (const Polygon *pg : [&ex] { std::vector<const Polygon *> v{ &ex.contour }; for (const Polygon &h : ex.holes) v.push_back(&h); return v; }()) {
+                for (size_t i = 0; i < pg->points.size(); ++i) {
+                    const stroke::XY q{ unscaled(pg->points[i].x()), unscaled(pg->points[i].y()) };
+                    d += i ? " L " : " M ";
+                    stroke::put_num(d, q.x);
+                    d += ' ';
+                    stroke::put_num(d, q.y);
+                    bound.push_back(q);
+                }
+                if (!pg->points.empty()) d += " Z";
+            }
+        return d;
+    };
+    std::string svg = "<svg xmlns=\"http://www.w3.org/2000/svg\">";
+    Vec2d lo = Vec2d::Constant(std::numeric_limits<double>::max()), hi = Vec2d::Constant(std::numeric_limits<double>::lowest());
+    // Flattened like layers: a stroke loses what newer strokes of another filament paint over it,
+    // so each zone keeps only what shows and the paint order holds whatever order Apply uses.
+    std::vector<Polygons> cover_of(m_vb_strokes.size());
+    {
+        std::map<int, Polygons> by_state;   // newer strokes, per filament
+        for (int i = int(m_vb_strokes.size()) - 1; i >= 0; --i) {
+            Polygons c;
+            for (const auto &[st, pg] : by_state)
+                if (st != st_of[i]) append(c, pg);
+            cover_of[i] = std::move(c);
+            append(by_state[st_of[i]], to_polygons(vb_shape(m_vb_strokes[i])));
+        }
+    }
+    for (size_t si = 0; si < m_vb_strokes.size(); ++si) {
+        const VbStroke &vs = m_vb_strokes[si];
+        std::vector<stroke::XY> bound;
+        std::string d;
+        if (vs.erase.empty() && vs.p.fx == stroke::Effect::None && cover_of[si].empty())
+            d = stroke::stroke_path(vs.p, vs.raw, false, bound);   // nothing over it: the smooth outline
+        else {
+            // erased, an effect or covered: the flattened outline (minus erasers and what is over it),
+            // as straight segments (contours CCW, holes CW, so nonzero fill keeps the holes)
+            ExPolygons sh = vb_shape(vs);
+            if (!cover_of[si].empty())
+                sh = diff_ex(sh, union_(cover_of[si]));
+            d = ex_path(sh, bound);
+        }
+        if (d.empty())
+            continue;
+        for (const stroke::XY &q : bound) {
+            lo = lo.cwiseMin(Vec2d(q.x, q.y));
+            hi = hi.cwiseMax(Vec2d(q.x, q.y));
+        }
+        svg += std::string("<path fill=\"") + hex_of[st_of[si]] + "\" d=\"" + d + "\"/>";
+    }
+    svg += "</svg>";
+    if (lo.x() > hi.x())
+        return false;
+    const std::vector<SvgPaint::Zone> zones = SvgPaint::zones(svg);
+    if (zones.empty())
+        return false;
+    shape_clear();
+    m_svg_data = svg;
+    m_svg_name = _u8L("Brush");
+    for (const SvgPaint::Zone &zone : zones) {
+        const auto it = state_of_rgb.find(zone.rgb);
+        m_svg_zones.push_back({ zone.rgb, zone.grad, it != state_of_rgb.end() ? it->second : cur_state, false });
+    }
+    svg_rebuild_masks();
+    if (m_svg_local_rings.empty()) {
+        shape_clear();
+        return false;
+    }
+    const double k = 25.4 / 96.0;
+    m_svg_lin << 1. / k, 0., 0., -1. / k;
+    m_svg_off = 0.5 * (lo + hi) - Vec2d(m_svg_lin * (0.5 * (m_svg_local_lo + m_svg_local_hi)));
+    svg_update_screen_rings();
+    m_shape_closed     = true;
+    m_shape_scale_pct  = 100.f;
+    m_svg_width_pct    = 100.f;
+    m_svg_height_pct   = 100.f;
+    m_shape_rotate_deg = 0.f;
+    const bool ok = svg_pin_to_view();
+    if (ok) {
+        m_vb_nodes.clear();
+        m_vb_strokes.clear();
+        m_vb_history.clear(); m_vb_erase_groups.clear();
+        m_vb_knob_undo.clear();
+        m_vb_sel = -1;
+    }
+    m_parent.set_as_dirty();
+    return ok;
+}
+
 bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down)
 {
-    // With "Move on object" on, the wheel turns the selected decal and
-    // Shift + wheel scales it (5 degrees / 5 % a notch), around the centre of its SVG.
-    if (m_decal_move_armed && (action == SLAGizmoEventType::MouseWheelUp || action == SLAGizmoEventType::MouseWheelDown)) {
-        ModelObject *mo  = m_c->selection_info()->model_object();
-        const int    idx = selected_decal_index();
-        if (mo != nullptr && idx >= 0 && size_t(idx) < mo->paint_decals.size() && !mo->paint_decals[size_t(idx)].locked) {
-            const double sign = action == SLAGizmoEventType::MouseWheelUp ? 1. : -1.;
-            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Turn or scale SVG decal"), UndoRedo::SnapshotType::GizmoAction);
-            const PaintDecal start = mo->paint_decals[size_t(idx)];
-            if (shift_down)
-                decal_turn_scale(size_t(idx), start, 0., sign > 0. ? 1.05 : 1. / 1.05);
-            else
-                decal_turn_scale(size_t(idx), start, 5. * sign, 1.);
+    if (sf_on()) {   // Line On surface: off the object the camera stays free
+        auto v3 = [](const std::array<double, 3> &a) { return Vec3d(a[0], a[1], a[2]); };
+        auto put = [](std::array<double, 3> &a, const Vec3d &v) { a = { v.x(), v.y(), v.z() }; };
+        if (action == SLAGizmoEventType::LeftDown) {
+            m_sf_move = m_sf_pull = -1;   // a LeftUp lost outside the window must not leave an old drag armed (Editor audit, 4-nov)
+            std::vector<PaintSurfaceClick> &ks = m_sf_path.clicks;
+            int    hit_i = -1;   // the nearest point placed within 8 px
+            double hit_d = 8.;
+            for (size_t i = 0; i < ks.size(); ++i) {
+                Vec2d px;
+                if (!sf_screen(v3(ks[i].p), px) || (px - mouse_position).norm() >= hit_d || !sf_visible(v3(ks[i].p)))
+                    continue;
+                hit_d = (px - mouse_position).norm();
+                hit_i = int(i);
+            }
+            if (hit_i == 0 && ks.size() >= 3 && m_sf_tool == 1 && !m_sf_path.closed) {   // the first one: close and finish (not Wrap; closed already = slide it)
+                m_sf_path.closed = true;
+                sf_finish();
+                return true;
+            }
+            if (hit_i >= 0) {
+                m_sf_undo.push_back(m_sf_path);
+                m_sf_move     = hit_i;
+                m_button_down = Button::Left;
+                return true;
+            }
+            Vec3d p, n;
+            if (!sf_pick(mouse_position, p, n))
+                return false;
+            // on the line (6 px): a new point in that segment, like Draw shape
+            {
+                const size_t nc = ks.size(), segs = m_sf_path.closed && nc > 2 ? nc : (nc > 0 ? nc - 1 : 0);
+                int    seg  = -1;
+                double best = 6.;
+                for (size_t si = 0; si < segs; ++si) {
+                    const PaintSurfaceClick &A = ks[si], &B = ks[(si + 1) % nc];
+                    const Vec3d P0 = v3(A.p), P1 = v3(A.p) + v3(A.out), P2 = v3(B.p) + v3(B.in), P3 = v3(B.p);
+                    Vec2d prev;
+                    bool  has = false;
+                    for (int j = 0; j <= 16; ++j) {
+                        const double t = j / 16.0, u = 1. - t;
+                        Vec2d q;
+                        if (!sf_screen(u * u * u * P0 + 3. * u * u * t * P1 + 3. * u * t * t * P2 + t * t * t * P3, q))
+                            continue;
+                        if (has) {   // distance to the screen segment prev-q
+                            const Vec2d  d  = q - prev;
+                            const double l2 = d.squaredNorm();
+                            const double tt = l2 > 1e-12 ? std::clamp((mouse_position - prev).dot(d) / l2, 0., 1.) : 0.;
+                            const double dd = (prev + d * tt - mouse_position).norm();
+                            if (dd < best) { best = dd; seg = int(si); }
+                        }
+                        prev = q;
+                        has  = true;
+                    }
+                }
+                if (seg >= 0) {
+                    PaintSurfaceClick k;
+                    put(k.p, p);
+                    put(k.n, n);
+                    m_sf_undo.push_back(m_sf_path);
+                    ks.insert(ks.begin() + seg + 1, k);
+                    m_sf_move     = seg + 1;   // and it can be slid right away
+                    m_button_down = Button::Left;
+                    sf_update();
+                    return true;
+                }
+            }
+            if (m_sf_path.closed || m_sf_edit_decal >= 0)
+                return false;   // a closed shape or a saved line only grows on its outline; elsewhere the view turns
+            PaintSurfaceClick k;
+            put(k.p, p);
+            put(k.n, n);
+            m_sf_warn.clear();
+            if (!ks.empty() && n.dot(v3(ks.back().n)) < -0.35)
+                m_sf_warn = _u8L("This point faces away from the last one: the line may go round the wrong side.\nPut a point in between.");
+            m_sf_undo.push_back(m_sf_path);
+            ks.push_back(k);
+            m_sf_pull     = int(ks.size()) - 1;
+            m_button_down = Button::Left;
+            sf_update();
+            return true;
+        }
+        if (action == SLAGizmoEventType::Dragging && m_sf_move >= 0 && m_sf_move < int(m_sf_path.clicks.size())) {
+            Vec3d p, n;
+            if (sf_pick(mouse_position, p, n)) {   // slides on the surface; its handles turn with it
+                PaintSurfaceClick &k = m_sf_path.clicks[size_t(m_sf_move)];
+                put(k.p, p);
+                put(k.n, n);
+                for (std::array<double, 3> *h : { &k.in, &k.out }) {
+                    const Vec3d v = v3(*h);
+                    put(*h, Vec3d(v - n * v.dot(n)));
+                }
+                sf_update();
+            }
+            return true;
+        }
+        if (action == SLAGizmoEventType::Dragging && m_sf_pull >= 0 && m_sf_pull < int(m_sf_path.clicks.size())) {
+            PaintSurfaceClick &k = m_sf_path.clicks[size_t(m_sf_pull)];
+            const Vec3d p = v3(k.p), n = v3(k.n);
+            Vec3d a, dir;
+            if (sf_ray(mouse_position, a, dir) && std::abs(dir.dot(n)) > 1e-6) {
+                // the handle on the tangent plane: where the mouse ray crosses it
+                const Vec3d q = a + dir * ((p - a).dot(n) / dir.dot(n));
+                Vec3d       out = q - p;
+                // edge-on the plane runs far away: at most half the way to the nearest neighbour
+                double cap = 1e30;
+                for (int j : { m_sf_pull - 1, m_sf_pull + 1 })
+                    if (j >= 0 && j < int(m_sf_path.clicks.size()))
+                        cap = std::min(cap, 0.5 * (v3(m_sf_path.clicks[size_t(j)].p) - p).norm());
+                if (cap < 1e29 && out.norm() > cap)
+                    out *= cap / out.norm();
+                Vec2d px, pq;
+                if (sf_screen(p, px) && sf_screen(p + out, pq) && (pq - px).norm() >= 4.) {   // < 4 px stays a corner
+                    put(k.out, out);
+                    put(k.in, alt_down ? Vec3d::Zero() : Vec3d(-out));
+                } else {
+                    put(k.out, Vec3d::Zero());
+                    put(k.in, Vec3d::Zero());
+                }
+                sf_update();
+            }
+            return true;
+        }
+        if (action == SLAGizmoEventType::LeftUp && (m_sf_move >= 0 || m_sf_pull >= 0)) {
+            if (!m_sf_undo.empty() && m_sf_undo.back() == m_sf_path)
+                m_sf_undo.pop_back();   // a click on a point that did not move it: no undo step
+            m_sf_move = m_sf_pull = -1;
+            m_button_down = Button::None;
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::Dragging || action == SLAGizmoEventType::LeftUp)
+            return false;
+    }
+    // Vector Brush: the left button draws (on or off the object); the rest
+    // (right drag, wheel) stays the camera's.
+    if (vector_brush_on()) {
+        Vec3d vb_on;
+        if (action == SLAGizmoEventType::LeftDown && !mouse_on_object(mouse_position, vb_on))
+            return false;   // a stroke starts on the object; off it the drag orbits the camera
+        if (m_vb_line && !m_vb_eraser) {   // Line tool
+            if (action == SLAGizmoEventType::LeftDown) {
+                if (m_vb_nodes.size() >= 2 && (m_vb_nodes.front().p - mouse_position).norm() < 8.) {
+                    m_vb_line_closed = true;   // back on the first point: close it and finish
+                    vb_line_finish();
+                    return true;
+                }
+                ShapeNode nd;
+                nd.p = mouse_position;
+                m_vb_nodes.push_back(nd);
+                m_vb_node_drag = true;
+                m_button_down  = Button::Left;
+                m_parent.set_as_dirty();
+                return true;
+            }
+            if (action == SLAGizmoEventType::Dragging && m_vb_node_drag && !m_vb_nodes.empty()) {
+                ShapeNode &nd = m_vb_nodes.back();
+                nd.out    = mouse_position - nd.p;
+                nd.in     = alt_down ? Vec2d::Zero() : Vec2d(-nd.out);
+                nd.smooth = !alt_down;
+                m_parent.set_as_dirty();
+                return true;
+            }
+            if (action == SLAGizmoEventType::LeftUp && m_vb_node_drag) {
+                m_vb_node_drag = false;
+                m_button_down  = Button::None;
+                m_parent.set_as_dirty();
+                return true;
+            }
+        }
+        if (action == SLAGizmoEventType::LeftDown && m_vb_eraser) {
+            if (m_vb_strokes.empty())
+                return true;
+            // the eraser erases every stroke it goes over (Neotko: "natural"). Alt + click picks a
+            // stroke for the knobs to edit, without erasing.
+            const int hit = alt_down ? vb_hit(mouse_position) : -1;
+            if (hit >= 0) {
+                m_vb_sel = hit;
+                m_vb_params = m_vb_strokes[size_t(hit)].p;   // the knobs show the selected stroke
+                m_parent.set_as_dirty();
+                return true;
+            }
+        }
+        if (action == SLAGizmoEventType::LeftDown) {
+            m_vb_cur      = { { mouse_position.x(), mouse_position.y(), 1., vb_now_ms() } };
+            m_vb_drawing  = true;
+            m_button_down = Button::Left;
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (action == SLAGizmoEventType::Dragging && m_vb_drawing) {
+            m_vb_cur.push_back({ mouse_position.x(), mouse_position.y(), 1., vb_now_ms() });
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (action == SLAGizmoEventType::LeftUp && m_vb_drawing) {
+            if (!m_vb_cur.empty()) {
+                if (m_vb_eraser) {
+                    // every stroke the pass overlaps (box test, then the real shapes) gets it; one Undo step
+                    BoundingBox eb;
+                    for (const stroke::Pt &q : m_vb_cur)
+                        eb.merge(Point(scaled(q.x), scaled(q.y)));
+                    eb.offset(scaled(std::max(1.0, m_vb_params.size)));
+                    Polygons pass(1);
+                    for (const stroke::XY &q : stroke::stroke_ring(m_vb_params, m_vb_cur, false))
+                        pass[0].points.emplace_back(scaled(q.x), scaled(q.y));
+                    std::vector<int> hit;
+                    for (int i = 0; i < int(m_vb_strokes.size()); ++i) {
+                        const ExPolygons sh = vb_shape(m_vb_strokes[size_t(i)]);
+                        if (sh.empty() || !get_extents(sh).overlap(eb))
+                            continue;
+                        if (!intersection_ex(sh, pass).empty())
+                            hit.push_back(i);
+                    }
+                    for (int i : hit) {
+                        m_vb_strokes[size_t(i)].erase.push_back(m_vb_cur);
+                        m_vb_strokes[size_t(i)].ep.push_back(m_vb_params);
+                    }
+                    if (!hit.empty()) {
+                        m_vb_erase_groups.push_back(std::move(hit));
+                        m_vb_history.push_back(VB_ERASE_GROUP + int(m_vb_erase_groups.size()) - 1);
+                    }
+                } else {
+                    m_vb_strokes.push_back({ std::move(m_vb_cur), {}, m_vb_params, {}, int(get_left_button_state_type()) });
+                    m_vb_history.push_back(-1);
+                    m_vb_sel = -1;   // the knobs go back to the next stroke (Alt + click with the eraser picks one)
+                }
+            }
+            m_vb_cur.clear();
+            m_vb_drawing  = false;
+            m_button_down = Button::None;
             m_parent.set_as_dirty();
             return true;
         }
     }
+    // F4b: with "Move on object" on, the wheel stays the camera's (zoom while
+    // sliding); turning and scaling live in the panel.
 
-    // Painter Pro Mode Lock view swallows wheel zoom while shaping.
-    if (shape_view_locked()
+    // Painter Pro Mode F5: Lock view swallows wheel zoom while shaping.
+    if (camera_frozen()
      && (action == SLAGizmoEventType::MouseWheelUp || action == SLAGizmoEventType::MouseWheelDown))
         return true;
 
@@ -2697,33 +3572,29 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         return true;
     }
 
-    if (m_tool_type == ToolType::RECTANGLE) {
-        if (action == SLAGizmoEventType::RightDown) {
-            m_rect_dragging = false;
-            m_button_down = Button::None;
-            m_parent.set_as_dirty();
-            return true;
-        }
-        if (action == SLAGizmoEventType::LeftDown) {
-            if (m_triangle_selectors.empty())
-                return false;
-            m_button_down = Button::Left;
+    // Painter Pro Mode F4, Sesion A: RECTANGLE doesn't paint on every
+    // Dragging event like BRUSH/BUCKET_FILL/SMART_FILL do below — it only tracks the
+    // screen-space rectangle corners while the button is held. The mask is applied once, on
+    // release, in the LeftUp/RightUp handling further down (apply_rectangle_mask()).
+    if (m_tool_type == ToolType::RECTANGLE
+     && (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown
+      || (action == SLAGizmoEventType::Dragging && m_button_down != Button::None))) {
+        if (m_triangle_selectors.empty())
+            return false;
+
+        if (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown) {
+            m_button_down       = (action == SLAGizmoEventType::LeftDown) ? Button::Left : Button::Right;
             m_rect_start_corner = mouse_position;
-            m_rect_end_corner = mouse_position;
-            m_rect_dragging = true;
-            m_parent.set_as_dirty();
-            return true;
+            m_rect_dragging     = true;
         }
-        if (action == SLAGizmoEventType::Dragging && m_button_down == Button::Left) {
-            m_rect_end_corner = mouse_position;
-            m_parent.set_as_dirty();
-            return true;
-        }
+        m_rect_end_corner = mouse_position;
+        m_parent.set_as_dirty();
+        return true;
     }
 
-    // POLYGON is now a shape of nodes
+    // Painter Pro Mode F5 (commit 4): POLYGON is now a shape of nodes
     // with optional Bezier handles. Like before it claims every Dragging event between a LeftDown
-    // and its LeftUp, so incidental mouse movement while clicking can't orbit the camera (s201).
+    // and its LeftUp, so incidental mouse movement while clicking can't orbit the camera.
     // LeftDown hit-tests, in priority order: a handle (drag it, Alt breaks the mirror), a node
     // (first node with 3+ placed closes the shape, Alt toggles corner/curve, otherwise drag it),
     // a segment of a closed shape (insert a node there without changing the curve), and finally
@@ -2737,7 +3608,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         if (m_triangle_selectors.empty())
             return false;
 
-        // Right button: it used to cancel the shape on press, so starting a
+        // right button: it used to cancel the shape on press, so starting a
         // pan with it wiped the shape (and the SVG). Now the press is left to the camera, and only
         // a click (released where it was pressed) cancels a drawn shape; an SVG goes with Cancel.
         if (action == SLAGizmoEventType::RightDown) {
@@ -2756,10 +3627,11 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
             m_decal_drag  = -1;
             m_button_down = Button::None;
             m_parent.set_as_dirty();
+            m_parent.request_extra_frame();   // the full card (colours) replaces the outline at once
             return true;
         }
         if (action == SLAGizmoEventType::Dragging && m_decal_drag >= 0) {
-            // Turn the decal around the object's centre so the grabbed point goes under the mouse.
+            // F4b: turn the decal around the object's centre so the grabbed point goes under the mouse.
             ModelObject *mo = m_c->selection_info()->model_object();
             Vec3d hit;
             if (mo != nullptr && size_t(m_decal_drag) < mo->paint_decals.size() && mouse_on_object(mouse_position, hit)) {
@@ -2778,6 +3650,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                 }
             }
             m_parent.set_as_dirty();
+            m_parent.request_extra_frame();
             return true;
         }
         if (action == SLAGizmoEventType::LeftUp) {
@@ -2838,7 +3711,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
             return true;
         }
 
-        // "Move on object": a press on the object grabs the selected decal there.
+        // F4b: "Move on object": a press on the object grabs the selected decal there.
         if (m_decal_move_armed) {
             ModelObject *mo  = m_c->selection_info()->model_object();
             const int    idx = selected_decal_index();
@@ -2857,7 +3730,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
             return false;   // off the object: the camera's
         }
 
-        // "Pick centre" takes this click: the mirror centre goes where it hits the object.
+        // F5: "Pick centre" takes this click: the mirror centre goes where it hits the object.
         if (m_mirror_pick_armed) {
             m_mirror_pick_armed = false;
             ModelObject *mo = m_c->selection_info()->model_object();
@@ -2901,7 +3774,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                 m_parent.set_as_dirty();
                 return true;
             }
-            // A corner handle first, then the box.
+            // F4: a corner handle first, then the box.
             if (m_svg_deform) {
                 const std::array<Vec2d, 4> box = svg_screen_box();
                 for (int k = 0; k < 4 && m_shape_drag == ShapeDrag::None; ++k)
@@ -3054,7 +3927,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         if (m_triangle_selectors.empty())
             return false;
 
-        // "Pick on object" in Brush mode takes this click.
+        // F5b: "Pick on object" in Brush mode takes this click.
         if (action == SLAGizmoEventType::LeftDown && m_mirror_pick_armed) {
             m_mirror_pick_armed = false;
             ModelObject *pick_mo = m_c->selection_info()->model_object();
@@ -3224,7 +4097,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                         m_triangle_selectors[mesh_idx]->select_patch(int(first_position_it->facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate, m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
                     }
                 }
-                // The same stroke on the mirrored side(s).
+                // F5b: the same stroke on the mirrored side(s).
                 brush_paint_mirrored(projected_mouse_positions, trafo_matrix, new_state, trafo_matrices, trafo_matrices_not_translate);
             }
 
@@ -3311,8 +4184,14 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
     if ((action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
       && m_button_down != Button::None) {
+
+        // Painter Pro Mode F4, Sesion A: this is where RECTANGLE
+        // actually applies its mask (BRUSH/BUCKET_FILL/SMART_FILL already mutated
+        // m_triangle_selectors during the preceding Dragging events; this just brings
+        // RECTANGLE up to the same point before the shared snapshot/update_model_object below).
         if (m_tool_type == ToolType::RECTANGLE && m_rect_dragging) {
-            const EnforcerBlockerType new_state = shift_down ? EnforcerBlockerType::NONE : get_left_button_state_type();
+            EnforcerBlockerType new_state = shift_down ? EnforcerBlockerType::NONE
+                : (m_button_down == Button::Left ? this->get_left_button_state_type() : this->get_right_button_state_type());
             apply_rectangle_mask(new_state);
             m_rect_dragging = false;
         }
@@ -3330,7 +4209,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
     return false;
 }
 
-// Fix: the masks painted "through" the
+// Painter Pro Mode F5 (commit 4). Fix: the masks painted "through" the
 // object. is_facet_visible() only rejects back faces, so front faces hidden behind another part
 // of the object (the inside of a ring, a wall behind a handle) were painted too. Now each sampled
 // point casts a ray towards the camera (to its position in perspective, along -forward in ortho)
@@ -3344,10 +4223,10 @@ TriangleSelector::Cursor::VisibilityTest GLGizmoPainterBase::make_visibility_tes
                                        camera.get_position(), -camera.get_dir_forward());
 }
 
-// Body of make_visibility_test(), with the viewer as parameters so a
+// F3: body of make_visibility_test(), with the viewer as parameters so a
 // decal can test visibility from its own card instead of from the camera.
 TriangleSelector::Cursor::VisibilityTest GLGizmoPainterBase::make_visibility_test_toward(size_t mesh_idx, const std::vector<Transform3d> &trafo_matrices,
-    bool perspective, const Vec3d &eye_world, const Vec3d &to_eye_world) const
+    bool perspective, const Vec3d &eye_world, const Vec3d &to_eye_world, double through_depth) const
 {
     const Vec3d camera_pos = eye_world;
     const Vec3d to_camera  = to_eye_world.normalized();
@@ -3364,6 +4243,35 @@ TriangleSelector::Cursor::VisibilityTest GLGizmoPainterBase::make_visibility_tes
         }
     };
     auto cache = std::make_shared<std::unordered_map<std::array<float, 3>, bool, KeyHash>>();
+
+    // Through depth (>= 0): a point counts as seen when the first surface towards the eye, on its own mesh,
+    // is at most through_depth mm in front of it (an eye socket's floor yes, the back of the head no).
+    if (through_depth >= 0.)
+        return [this, mesh_idx, perspective, camera_pos, to_camera, raycasters, trafo_matrices, inverses, cache, through_depth](const Vec3f &point) -> bool {
+            const std::array<float, 3> key = { point.x(), point.y(), point.z() };
+            if (auto it = cache->find(key); it != cache->end())
+                return it->second;
+            const Vec3d world    = trafo_matrices[mesh_idx] * point.cast<double>();
+            Vec3d       dir      = perspective ? Vec3d(camera_pos - world) : to_camera;
+            const double max_dist = perspective ? dir.norm() : std::numeric_limits<double>::max();
+            dir.normalize();
+            const Vec3d origin = world + dir * 0.01;
+            double      front  = 0.;   // farthest hit towards the eye = the first surface the ray meets
+            if (mesh_idx < raycasters.size() && raycasters[mesh_idx] != nullptr) {
+                const Vec3d origin_m = inverses[mesh_idx] * origin;
+                const Vec3d dir_m    = (inverses[mesh_idx].linear() * dir).normalized();
+                for (const AABBMesh::hit_result &hit : raycasters[mesh_idx]->get_aabb_mesh().query_ray_hits(origin_m, dir_m)) {
+                    if (!hit.is_hit())
+                        continue;
+                    const double dist = (trafo_matrices[mesh_idx] * hit.position() - origin).norm();
+                    if (dist < max_dist)
+                        front = std::max(front, dist);
+                }
+            }
+            const bool seen = front <= through_depth;
+            cache->emplace(key, seen);
+            return seen;
+        };
 
     return [this, mesh_idx, perspective, camera_pos, to_camera, raycasters, trafo_matrices, inverses, cache](const Vec3f &point) -> bool {
         const std::array<float, 3> key = { point.x(), point.y(), point.z() };
@@ -3401,6 +4309,7 @@ TriangleSelector::Cursor::VisibilityTest GLGizmoPainterBase::make_visibility_tes
     };
 }
 
+// Painter Pro Mode.
 // Applies the screen-space rectangle (m_rect_start_corner..m_rect_end_corner) as a paint mask on
 // every model-part mesh. Mirrors the trafo/camera precompute the BRUSH/BUCKET_FILL path does in
 // gizmo_event() above, but projects via the real camera view*projection matrix (TriangleSelector::
@@ -3412,62 +4321,62 @@ void GLGizmoPainterBase::apply_rectangle_mask(EnforcerBlockerType new_state)
         return;
 
     const Vec2f rect_min(float(std::min(m_rect_start_corner.x(), m_rect_end_corner.x())),
-                         float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y())));
+                          float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y())));
     const Vec2f rect_max(float(std::max(m_rect_start_corner.x(), m_rect_end_corner.x())),
-                         float(std::max(m_rect_start_corner.y(), m_rect_end_corner.y())));
+                          float(std::max(m_rect_start_corner.y(), m_rect_end_corner.y())));
+    // Ignore a plain click (no real drag) - nothing to mask.
     if (rect_max.x() - rect_min.x() < 2.f || rect_max.y() - rect_min.y() < 2.f)
         return;
 
-    const Camera &camera = wxGetApp().plater()->get_camera();
-    const Selection &selection = m_parent.get_selection();
-    const ModelObject *model_object = m_c->selection_info()->model_object();
-    const ModelInstance *model_instance = model_object->instances[selection.get_instance_idx()];
-    const Transform3d instance_trafo = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView
-        ? model_instance->get_assemble_transformation().get_matrix()
-        : model_instance->get_transformation().get_matrix();
-    const Transform3d instance_trafo_no_offset = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView
-        ? model_instance->get_assemble_transformation().get_matrix_no_offset()
-        : model_instance->get_transformation().get_matrix_no_offset();
+    const Camera        &camera    = wxGetApp().plater()->get_camera();
+    const Selection      &selection = m_parent.get_selection();
+    const ModelObject    *mo        = m_c->selection_info()->model_object();
+    const ModelInstance  *mi        = mo->instances[selection.get_instance_idx()];
+    const Transform3d     instance_trafo = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView ?
+        mi->get_assemble_transformation().get_matrix() :
+        mi->get_transformation().get_matrix();
 
-    std::vector<Transform3d> transformations;
-    std::vector<Transform3d> transformations_no_offset;
-    for (const ModelVolume *volume : model_object->volumes) {
-        if (!volume->is_model_part())
-            continue;
-        if (m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView) {
-            Transform3d transformation = instance_trafo * volume->get_matrix();
-            transformation.translate(volume->get_transformation().get_offset() * (GLVolume::explosion_ratio - 1.0)
-                                     + model_instance->get_offset_to_assembly() * (GLVolume::explosion_ratio - 1.0));
-            transformations.emplace_back(std::move(transformation));
-        } else {
-            transformations.emplace_back(instance_trafo * volume->get_matrix());
+    std::vector<Transform3d> trafo_matrices;
+    std::vector<Transform3d> trafo_matrices_not_translate;
+    for (const ModelVolume *mv : mo->volumes)
+        if (mv->is_model_part()) {
+            trafo_matrices.emplace_back(instance_trafo * mv->get_matrix());
+            trafo_matrices_not_translate.emplace_back(
+                (m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView ?
+                    mi->get_assemble_transformation().get_matrix_no_offset() :
+                    mi->get_transformation().get_matrix_no_offset())
+                * mv->get_matrix_no_offset());
         }
-        transformations_no_offset.emplace_back(instance_trafo_no_offset * volume->get_matrix_no_offset());
-    }
 
-    const Matrix4d view_projection = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
+    const Matrix4d view_projection_matrix = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
     const std::array<int, 4> viewport = camera.get_viewport();
-    const Vec3d camera_position = camera.get_position();
-    const Vec3d camera_target = camera_position + camera.get_dir_forward();
+    const Vec3d camera_pos_world    = camera.get_position();
+    const Vec3d camera_target_world = camera_pos_world + camera.get_dir_forward();
 
-    for (size_t mesh_idx = 0; mesh_idx < transformations.size(); ++mesh_idx) {
-        const Transform3d &transformation = transformations[mesh_idx];
-        const Transform3d inverse = transformation.inverse();
-        const Vec3f camera_position_mesh = (inverse * camera_position).cast<float>();
-        const Vec3f camera_target_mesh = (inverse * camera_target).cast<float>();
-        const TriangleSelector::ClippingPlane &clipping_plane = get_clipping_plane_in_volume_coordinates(transformation);
+    for (size_t mesh_idx = 0; mesh_idx < trafo_matrices.size(); ++mesh_idx) {
+        const Transform3d &trafo_matrix               = trafo_matrices[mesh_idx];
+        const Transform3d &trafo_matrix_not_translate  = trafo_matrices_not_translate[mesh_idx];
+        const Transform3d  trafo_matrix_inv            = trafo_matrix.inverse();
+
+        const Vec3f camera_pos_mesh    = (trafo_matrix_inv * camera_pos_world).cast<float>();
+        const Vec3f camera_target_mesh = (trafo_matrix_inv * camera_target_world).cast<float>();
+        const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
+
         std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::RectangleProjectionCursor::cursor_factory(
-            camera_position_mesh, camera_target_mesh, view_projection, viewport, rect_min, rect_max, transformation, clipping_plane);
-        cursor->set_visibility_test(make_visibility_test(mesh_idx, transformations));
+            camera_pos_mesh, camera_target_mesh, view_projection_matrix, viewport, rect_min, rect_max, trafo_matrix, clp);
+        cursor->set_visibility_test(make_visibility_test(mesh_idx, trafo_matrices));
 
         m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
-        m_triangle_selectors[mesh_idx]->select_patch(0, std::move(cursor), new_state, transformations_no_offset[mesh_idx],
-                                                     m_triangle_splitting_enabled,
-                                                     m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+        m_triangle_selectors[mesh_idx]->select_patch(0, std::move(cursor), new_state, trafo_matrix_not_translate,
+            m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
         m_triangle_selectors[mesh_idx]->request_update_render_data(true);
     }
 }
 
+// Painter Pro Mode F4, Sesion B. Same idea as apply_rectangle_mask()
+// above (see its comment for the camera/trafo precompute), but with an arbitrary closed polygon
+// (TriangleSelector::PolygonProjectionCursor) instead of a 4-corner box. Called once the polygon
+// is closed (see gizmo_event()'s POLYGON handling).
 void GLGizmoPainterBase::apply_polygon_mask(EnforcerBlockerType new_state, const std::vector<Vec2d> &flat)
 {
     if (m_triangle_selectors.empty() || flat.size() < 3)
@@ -3484,7 +4393,7 @@ void GLGizmoPainterBase::apply_polygon_mask(EnforcerBlockerType new_state, const
     });
 }
 
-// Every ring of the SVG (outer contours and holes) in one pass per mesh,
+// F1: every ring of the SVG (outer contours and holes) in one pass per mesh,
 // through one PolygonMask2D shared by all meshes.
 void GLGizmoPainterBase::apply_polygon_set_mask(EnforcerBlockerType new_state, const std::vector<std::vector<Vec2d>> &rings, const std::vector<bool> &is_hole)
 {
@@ -3603,7 +4512,7 @@ bool GLGizmoPainterBase::on_mouse(const wxMouseEvent &mouse_event)
                 gizmo_event(SLAGizmoEventType::LeftUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), true);
             else if (mouse_event.RightIsDown())
                 gizmo_event(SLAGizmoEventType::RightUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), true);
-            return shape_view_locked();
+            return camera_frozen();
         }
     } else if (mouse_event.LeftUp()) {
         if (!m_parent.is_mouse_dragging()) {
@@ -3619,9 +4528,10 @@ bool GLGizmoPainterBase::on_mouse(const wxMouseEvent &mouse_event)
             return true;
         }
     }
-    // With Lock view on, nothing the shape tool didn't use (middle/right/Ctrl drags...) may
-    // reach the camera. ImGui gets its events before the gizmo, so the panel keeps working.
-    return shape_view_locked();
+    // Painter Pro Mode F5: with Lock view on, nothing the shape tool
+    // didn't use (middle/right/Ctrl drags...) may reach the camera. ImGui gets its events before
+    // the gizmo, so the panel keeps working.
+    return camera_frozen();
 }
 
 void GLGizmoPainterBase::update_raycast_cache(const Vec2d& mouse_position,
@@ -3929,15 +4839,16 @@ void TriangleSelectorPatch::render(ImGuiWrapper* imgui, const Transform3d& matri
         if (this->has_VBOs(buffer_idx)) {
             const TrianglePatch& patch = m_triangle_patches[buffer_idx];
             ColorRGBA color;
+            size_t color_idx;
             if (patch.is_fragment() && !patch.neighbor_types.empty()) {
-                size_t color_idx = (size_t)*patch.neighbor_types.begin();
+                color_idx = (size_t)*patch.neighbor_types.begin();
                 if (color_idx >= m_ebt_colors.size())
                     continue;
                 color = m_ebt_colors[color_idx];
                 color.a(0.85);
             }
             else {
-                size_t color_idx = (size_t)patch.type;
+                color_idx = (size_t)patch.type;
                 if (color_idx >= m_ebt_colors.size())
                     continue;
                 color = m_ebt_colors[color_idx];
@@ -3964,12 +4875,14 @@ void TriangleSelectorPatch::update_triangles_per_type()
 
     bool using_wireframe = (m_need_wireframe && wxGetApp().plater()->is_wireframe_enabled() && wxGetApp().plater()->is_show_wireframe()) ? true : false;
 
+    int facet_idx = -1;
     for (auto& triangle : m_triangles) {
+        ++facet_idx;
         if (!triangle.valid() || triangle.is_split())
             continue;
 
         int state = (int)triangle.get_state();
-        if (state < 0 || state >= int(m_triangle_patches.size()))
+        if (state < 0 || state >= int(m_ebt_colors.size()))
             continue;
         auto& patch = m_triangle_patches[state];
         //patch.triangle_indices.insert(patch.triangle_indices.end(), triangle.verts_idxs.begin(), triangle.verts_idxs.end());
