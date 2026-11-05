@@ -360,6 +360,8 @@ set(lisbslic3r_sources
     ModelArrange.cpp
     ModelArrange.hpp
     Model.cpp
+    NeotkoPrimitives.cpp
+    NeotkoPrimitives.hpp
     Model.hpp
     MTUtils.hpp
     MultiMaterialSegmentation.cpp

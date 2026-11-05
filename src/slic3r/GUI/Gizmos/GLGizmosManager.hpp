@@ -92,6 +92,7 @@ public:
         BrimEars,
         ImageProjection,
         AlignStack,
+        PrimitiveGenerator,
         //SlaSupports,
         // BBS
         //FaceRecognition,

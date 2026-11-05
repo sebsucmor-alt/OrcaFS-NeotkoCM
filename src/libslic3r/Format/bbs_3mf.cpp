@@ -601,6 +601,10 @@ static inline std::string paint_decals_b64_encode(const std::string& json)
     out.resize(boost::beast::detail::base64::encode(&out[0], json.data(), json.size()));
     return out;
 }
+// Primitive Generator: ModelVolume::primitive_recipe (plain) and primitive_script (base64).
+static constexpr const char* PRIMITIVE_RECIPE_KEY = "primitive_recipe";
+static constexpr const char* PRIMITIVE_SCRIPT_KEY = "primitive_script";
+
 static inline std::string paint_decals_b64_decode(const std::string& b64)
 {
     if (b64.empty()) return std::string();
@@ -5146,6 +5150,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->source.is_converted_from_meters = metadata.value == "1";
                 else if ((metadata.key == MATRIX_KEY) || (metadata.key == MESH_SHARED_KEY))
                     continue;
+                else if (metadata.key == PRIMITIVE_RECIPE_KEY)
+                    volume->primitive_recipe = metadata.value;
+                else if (metadata.key == PRIMITIVE_SCRIPT_KEY)
+                    volume->primitive_script = paint_decals_b64_decode(metadata.value);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -5296,6 +5304,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->source.is_converted_from_inches = metadata.value == "1";
                 else if (metadata.key == SOURCE_IN_METERS)
                     volume->source.is_converted_from_meters = metadata.value == "1";
+                else if (metadata.key == PRIMITIVE_RECIPE_KEY)
+                    volume->primitive_recipe = metadata.value;
+                else if (metadata.key == PRIMITIVE_SCRIPT_KEY)
+                    volume->primitive_script = paint_decals_b64_decode(metadata.value);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -7989,6 +8001,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             for (const std::string& key : volume->config.keys()) {
                                 stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
                             }
+
+                            if (!volume->primitive_recipe.empty())
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRIMITIVE_RECIPE_KEY
+                                       << "\" " << VALUE_ATTR << "=\"" << xml_escape(volume->primitive_recipe) << "\"/>\n";
+                            if (!volume->primitive_script.empty())
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRIMITIVE_SCRIPT_KEY
+                                       << "\" " << VALUE_ATTR << "=\"" << paint_decals_b64_encode(volume->primitive_script) << "\"/>\n";
 
                             if (const std::optional<EmbossShape> &es = volume->emboss_shape;
                                 es.has_value())

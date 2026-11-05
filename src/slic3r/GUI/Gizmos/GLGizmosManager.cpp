@@ -29,6 +29,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoAssembly.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoPrimitiveGenerator.hpp"
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -185,6 +186,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::AlignStack):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_align_stack_dark.svg" : "toolbar_align_stack.svg");
             break;
+        case (EType::PrimitiveGenerator):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_primitive_generator_dark.svg" : "toolbar_primitive_generator.svg");
+            break;
         }
 
     }
@@ -231,6 +235,7 @@ bool GLGizmosManager::init()
                                                       m_is_dark ? "toolbar_image_projection_dark.svg" : "toolbar_image_projection.svg",
                                                       EType::ImageProjection));
     m_gizmos.emplace_back(new GLGizmoAlignStack(m_parent, m_is_dark ? "toolbar_align_stack_dark.svg" : "toolbar_align_stack.svg", EType::AlignStack));
+    m_gizmos.emplace_back(new GLGizmoPrimitiveGenerator(m_parent, m_is_dark ? "toolbar_primitive_generator_dark.svg" : "toolbar_primitive_generator.svg", EType::PrimitiveGenerator));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
