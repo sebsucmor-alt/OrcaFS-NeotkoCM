@@ -3312,7 +3312,9 @@ void GLCanvas3D::deselect_all()
     m_selection.remove_all();
     // BBS
     //wxGetApp().obj_manipul()->set_dirty();
-    m_gizmos.reset_all_states();
+    // The Primitive Generator works with nothing selected: clicking empty space keeps it open.
+    if (m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator)
+        m_gizmos.reset_all_states();
     m_gizmos.update_data();
     post_event(SimpleEvent(EVT_GLCANVAS_OBJECT_SELECT));
 }
@@ -3982,7 +3984,9 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
 
     refresh_camera_scene_box();
 
-    if (m_selection.is_empty()) {
+    // Adding a shape reloads the scene BEFORE the new object gets selected; that empty moment closed
+    // the Primitive Generator after every add. It has nothing to hide, so it stays.
+    if (m_selection.is_empty() && m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator) {
         // If no object is selected, deactivate the active gizmo, if any
         // Otherwise it may be shown after cleaning the scene (if it was active while the objects were deleted)
         m_gizmos.reset_all_states();
@@ -5705,7 +5709,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         // updates gizmos overlay
         // Align & Construct is usable with an empty selection (the user builds the order by
         // clicking objects), so it is not closed just because nothing is selected yet.
-        if (m_selection.is_empty() && m_gizmos.get_current_type() != GLGizmosManager::AlignStack)
+        // The Primitive Generator too: you add shapes with nothing selected.
+        if (m_selection.is_empty() && m_gizmos.get_current_type() != GLGizmosManager::AlignStack &&
+            m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator)
             m_gizmos.reset_all_states();
 
         m_dirty = true;
@@ -11124,7 +11130,7 @@ void GLCanvas3D::_update_selection_from_hover()
             m_selection.remove(i);
     }
 
-    if (m_selection.is_empty())
+    if (m_selection.is_empty() && m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator)
         m_gizmos.reset_all_states();
     else
         m_gizmos.refresh_on_off_state();

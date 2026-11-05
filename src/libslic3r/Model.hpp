@@ -1101,6 +1101,12 @@ public:
     // List of mesh facets painted for fuzzy skin.
     FacetsAnnotation    fuzzy_skin_facets;
 
+    // Primitive Generator: the recipe of a generated shape ("ring;d=18;w=2.5;...", or "scad:..." for
+    // an OpenSCAD script with its values) and, for OpenSCAD, the script itself, so a 3mf carries its
+    // own "factory". Empty for any other mesh. Saved in the 3mf, kept by undo/redo and copies.
+    std::string         primitive_recipe;
+    std::string         primitive_script;
+
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;
     mutable Timestamp        mmuseg_ts;
@@ -1346,6 +1352,8 @@ private:
         assert(this->mmu_segmentation_facets.id() == other.mmu_segmentation_facets.id());
         assert(this->fuzzy_skin_facets.id() == other.fuzzy_skin_facets.id());
         this->set_material_id(other.material_id());
+        this->primitive_recipe = other.primitive_recipe;
+        this->primitive_script = other.primitive_script;
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other, TriangleMesh &&mesh) :
@@ -1413,6 +1421,7 @@ private:
         mesh_changed |= t != mmu_segmentation_facets.timestamp();
         cereal::load_by_value(ar, fuzzy_skin_facets);
         mesh_changed |= t != fuzzy_skin_facets.timestamp();
+        ar(primitive_recipe, primitive_script); // same position in save()
         cereal::load_by_value(ar, config);
         cereal::load(ar, text_configuration);
         cereal::load(ar, emboss_shape);
@@ -1434,6 +1443,7 @@ private:
         cereal::save_by_value(ar, seam_facets);
         cereal::save_by_value(ar, mmu_segmentation_facets);
         cereal::save_by_value(ar, fuzzy_skin_facets);
+        ar(primitive_recipe, primitive_script); // same position in load()
         cereal::save_by_value(ar, config);
         cereal::save(ar, text_configuration);
         cereal::save(ar, emboss_shape);

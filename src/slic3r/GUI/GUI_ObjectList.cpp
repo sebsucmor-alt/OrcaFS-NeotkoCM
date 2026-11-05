@@ -2474,6 +2474,174 @@ ModelVolume* ObjectList::add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_w
     return new_volume;
 }
 
+// Primitive Generator: same steps as load_shape_object() / load_generic_subobject(),
+// with a mesh from the Primitive Generator instead of create_mesh().
+ModelVolume* ObjectList::add_primitive(TriangleMesh mesh, const std::string &name, ModelVolumeType type,
+                                              const std::string &recipe)
+{
+    if (mesh.empty() || m_objects == nullptr)
+        return nullptr;
+    const int obj_idx = get_selected_obj_idx();
+    if (type == ModelVolumeType::INVALID || obj_idx < 0 || obj_idx >= (int) m_objects->size()) {
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Add Primitive");
+        const size_t before = m_objects->size();
+        // A free spot on the bed: spiral out from the centre until the footprint (plus a gap) touches
+        // no other object. get_nearest_empty_cell() put new shapes on top of ones added just before.
+        {
+            const BoundingBoxf3 mb   = mesh.bounding_box();
+            const Vec2d         half = 0.5 * Vec2d(mb.size().x(), mb.size().y()) + Vec2d(3., 3.);
+            std::vector<BoundingBoxf> taken;
+            for (const ModelObject *mo : *m_objects)
+                for (size_t i = 0; i < mo->instances.size(); ++i) {
+                    const BoundingBoxf3 ib = mo->instance_bounding_box(i);
+                    taken.emplace_back(Vec2d(ib.min.x(), ib.min.y()), Vec2d(ib.max.x(), ib.max.y()));
+                }
+            const BoundingBoxf bed = wxGetApp().plater()->build_volume().bounding_volume2d();
+            const Vec2d        c0  = bed.center();
+            auto free_at = [&](const Vec2d &c) {
+                const BoundingBoxf fp(c - half, c + half);
+                if (fp.min.x() < bed.min.x() || fp.min.y() < bed.min.y() || fp.max.x() > bed.max.x() || fp.max.y() > bed.max.y())
+                    return false;
+                for (const BoundingBoxf &t : taken)
+                    if (fp.min.x() < t.max.x() && fp.max.x() > t.min.x() && fp.min.y() < t.max.y() && fp.max.y() > t.min.y())
+                        return false;
+                return true;
+            };
+            Vec2d spot = c0;
+            bool  found = free_at(c0);
+            const double step = 4., reach = std::max(bed.size().x(), bed.size().y());
+            for (double r = step; !found && r <= reach; r += step) {
+                const int n = std::max(8, int(2. * PI * r / step));
+                for (int k = 0; k < n && !found; ++k) {
+                    const Vec2d c = c0 + r * Vec2d(std::cos(2. * PI * k / n), std::sin(2. * PI * k / n));
+                    if (free_at(c)) { spot = c; found = true; }
+                }
+            }
+            const Vec3d mc = mb.center();
+            mesh.translate(float(spot.x() - mc.x()), float(spot.y() - mc.y()), float(-mb.min.z()));
+        }
+        load_mesh_object(mesh, from_u8(name), false);
+        if (m_objects->size() <= before || m_objects->back()->volumes.empty())
+            return nullptr;
+        ModelVolume *mv = m_objects->back()->volumes.front();
+        mv->primitive_recipe = recipe;
+        wxGetApp().mainframe->update_title();
+        return mv;
+    }
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Add primitive");
+    const Selection &selection = scene_selection();
+    int instance_idx = selection.get_instance_idxs().empty() ? 0 : *selection.get_instance_idxs().begin();
+    ModelObject &model_object = *(*m_objects)[obj_idx];
+    if (instance_idx < 0 || instance_idx >= (int) model_object.instances.size())
+        instance_idx = 0;
+    const BoundingBoxf3 instance_bb = model_object.instance_bounding_box(instance_idx);
+    const Geometry::Transformation inst_tr = model_object.instances[instance_idx]->get_transformation();
+
+    ModelVolume *new_volume = model_object.add_volume(std::move(mesh), type);
+    new_volume->set_transformation(inst_tr.get_matrix_no_offset().inverse());
+    const BoundingBoxf3 mesh_bb = new_volume->mesh().bounding_box();
+    // Next to the instance: its right front corner, standing on the bed (as Add Primitive does).
+    const Vec3d offset = Vec3d(instance_bb.max.x(), instance_bb.min.y(), instance_bb.min.z()) + 0.5 * mesh_bb.size() - inst_tr.get_offset();
+    new_volume->set_offset(inst_tr.get_matrix_no_offset().inverse() * offset);
+    new_volume->name = name;
+    new_volume->primitive_recipe = recipe;
+    int extruder_id = 0;
+    if (new_volume->type() == ModelVolumeType::MODEL_PART && model_object.config.has("extruder"))
+        extruder_id = model_object.config.opt_int("extruder");
+    new_volume->config.set_key_value("extruder", new ConfigOptionInt(extruder_id));
+    new_volume->source.is_from_builtin_objects = true;
+    Slic3r::save_object_mesh(model_object);
+
+    select_item([this, obj_idx, new_volume]() {
+        wxDataViewItem      sel_item;
+        wxDataViewItemArray items = reorder_volumes_and_get_selection(obj_idx, [new_volume](const ModelVolume *v) { return v == new_volume; });
+        if (!items.IsEmpty())
+            sel_item = items.front();
+        return sel_item;
+    });
+    if (type == ModelVolumeType::MODEL_PART)
+        wxGetApp().plater()->get_view3D_canvas3D()->update_instance_printable_state_for_object((size_t) obj_idx);
+    apply_object_instance_transfrom_to_all_volumes(&model_object);
+    selection_changed();
+    notify_instance_updated(obj_idx);
+    return new_volume;
+}
+ModelObject* ObjectList::add_primitive_parts(std::vector<NeoPrimPart> parts, const std::string &name,
+                                                   const std::string &recipe, const std::string &script)
+{
+    if (parts.empty() || m_objects == nullptr)
+        return nullptr;
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Add Primitive");
+    Model &model = wxGetApp().plater()->model();
+
+    // all pieces share the script's frame: centre that frame on X/Y and stand it on z = 0
+    BoundingBoxf3 all;
+    for (const NeoPrimPart &p : parts)
+        all.merge(p.mesh.bounding_box());
+    const Vec3d shift(-all.center().x(), -all.center().y(), -all.min.z());
+    for (NeoPrimPart &p : parts)
+        p.mesh.translate(shift.cast<float>());
+
+    ModelObject *obj = model.add_object();
+    obj->name        = name;
+    obj->add_instance();
+    for (NeoPrimPart &p : parts) {
+        // add_volume() centres the mesh and keeps the centre as the part's offset: positions stay
+        ModelVolume *mv = obj->add_volume(std::move(p.mesh));
+        mv->name                    = p.name.empty() ? name : p.name;
+        mv->primitive_recipe = recipe;
+        mv->primitive_script = script;
+        mv->source.is_from_builtin_objects = true;
+        if (p.extruder > 0)
+            mv->config.set_key_value("extruder", new ConfigOptionInt(p.extruder));
+    }
+    obj->config.set_key_value("extruder", new ConfigOptionInt(parts.front().extruder > 0 ? parts.front().extruder : 1));
+    obj->sort_volumes(true);
+    obj->invalidate_bounding_box();
+
+    // a free spot on the bed, the same search as single shapes
+    const BoundingBoxf3 ob   = obj->raw_mesh_bounding_box();
+    const Vec2d         half = 0.5 * Vec2d(ob.size().x(), ob.size().y()) + Vec2d(3., 3.);
+    std::vector<BoundingBoxf> taken;
+    for (const ModelObject *mo : *m_objects)
+        if (mo != obj)
+            for (size_t i = 0; i < mo->instances.size(); ++i) {
+                const BoundingBoxf3 ib = mo->instance_bounding_box(i);
+                taken.emplace_back(Vec2d(ib.min.x(), ib.min.y()), Vec2d(ib.max.x(), ib.max.y()));
+            }
+    const BoundingBoxf bed = wxGetApp().plater()->build_volume().bounding_volume2d();
+    auto free_at = [&](const Vec2d &c) {
+        const BoundingBoxf fp(c - half, c + half);
+        if (fp.min.x() < bed.min.x() || fp.min.y() < bed.min.y() || fp.max.x() > bed.max.x() || fp.max.y() > bed.max.y())
+            return false;
+        for (const BoundingBoxf &t : taken)
+            if (fp.min.x() < t.max.x() && fp.max.x() > t.min.x() && fp.min.y() < t.max.y() && fp.max.y() > t.min.y())
+                return false;
+        return true;
+    };
+    Vec2d spot = bed.center();
+    bool  found = free_at(spot);
+    const double step = 4., reach = std::max(bed.size().x(), bed.size().y());
+    for (double r = step; !found && r <= reach; r += step) {
+        const int n = std::max(8, int(2. * PI * r / step));
+        for (int k = 0; k < n && !found; ++k) {
+            const Vec2d c = bed.center() + r * Vec2d(std::cos(2. * PI * k / n), std::sin(2. * PI * k / n));
+            if (free_at(c)) { spot = c; found = true; }
+        }
+    }
+    const Vec3d oc = ob.center();
+    obj->instances[0]->set_offset(Vec3d(spot.x() - oc.x(), spot.y() - oc.y(), -ob.min.z()));
+    obj->ensure_on_bed();
+    model.InitializeAssemblyPositions({obj});
+    Slic3r::save_object_mesh(*obj);
+
+    std::vector<size_t> idxs{model.objects.size() - 1};
+    paste_objects_into_list(idxs);
+    wxGetApp().mainframe->update_title();
+    return obj;
+}
+
 void ObjectList::load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center)
 {
     // Add mesh to model as a new object

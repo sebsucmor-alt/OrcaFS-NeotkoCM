@@ -91,6 +91,7 @@ public:
         Simplify,
         BrimEars,
         AlignStack,
+        PrimitiveGenerator,
         //SlaSupports,
         // BBS
         //FaceRecognition,

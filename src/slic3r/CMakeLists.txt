@@ -142,6 +142,11 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GizmoObjectManipulation.cpp
     GUI/Gizmos/GizmoObjectManipulation.hpp
     GUI/Gizmos/GLGizmoAlignStack.cpp
+    GUI/Gizmos/GLGizmoPrimitiveGenerator.cpp
+    GUI/Gizmos/GLGizmoPrimitiveGenerator.hpp
+    GUI/Gizmos/NeotkoPanelStyle.hpp
+    GUI/NeotkoScad.cpp
+    GUI/NeotkoScad.hpp
     GUI/Gizmos/GLGizmoAlignStack.hpp
     GUI/Gizmos/GLGizmoAssembly.cpp
     GUI/Gizmos/GLGizmoAssembly.hpp

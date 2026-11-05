@@ -289,6 +289,16 @@ public:
     void                load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center = true);
     // A world-space mesh as a new part of obj_idx, in place (a negative part with `negative`).
     // Returns the new part (nullptr: none).
+    // Primitive Generator: add `mesh` (mm, any placement) as a new
+    // object (type INVALID) or as a part / negative / modifier of the selected object, placed like
+    // Add Primitive does. Stores `recipe` on the new volume. Returns it, or nullptr.
+    ModelVolume*        add_primitive(TriangleMesh mesh, const std::string &name, ModelVolumeType type,
+                                             const std::string &recipe);
+    // a multi-part OpenSCAD shape: ONE new object, one part per piece, kept
+    // where the script puts them. `extruders` 1-based (0 = the object's). Returns the object.
+    struct NeoPrimPart { std::string name; TriangleMesh mesh; int extruder = 0; };
+    ModelObject*        add_primitive_parts(std::vector<NeoPrimPart> parts, const std::string &name,
+                                                   const std::string &recipe, const std::string &script);
     ModelVolume*        add_mesh_part_in_place(int obj_idx, TriangleMesh mesh_world, const std::string &name, bool negative = false, int extruder = -1);
     // BBS
     void                switch_to_object_process();
