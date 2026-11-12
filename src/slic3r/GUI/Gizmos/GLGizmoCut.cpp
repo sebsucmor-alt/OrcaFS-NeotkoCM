@@ -2672,7 +2672,7 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
         if (mode == CutMode::cutPlanar) {
             add_vertical_scaled_interval(0.75f);
 
-            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object()));
+            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || (m_part_selection.valid() && m_part_selection.is_one_object()));
                 if (m_imgui->button(has_connectors ? _L("Edit connectors") : _L("Add connectors")))
                     set_connectors_editing(true);
             m_imgui->disabled_end();
@@ -2743,7 +2743,9 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
         render_part_action_line(_L("Upper part"), "##upper", m_keep_upper, m_place_on_cut_upper, m_rotate_upper);
         render_part_action_line(_L("Lower part"), "##lower", m_keep_lower, m_place_on_cut_lower, m_rotate_lower);
 
-        m_imgui->disabled_begin(has_connectors || m_part_selection.valid() || mode == CutMode::cutTongueAndGroove);
+        // Cut to parts works with connectors too: each piece becomes its own object with its connector, left in
+        // place (KeepAsParts is not passed with connectors, see perform_cut). Without connectors it is unchanged.
+        m_imgui->disabled_begin(m_part_selection.valid() || mode == CutMode::cutTongueAndGroove);
 
             if (m_part_selection.valid())
                 m_keep_as_parts = false;

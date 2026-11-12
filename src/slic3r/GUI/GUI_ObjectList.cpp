@@ -4229,20 +4229,9 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
 
 static bool can_add_volumes_to_object(const ModelObject *object)
 {
-    bool can = object->volumes.size() > 1;
-
-    if (can && object->is_cut()) {
-        int no_connectors_cnt = 0;
-        for (const ModelVolume *v : object->volumes)
-            if (!v->is_cut_connector()) {
-                if (!v->is_model_part())
-                    return true;
-                no_connectors_cnt++;
-            }
-        can = no_connectors_cnt > 1;
-    }
-
-    return can;
+    // Cut connectors are listed too: they are real parts of the object. Moving them stays locked and deleting
+    // one asks first (del_from_cut_object), as before.
+    return object->volumes.size() > 1;
 }
 
 wxDataViewItemArray ObjectList::add_volumes_to_object_in_list(size_t obj_idx, std::function<bool(const ModelVolume *)> add_to_selection /* = nullptr*/)
@@ -4270,8 +4259,6 @@ wxDataViewItemArray ObjectList::add_volumes_to_object_in_list(size_t obj_idx, st
         int ui_volume_idx = 0;
         for (const ModelVolume *volume : object->volumes) {
             ++volume_idx;
-            if (object->is_cut() && volume->is_cut_connector())
-                continue;
 
             const wxDataViewItem &vol_item = m_objects_model->AddVolumeChild(
                 object_item,
