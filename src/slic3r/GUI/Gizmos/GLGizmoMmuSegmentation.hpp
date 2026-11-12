@@ -144,6 +144,7 @@ protected:
     // when true, "Extra walls" / "Surface depth" edit the per-color
     // override of the currently selected paint color instead of the global value.
     bool                              m_per_color_values      = false;
+    const ModelObject                *m_per_color_mo          = nullptr; // object the checkbox was last derived for
 
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 
