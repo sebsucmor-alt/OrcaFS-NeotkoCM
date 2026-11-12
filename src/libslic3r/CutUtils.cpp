@@ -116,13 +116,27 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
         // The cap lies on the plane (z = 0 here): a few huge new facets that are not skin. Resampling
         // them split them into millions of slivers along the painted rim (9 s, and a viewport at
         // 1 fps on a 1M skull), so they are left unpainted without sampling.
+        // KNOWN LIMIT (audit 12-nov-2026): a facet counts as cap when it is within 0.05 mm of the plane and faces
+        // straight up or down. If the cut goes exactly through a nearly flat PAINTED surface of the model (closer
+        // than 0.05 mm to the plane), the pieces of the facets the plane splits there are taken for cap and lose
+        // their painting. Rare, accepted; lower the 0.05 mm or add a test against the source facet if it shows up.
         auto mark_cap = [](const indexed_triangle_set& its, std::vector<int>& map) {
             const float eps = 1e-4f;
             for (size_t i = 0; i < map.size(); ++i)
                 if (map[i] < 0) {
                     const auto& f = its.indices[i];
-                    if (std::abs(its.vertices[f(0)].z()) < eps && std::abs(its.vertices[f(1)].z()) < eps &&
-                        std::abs(its.vertices[f(2)].z()) < eps)
+                    const float z0 = std::abs(its.vertices[f(0)].z()), z1 = std::abs(its.vertices[f(1)].z()),
+                                z2 = std::abs(its.vertices[f(2)].z());
+                    bool cap = z0 < eps && z1 < eps && z2 < eps;
+                    // A dense mesh can have its own vertices a few microns off the plane, and the cut reuses them
+                    // in the cap, which then lies only "almost" on z = 0. Those facets are still the cap: close
+                    // to the plane and facing straight up or down (the slivers the plane cuts face sideways).
+                    if (!cap && std::max({ z0, z1, z2 }) < 0.05f) {
+                        const Vec3f n = (its.vertices[f(1)] - its.vertices[f(0)]).cross(its.vertices[f(2)] - its.vertices[f(0)]);
+                        const float l = n.norm();
+                        cap = l > 0.f && std::abs(n.z()) > 0.999f * l;
+                    }
+                    if (cap)
                         map[i] = PaintTransfer::FACET_UNPAINTED;
                 }
         };

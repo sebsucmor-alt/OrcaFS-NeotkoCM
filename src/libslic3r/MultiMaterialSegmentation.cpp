@@ -1190,6 +1190,14 @@ static bool is_volume_sinking(const indexed_triangle_set &its, const Transform3d
 //#define MMU_SEGMENTATION_DEBUG_TOP_BOTTOM
 
 // Returns segmentation of top and bottom layers based on painting in segmentation gizmos.
+// A very dense mesh (millions of facets) gives top / bottom projections with thousands of points, and the
+// opening below can spend minutes in Clipper's intersection fix-up on a single thread (seen on a freshly cut
+// 2M-facet model: the slice sat at 5%). Simplify to 0.01 mm, below what the printer resolves, when that heavy.
+static ExPolygons simplify_dense_projection(ExPolygons ex)
+{
+    return count_points(ex) > 5000 ? expolygons_simplify(ex, scale_(0.01)) : ex;
+}
+
 static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_layers(const PrintObject                                               &print_object,
                                                                                       const std::vector<ExPolygons>                                   &input_expolygons,
                                                                                       const std::function<ModelVolumeFacetsInfo(const ModelVolume &)> &extract_facets_info,
@@ -1397,6 +1405,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                 LayerColorStat stat = layer_color_stat(layer_idx, color_idx);
                 if (std::vector<Polygons> &top = top_raw[color_idx]; ! top.empty() && ! top[layer_idx].empty())
                     if (ExPolygons top_ex = union_ex(top[layer_idx]); ! top_ex.empty()) {
+                        top_ex = simplify_dense_projection(std::move(top_ex));
                         // Clean up thin projections. They are not printable anyways.
                         top_ex = opening_ex(top_ex, stat.small_region_threshold);
                         if (! top_ex.empty()) {
@@ -1417,6 +1426,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                     }
                 if (std::vector<Polygons> &bottom = bottom_raw[color_idx]; ! bottom.empty() && ! bottom[layer_idx].empty())
                     if (ExPolygons bottom_ex = union_ex(bottom[layer_idx]); ! bottom_ex.empty()) {
+                        bottom_ex = simplify_dense_projection(std::move(bottom_ex));
                         // Clean up thin projections. They are not printable anyways.
                         bottom_ex = opening_ex(bottom_ex, stat.small_region_threshold);
                         if (! bottom_ex.empty()) {
