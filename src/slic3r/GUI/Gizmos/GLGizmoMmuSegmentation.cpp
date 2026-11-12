@@ -2576,6 +2576,14 @@ void GLGizmoMmuSegmentation::render_pro_mode_section(float sliders_left_width, f
     // --- Per-color mode toggle: OFF = the two global inputs below; ON = a compact per-color
     // table (one row per filament: color swatch + Walls + Depth), so the user sees every
     // assignment at a glance instead of a hidden value tied to the current paint selection. ---
+    // The checkbox only switches the UI; the slice reads the per-color lists whenever a value is > 0
+    // (PrintApply.cpp). Its state is not saved, so derive it from the data whenever the object changes
+    // (e.g. after reopening a 3mf with per-color values, the table shows instead of the global inputs).
+    if (mo != m_per_color_mo) {
+        m_per_color_mo     = mo;
+        m_per_color_values = per_color_max("mmu_segmented_region_extra_walls_per_color") > 0
+                          || per_color_max("mmu_segmented_region_surface_depth_per_color") > 0;
+    }
     ImGui::Checkbox(_u8L("Per color").c_str(), &m_per_color_values);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", _u8L("Assign \"Extra walls\" and \"Surface depth\" per paint color "
