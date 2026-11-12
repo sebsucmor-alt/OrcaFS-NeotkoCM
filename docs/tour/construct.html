@@ -261,6 +261,12 @@
       with <b>Keep painting</b> on, the new mesh is painted like the old one. Every step happens on
       the voxels, with no mesh boolean, so it copes with meshes that are badly broken.
     </p>
+    <p class="small">
+      <b>2.5.0:</b> two options, both on by default. <b>Keep decals &amp; recipes</b> moves the painter's decals
+      (with their Vector and Clay settings), the mirror centre, the stickers and the object's settings to the
+      new mesh. <b>Keep Clay &amp; extra parts</b> rebuilds only the plain parts, and Clay parts, engraves and
+      modifiers move over as they are. See <a href="draw.html#remesh">Draw &amp; sculpt</a>.
+    </p>
 
     <figure>
       <img src="../images/Remesh-panel.webp" width="1830" height="1106" alt="The Remesh section of Align and Construct on a painted skull, in Draft, with the estimate of triangles and memory next to the voxel size" loading="lazy">
@@ -403,7 +409,7 @@
       <thead><tr><th>Edit</th><th>Since</th><th>What happens to the painting</th></tr></thead>
       <tbody>
         <tr><td><b>Boolean</b> (here, Mesh boolean, Split)</td><td>2.4.8</td><td>Kept. The inside, and the walls of a cut, take the filament of #1.</td></tr>
-        <tr><td><b>Cut</b> (plane, connectors, dowels, tongue and groove, Cut to parts)</td><td>2.4.9</td><td>Kept on every piece. The new face comes out with the filament of the part. A painted skull of a million triangles cuts in under half a second of painting work.</td></tr>
+        <tr><td><b>Cut</b> (plane, connectors, dowels, tongue and groove, Cut to parts)</td><td>2.4.9</td><td>Kept on every piece. The new face comes out with the filament of the part. A painted skull of a million triangles cuts in under half a second of painting work. Since 2.5.0 a very dense painted model (two million triangles) no longer leaves the slice stuck at 5% after the cut.</td></tr>
         <tr><td><b>Remesh</b></td><td>2.4.9</td><td>Painted again from the old mesh, in a few seconds.</td></tr>
         <tr><td><b>Fix model</b> (Windows)</td><td>2.4.9</td><td>Kept. Not tested: the author only has a Mac.</td></tr>
       </tbody>
@@ -413,6 +419,25 @@
     <p class="small">
       ColorStitch recipes, Texture Bump zones and stickers do not carry over through a boolean yet.
     </p>
+
+    <h3 id="cutconnectors">Cut connectors you can see <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.5.0</span></h3>
+    <p>
+      A cut with connectors leaves a real part in each piece: the plug on one side, the hole (a negative part)
+      on the other. Orca kept those parts hidden from the object list, so a piece looked like one mesh while it
+      carried a connector, and a Remesh later "found" a negative part out of nowhere. Now they are listed under
+      their piece. They still can't be moved on their own, and deleting one asks whether to drop the cut link or
+      delete all the connectors.
+    </p>
+    <p>
+      <b>Cut to parts</b> used to switch itself off as soon as there were connectors, because a hole inside one
+      object would also carve the plug that fits in it. With connectors it now gives one object per piece, each
+      with its own connector, left where it was. Without connectors it works as before.
+    </p>
+    <figure>
+      <img src="../images/Cut-250-connectors-listed.webp" width="2000" height="831" loading="lazy"
+           alt="The object list after a cut: each piece shows a Cut connectors line, its own mesh and Connector-1, one positive and one negative">
+      <figcaption>After the cut, each piece lists its mesh and its connector.</figcaption>
+    </figure>
 
     <!-- ================================================================= -->
     <h2 id="costs" data-short="The catch">The catch</h2>
@@ -437,7 +462,7 @@
 
     <nav class="pager">
       <a href="place.html"><small>Previous</small><b>← Placing</b></a>
-      <a class="is-next" href="realcolor.html"><small>Next</small><b>RealColor →</b></a>
+      <a class="is-next" href="draw.html"><small>Next</small><b>Draw &amp; sculpt →</b></a>
     </nav>
 
   </main>

@@ -278,6 +278,13 @@ PhotoModeState& photo_mode();
 // simply gated. Callers use this to hide the plate icon and the context-menu item too, so the
 // button never appears where pressing it would do nothing.
 bool photo_mode_available();
+// NEOTKO_LITRENDER_TAG (4-nov-2026) — the lit look (Phong + SSAO + shadows, shells_lit) can be
+// switched off on its own from the plate column, for heavy models, without leaving LibreMode.
+// On = LibreMode on AND the lit switch on (app_config "neotko_lit_render", missing = on); Photo
+// Mode always gets it, it is built on it.
+bool lit_render_on();
+bool lit_render_switch();        // the switch alone (the icon shows it)
+void lit_render_toggle();
 
 // Convenience for the render paths: is the plate furniture (bed model, grid, logo, numbers,
 // exclude area) supposed to be hidden right now?

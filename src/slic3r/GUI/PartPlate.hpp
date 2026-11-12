@@ -143,6 +143,7 @@ private:
     PickingModel m_move_front_icon;
     PickingModel m_photo_icon;   // NEOTKO_PHOTOMODE_TAG s242
     PickingModel m_snapdrag_icon; // NEOTKO_SNAPDRAG_TAG s249
+    PickingModel m_lit_icon;      // NEOTKO_LITRENDER_TAG — lighting & shadows on/off
     GLModel m_plate_idx_icon;
     GLTexture m_texture;
 
@@ -213,7 +214,8 @@ public:
     //
     // NEOTKO_SNAPDRAG_TAG s249: 9 -> 10 for the magnet icon (sub-id 9). Same reasoning, budget
     // re-checked: 36 * 10 = 360, still well under the 1000 where SceneRaycaster::Volume ids start.
-    static const unsigned int GRABBER_COUNT = 10;
+    // NEOTKO_LITRENDER_TAG (4-nov-2026): 10 -> 11 for the lighting icon (sub-id 10): 36 * 11 = 396 < 1000.
+    static const unsigned int GRABBER_COUNT = 11;
     // Sub-id of the Photo Mode icon. Named because two different indexings coexist here and mixing
     // them up is silent: this is the PICKING sub-id, while calc_vertex_for_icons() takes a LAYOUT
     // index (0..6, the visual slot down the column) that does not match it.
@@ -221,6 +223,8 @@ public:
     // NEOTKO_SNAPDRAG_TAG s249 — sub-id of the magnet (Snap & Drag options). Layout slot is 7;
     // the two indexings differ, exactly as noted for the camera above.
     static const unsigned int SNAP_DRAG_HOVER_ID = 9;
+    // NEOTKO_LITRENDER_TAG — sub-id of the lighting switch (layout slot 8).
+    static const unsigned int LIT_RENDER_HOVER_ID = 10;
 
     static ColorRGBA SELECT_COLOR;
     static ColorRGBA UNSELECT_COLOR;
@@ -587,6 +591,8 @@ class PartPlateList : public ObjectBase
     // NEOTKO_SNAPDRAG_TAG s249 — the magnet: Snap & Drag options
     GLTexture m_snapdrag_hovered_texture;
     GLTexture m_snapdrag_texture;
+    // NEOTKO_LITRENDER_TAG — the lighting switch: on / off, each with its hover
+    GLTexture m_lit_texture, m_lit_hovered_texture, m_lit_off_texture, m_lit_off_hovered_texture;
     GLTexture m_arrange_texture;
     GLTexture m_arrange_hovered_texture;
     GLTexture m_orient_texture;

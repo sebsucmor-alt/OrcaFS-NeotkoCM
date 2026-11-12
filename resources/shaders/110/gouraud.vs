@@ -44,6 +44,9 @@ uniform mat4 projection_matrix;
 uniform mat3 view_normal_matrix;
 uniform mat4 volume_world_matrix;
 uniform SlopeDetection slope;
+// NEOTKO_SHAREDVERTS_TAG 4-nov — malla con vértices compartidos y sin normales: la
+// normal plana y la luz se calculan en el fragment shader (ver gouraud.fs).
+uniform bool u_derived_normal;
 
 // Clipping plane, x = min z, y = max z. Used by the FFF and SLA previews to clip with a top / bottom plane.
 uniform vec2 z_range;
@@ -70,7 +73,7 @@ varying vec3 eye_pos;   // NEOTKO_SMOOTHNORMALS_TAG s229: for the geometric-norm
 void main()
 {
 	// First transform the normal into camera space and normalize the result.
-    eye_normal = normalize(view_normal_matrix * v_normal);
+    eye_normal = u_derived_normal ? vec3(0.0, 0.0, 1.0) : normalize(view_normal_matrix * v_normal);
 
     // NEOTKO_SMOOTHNORMALS_TAG s229: pick live values or the baked-in constants.
     vec3  light_top_dir   = shading_override ? normalize(shading_light_top_dir)   : LIGHT_TOP_DIR;
@@ -99,7 +102,7 @@ void main()
     world_pos = volume_world_matrix * vec4(v_position, 1.0);
 
     // z component of normal vector in world coordinate used for slope shading
-    world_normal_z = slope.actived ? (normalize(slope.volume_world_normal_matrix * v_normal)).z : 0.0;
+    world_normal_z = (slope.actived && !u_derived_normal) ? (normalize(slope.volume_world_normal_matrix * v_normal)).z : 0.0;
 
     gl_Position = projection_matrix * position;
     // Fill in the scalars for fragment shader clipping. Fragments with any of these components lower than zero are discarded.

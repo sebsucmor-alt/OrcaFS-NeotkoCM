@@ -2095,7 +2095,27 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                             if (const int _mfpid = _po->print()->mixed_filament_sandwich_profile_id(_po); _mfpid)
                                 _mixed_p = SurfaceEffectProfileManager::get().find(_mfpid);
                         }
-                        if (_mixed_p) {
+                        // 4-nov-2026 — receta por PROFUNDIDAD del MixedFilament Object: la cara (top/penu/bottom)
+                        // va entera con la herramienta de su zona, como el Depth recipe del sticker. Sin zona
+                        // (receta vacía o fuera de profundidad) sigue la receta plana de abajo.
+                        bool _mf_depth_done = false;
+                        if (_mixed_p && _po->config().mixed_filament_depth_mode.value) {
+                            const int _mdt = mixed_depth_tool_for(*_po, this->id(), surface_fill.surface.expolygon);
+                            if (_mdt >= 0) {
+                                SurfacePass _dp;
+                                _dp.kind       = SurfacePassKind::Solid;
+                                _dp.ratio      = 1.0;
+                                _dp.solid_tool = _mdt;
+                                SurfacePassStack _dst;
+                                _dst.passes.push_back(_dp);
+                                mp_stack       = std::move(_dst);
+                                is_mp_fill     = true;
+                                _mf_depth_done = true;
+                                NEOTKO_LOG(PROFILE, "MF_DEPTH_OVERRIDE layer=" << f->layer_id
+                                    << " z=" << this->print_z << " role=" << (int)_mp_role << " T" << _mdt);
+                            }
+                        }
+                        if (_mixed_p && !_mf_depth_done) {
                             const std::string& _mfjs = _mp_is_bottom
                                 ? _mixed_p->stack_bottom_json
                                 : ((_mp_role == erTopSolidInfill)
@@ -2121,7 +2141,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                         if (!_mixed_p && _fp_sticker_idx >= 0 && _mp_mo
                             && _fp_sticker_idx < (int)_mp_mo->colorstitch_stickers.size()) {
                             const ColorStitchSticker& _stk = _mp_mo->colorstitch_stickers[_fp_sticker_idx];
-                            // 22-oct-2026 — receta por profundidad (extensión opcional): la capa entera con la
+                            // 22-oct-2026 — receta por profundidad (StickerDepth.cpp): la capa entera con la
                             // herramienta de esa profundidad, en vez de la receta plana del perfil.
                             // 22-oct-2026 — también en el bottom (stickers que miran abajo, capa 0 incluida).
                             const int _dtool = optional_depth_tool_at(*this->object(), _stk, _fp_sticker_c, this->print_z, this->height);
@@ -4156,7 +4176,7 @@ bool Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
     	    assert(dynamic_cast<ExtrusionEntityCollection*>(layerm->fills.entities[i]) != nullptr);
 #endif
 
-    // 22-oct-2026 — extensión opcional: mueve parte del relleno sólido de esta capa a subcapas de otra
+    // 22-oct-2026 — Depth recipe (StickerDepth.cpp): mueve parte del relleno sólido de esta capa a subcapas de otra
     // herramienta (sin la extensión no hace nada). Antes del coalescer, que ya sabe de subcapas.
     optional_extra_sublayers(*this);
 
@@ -4593,9 +4613,5 @@ void Layer::make_ironing()
 	}
 }
 
-#ifndef NEOTKO_PRIVATE_TOWER
-int  optional_depth_tool_at(const PrintObject&, const ColorStitchSticker&, int, double, double) { return -1; }
-void optional_extra_sublayers(Layer&) {}
-#endif
 
 } // namespace Slic3r

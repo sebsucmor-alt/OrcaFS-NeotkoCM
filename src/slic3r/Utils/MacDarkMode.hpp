@@ -16,6 +16,9 @@ void set_tag_when_enter_full_screen(bool isfullscreen);
 void set_title_colour_after_set_title(void * window);
 void initGestures(void * view,  wxEvtHandler * handler);
 void openFolderForFile(wxString const & file);
+// NEOTKO_PRESENT_TAG 4-nov — pruebas de presentación del 3D (fotogramas que no llegan a pantalla).
+void mac_gl_set_swap_interval(int interval);   // sobre el contexto CGL actual
+void mac_ca_transaction_flush();               // [CATransaction flush]
 #endif
 
 

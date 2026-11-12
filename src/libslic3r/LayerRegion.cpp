@@ -250,6 +250,19 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     perimeter_config.wall_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.wall_filament.value))));
     perimeter_config.sparse_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.sparse_infill_filament.value))));
     perimeter_config.solid_infill_filament.value = int(effective_layer_filament_id(*this->layer(), unsigned(std::max(0, region_config.solid_infill_filament.value))));
+    {   // sonda SIEMPRE activa (gravity.log), 12-nov-2026: muros por color en mezclas. Una capa de cada 25.
+        const size_t lid = this->layer()->id();
+        if (lid % 25 == 0 && !slices.empty()) {
+            double area = 0.;
+            for (const Surface &sf : slices.surfaces) area += sf.expolygon.area();
+            std::ostringstream os;
+            os << "WALLS_LAYER layer=" << lid << " z=" << this->layer()->print_z << " region=" << this->region().print_object_region_id()
+               << " wall_F" << region_config.wall_filament.value << " eff_F" << perimeter_config.wall_filament.value
+               << " wall_loops=" << region_config.wall_loops.value << " islands=" << slices.surfaces.size()
+               << " area_mm2=" << area * SCALING_FACTOR * SCALING_FACTOR << " compatible=" << compatible_regions.size();
+            NeoDebug::write(NeoDebug::GRAVITY, os.str());
+        }
+    }
     // This needs to be in sync with PrintObject::_slice() slicing_mode_normal_below_layer!
     bool spiral_mode = print_config.spiral_mode &&
         //FIXME account for raft layers.

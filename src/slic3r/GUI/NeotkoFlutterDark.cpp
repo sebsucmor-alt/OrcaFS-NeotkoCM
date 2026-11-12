@@ -1,4 +1,5 @@
 #include "NeotkoFlutterDark.hpp"
+#include "libslic3r/LocalesUtils.hpp" // NEOTKO audit 1-nov: numbers in any UI language
 
 #include "libslic3r/NeoDebug.hpp"
 
@@ -247,7 +248,9 @@ bool parse_unit_number(const std::string& in, size_t& p, double& v)
         ++p;
     if (p == b || p - b > 24)
         return false;
-    try { v = std::stod(in.substr(b, p - b)); } catch (...) { return false; }
+    size_t used = 0;
+    v = Slic3r::neo_to_double(std::string_view(in).substr(b, p - b), 0., &used);
+    if (used == 0) return false;
     return v >= 0.0 && v <= 1.0;
 }
 

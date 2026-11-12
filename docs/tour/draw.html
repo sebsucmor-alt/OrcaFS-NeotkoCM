@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Draw &amp; sculpt — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Vector Brush, brush effects and the Clay Tool: draw free hand on the object, give the drawing real volume, carve it in, and keep it all through a Remesh.">
+<link rel="stylesheet" href="assets/tour.css">
+<style>
+  .bl { display: grid; gap: .8rem; }
+  .bl__cv { border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; touch-action: none; cursor: crosshair; }
+  .bl__row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: .7rem; align-items: end; }
+  .bl__sw { display: flex; gap: .35rem; align-items: center; flex-wrap: wrap; }
+  .bl__sw button { width: 1.9rem; height: 1.9rem; border-radius: 5px; border: 1px solid var(--rule-firm); cursor: pointer; }
+  .bl__sw button[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .bl__lab { font-family: var(--mono); font-size: .63rem; letter-spacing: .11em; text-transform: uppercase; color: var(--ink-faint); }
+  .bl__btn { font: inherit; font-size: .85rem; padding: .35rem .8rem; border-radius: 5px; border: 1px solid var(--rule-firm);
+             background: var(--surface-2); color: var(--ink); cursor: pointer; }
+  .cs__read { font-family: var(--mono); font-size: .72rem; line-height: 1.55; color: var(--ink-faint); margin: 0; }
+  .cs__read b { color: var(--ink); font-weight: 500; }
+  .cs__read .air { color: var(--alert); }
+  .cs__read .hit { color: var(--good); }
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#build" aria-current="page">Build &amp; fix</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">§6 — Build &amp; fix</p>
+    <h1>Draw &amp; sculpt: brushes, Clay and carving</h1>
+    <p class="lede">
+      Draw free hand on the object with brushes that feel like a drawing app, then give the drawing real
+      volume: raise it off the surface as parts in their own filaments, or carve it into the object. It
+      all stays a vector, so you can still move it, recolour it and rebuild it.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--wip">Clay: experimental</li>
+      <li class="badge badge--ver badge--plain">2.5.0</li>
+    </ul>
+
+    <p class="where">Painter (Color painting) › <b>Vector Brush</b> (key P) · <b>Vector</b> (key V) · <b>Clay</b> (key K)</p>
+
+    <figure>
+      <img src="../images/Clay-akira-skull.gif" width="800" height="558" loading="lazy"
+           alt="A painted black skull with yellow eyes, pink lips and yellow teeth that stand out as raised Clay parts">
+      <figcaption>A skull painted with decals, then raised with Clay: eyes, lips and teeth are real parts,
+        each in its own filament, so they slice like any other part.</figcaption>
+    </figure>
+
+    <h2 id="why" data-short="Without it">What you had to do without it</h2>
+
+    <div class="fold">
+      <div class="fold--before">
+        <p class="note__t">Before</p>
+        <p>A drawing meant an SVG made in another program. Paint on a model was flat, and anything raised
+          had to be modelled in CAD, exported, placed and lined up with the paint by hand.</p>
+      </div>
+      <div class="fold--after">
+        <p class="note__t">With 2.5.0</p>
+        <p>Draw on the object inside the slicer. Press ✓ and the drawing is a decal. Give it Height in the
+          Clay tab and it becomes parts that follow the surface, or an engrave cut into it.</p>
+      </div>
+    </div>
+
+    <h2 id="brush" data-short="Vector Brush">Vector Brush</h2>
+
+    <p>
+      Draw with the left button and the stroke comes out smooth, thinner where your hand goes fast and
+      thicker where it slows, with tapered ends. The stroke engine is <b>Quill</b>, a method by
+      <b>Gabriel Suchowolski (microbians)</b>, MIT licensed
+      (<a href="https://github.com/microbians/bezier">bezier</a>,
+      <a href="https://github.com/microbians/sktch">sktch</a>,
+      <a href="https://microbians.com/math">the maths</a>). It turns the line into a chain of exact quadratic
+      curves with very few nodes, so even a dense drawing stays light to slice.
+    </p>
+
+    <table>
+      <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td>Brush</td><td>Free hand. Styles Natural, Quill ink, Pen, Marker, Dirty ink; Width by Speed, Ink or Constant; Inertia and Drops.</td></tr>
+        <tr><td>Line</td><td>Click point by point. Click and drag pulls out a curve, Alt makes a corner. Enter or a click on the first point finishes it.</td></tr>
+        <tr><td>Wrap</td><td>Experimental. The same, but on the object itself, see <a href="#surface">Draw on surface</a>.</td></tr>
+        <tr><td>Eraser (E)</td><td>Erases every stroke it goes over, whatever its filament, and never destroys anything: Undo stroke brings it back. Alt + click a stroke to edit its knobs.</td></tr>
+      </tbody>
+    </table>
+
+    <ul>
+      <li><b>Each stroke keeps its own knobs and its own filament.</b> Change Size or the filament and only the
+        next strokes change.</li>
+      <li><b>Ctrl+Z</b> takes back the last stroke or point, not the decal you saved before.</li>
+      <li>The view stays put until you press ✓, because the strokes are pinned from that view.</li>
+      <li>A <b>Preview</b> box under the knobs draws the next stroke with the current settings.</li>
+    </ul>
+
+    <h2 id="effects" data-short="Effects">Brush effects</h2>
+
+    <p>
+      <b>Effect</b> opens a grid with a live picture of each one. An effect turns one stroke into many small
+      shapes (strands, dots, dashes), and the result is still a vector, so Clay, mirror and colours work on
+      it like on any decal. Try them here: draw on the canvas, pick a filament, pick an effect.
+    </p>
+
+    <div class="demo bleed" id="brushlab-demo">
+      <div class="demo__head">
+        <span class="demo__tag">demo</span>
+        <span class="demo__title">Brush effects, with a filament per stroke</span>
+        <span class="demo__hint">draw on the canvas</span>
+      </div>
+      <div class="demo__body" data-demo="brushlab">
+        <noscript><p>With JavaScript on, this is a small drawing canvas that runs the app's brush effects.</p></noscript>
+      </div>
+      <p class="demo__foot"><span class="seal">port</span> The strokes are built by a line by line JavaScript copy of
+        <code>stabilize</code>, <code>resample</code>, <code>widths</code> and <code>effect_pieces</code> from
+        <code>src/libslic3r/PaintStroke.hpp</code>, with the same seeded random numbers, so a stroke gives the same
+        strands as in the app. The mouse speed is yours, so widths depend on how you draw. Drawn on a flat canvas
+        in pixels; in the app ✓ projects them on the object.</p>
+    </div>
+
+    <table>
+      <thead><tr><th>Effect</th><th>What it does</th><th>Knobs</th></tr></thead>
+      <tbody>
+        <tr><td>Plain</td><td>the stroke as it is</td><td></td></tr>
+        <tr><td>Hair / fur</td><td>strands that grow out of the stroke</td><td>Density, Length, Root, Lean, Randomness</td></tr>
+        <tr><td>Stipple</td><td>the stroke made of dots</td><td>Density, Dot size, Edge falloff</td></tr>
+        <tr><td>Dashed</td><td>dashes and gaps along the stroke</td><td>Dash, Fill</td></tr>
+        <tr><td>Grass</td><td>blades standing up from the stroke</td><td>Density, Length, Root, Sway, Randomness</td></tr>
+        <tr><td>Calligraphy</td><td>a flat nib: thin along its angle, thick across</td><td>Nib angle, Thin stroke</td></tr>
+        <tr><td>Dither edge</td><td>a solid core whose edge breaks into dots</td><td>Halo, Density, Dot size, Falloff</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="layers">Two colours: layer the strokes</h3>
+    <p>
+      There is no special two colour brush. Paint hair in one filament, switch filament and paint a clean line
+      over it, then press ✓ once. You get one decal with one zone per filament. Where strokes overlap the
+      newest one wins, as with layers in a drawing app: before saving, each stroke loses what newer strokes of
+      another filament paint over it, so every zone keeps only what shows. You can still change the filament
+      of each zone later in the Decals list.
+    </p>
+
+    <div class="note note--warn">
+      <p class="note__t">Thin things may not print</p>
+      <p>A dot or a strand tip thinner than one line (about 0.4 mm on the object) is too small for the
+        printer, and the slicer may drop it. On a small Size, raise Dot size or Root, and check the slice.</p>
+    </div>
+
+    <h2 id="clay" data-short="Clay">Clay: give the drawing volume</h2>
+
+    <p>
+      The Clay tab takes any decal (a drawing, a loaded SVG, a shape) and builds real parts from it. Every
+      colour becomes its own part with that colour's filament, so it slices like any part of the object.
+      Parts rebuild by themselves when you move or edit the decal, in the background, with Cancel.
+    </p>
+
+    <div class="note note--key">
+      <span class="note__t">Living Clay</span>
+      <p style="margin:0">
+        The parts stay tied to the decal. Drag it to another spot, scale it, change a colour or its height,
+        and when you let go of the mouse the parts are built again where the decal is now. You keep painting
+        and the volume follows. When you are happy, <b>Detach</b> turns them into normal parts, or
+        <b>Freeze</b> keeps them as they are and lets other layers grow on top.
+      </p>
+    </div>
+
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td>Height, Height per colour</td><td>How far the part rises. The general Height scales all the colours.</td></tr>
+        <tr><td>Raise / Engrave / Off</td><td>Per colour. Engrave makes one negative part per decal, with a step where two depths meet.</td></tr>
+        <tr><td>Edge, Falloff</td><td>Flat, Chamfer or Round, and how soft. The edge follows the SVG exactly, so small text slices clean.</td></tr>
+        <tr><td>Surface smooth</td><td>Default 0.2 mm. Fills the grooves and sinks the bumps under the part, so the top doesn't copy every vein of the surface. The top always stays at least 0.4 mm over the real surface.</td></tr>
+        <tr><td>Anchor raise to engrave</td><td>A raised colour inside an engrave goes down to the bottom of the hole instead of floating.</td></tr>
+        <tr><td>Apply all engraves</td><td>Cuts every engrave into the object at once. If the fast boolean fails a slower one takes over, and a volume check makes sure nothing loses more than the engraves.</td></tr>
+        <tr><td>Freeze</td><td>The snowflake in the list. Those parts stay as they are and count as part of the object, so the Clay of other layers grows on top of them.</td></tr>
+        <tr><td>X-ray engrave</td><td>Shows the negative parts in see through red while you paint.</td></tr>
+        <tr><td>Detach</td><td>Turns the parts into normal parts.</td></tr>
+        <tr><td>Paint under</td><td>Off by default. Also paints the colour under the part, which can help a very thin part stick. Leave it off if the decal will move.</td></tr>
+        <tr><td>Repair parts</td><td>Off by default. Rebuilds each part from voxels, a safety net when one comes out odd.</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      If the surface under a decal has detail finer than your layer height can print, the panel warns you.
+      The step it looks at is 2.5 × the layer height of the object.
+    </p>
+
+    <h2 id="growth" data-short="Growth">How the part grows</h2>
+
+    <p>
+      A Clay part grows straight towards the view the decal was placed from. That is the honest choice:
+      growing along each triangle's normal folds over itself on a fine mesh. The catch is the sides of the
+      model. Where the surface is seen almost edge on, growing towards the view slides along the skin, and the
+      part ends up as a sheet thinner than one line. The slicer drops it, and since the part covers the paint
+      under it, that spot comes out empty. <b>Min thickness</b> fixes it: wherever the part is thinner than
+      0.42 mm measured along the surface normal, it is pushed out until it isn't.
+    </p>
+
+    <div class="demo bleed" id="claysection-demo">
+      <div class="demo__head">
+        <span class="demo__tag">diagram</span>
+        <span class="demo__title">A Clay part in cross section</span>
+        <span class="demo__hint">move Height and Surface smooth</span>
+      </div>
+      <div class="demo__body" data-demo="claysection">
+        <noscript><p>With JavaScript on, this draws a cross section of a Clay part over a surface with a vein and a steep side.</p></noscript>
+      </div>
+      <p class="demo__foot">A diagram, not a port: a 2D profile with the rules from <code>PaintClay.hpp</code>
+        written out simply (straight growth, a gaussian Surface smooth with the 0.4 mm cover, Min thickness along the
+        normal). The real tool works on the 3D mesh and has more to it (Follow surface, Stretch, the exact edge).</p>
+    </div>
+
+    <h3 id="advanced">Advanced growth</h3>
+    <table>
+      <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td>Follow surface</td><td>The part grows along the average shape of the surface within R mm, so it wraps the form like a thick sticker. Small R follows every turn; large R is almost straight. On uneven surfaces, go higher.</td></tr>
+        <tr><td>Stretch over gaps, Stretch slope</td><td>Where the surface jumps in depth as seen from the view, the part stretches over the jump like an elastic instead of leaving wedges. Works best on small jumps.</td></tr>
+        <tr><td>Min thickness</td><td>Default 0.42 mm, one line. Thickens the part along the normal where it would be too thin.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="note note--key">
+      <p class="note__t">Tip for hollows and complex shapes</p>
+      <p>Clay can only raise what the decal sees. For a decal that crosses a hollow (an eye socket, between
+        teeth), paint it first in <b>Vector</b> with Depth <b>Through</b> and <b>Through depth</b> 15 to 20 mm: the
+        colour reaches the walls and the bottom without coming out at the back. Then build the Clay with a small
+        Stretch and a high Follow surface. The paint covers what the Clay can't reach, and the drawing reads whole.</p>
+    </div>
+
+    <h2 id="surface" data-short="On surface">Draw on surface and Wrap <span class="badge badge--wip" style="font-size:.62rem;vertical-align:middle">experimental</span></h2>
+
+    <p>
+      Everything above is drawn on the screen and pinned from one view. <b>Draw on surface</b> (in Vector) and
+      <b>Wrap</b> (a Vector Brush tool) put the points <b>on</b> the object instead, so you can turn the view
+      between clicks and the line wraps round the model.
+    </p>
+    <ul>
+      <li>Click = corner. Click and drag = curve, Alt only bends the way out. Drag a point to slide it along the surface.</li>
+      <li>Draw on surface: click the first point for a closed shape, Enter for an open line with a Width.</li>
+      <li>Wrap: an open line, as wide as the brush Size in mm. The preview turns red under 0.4 mm.</li>
+      <li>Its Clay grows piece by piece round the object, each piece from its own direction.</li>
+      <li>For now it is meant for Clay: Apply paints it as seen from its middle, and Wrap has no effects yet.</li>
+    </ul>
+
+    <h2 id="painter" data-short="Painter">The painter, reorganised</h2>
+    <ul>
+      <li>One <b>Decals</b> list for Vector and Clay, each layer with an eye (show) and a lock (no moving by accident).</li>
+      <li>A small bar on the canvas over the selected decal: move, ✓ done, pencil (edit), drop (paint it on the object).
+        While you edit on screen a floating ✓ / ✕ accepts or cancels.</li>
+      <li><b>Merge N layers</b>: Shift + click two or more layers and merge them. Each colour keeps its filament.
+        Only for layers placed from almost the same view.</li>
+      <li><b>Duplicate</b> copies a layer right under it, same place and settings.</li>
+      <li>Mirror buttons are icons now: left/right, front/back, up/down.</li>
+    </ul>
+    <p>The rest of Vector mode (loading SVGs, decals, mirror brush) is on <a href="painter.html#vector">the painter page</a>.</p>
+
+    <h2 id="remesh" data-short="Remesh">Remesh keeps it all</h2>
+    <p>
+      <a href="construct.html#ac-remesh">Remesh</a> has two new options, both on by default. <b>Keep decals &amp; recipes</b>
+      carries the decals, their Vector and Clay settings, the mirror centre and the object's settings to the new mesh.
+      <b>Keep Clay &amp; extra parts</b> rebuilds only the plain parts and moves Clay parts, engraves and modifiers
+      over as they are. Repair a broken skull without losing a single decal.
+    </p>
+
+    <h2 id="catch" data-short="The catch">The catch</h2>
+    <ul>
+      <li>Clay is experimental. Check the slice of every part, above all near steep sides and hollows.</li>
+      <li>Merge works only for layers placed from almost the same view (15° or less).</li>
+      <li>When you leave the painter, Orca joins everything you did there into one undo step.</li>
+      <li>Draw on surface and Wrap are for Clay for now; their paint comes from one view.</li>
+      <li>Heavy models: the painter is lighter in 2.5.0, but a million triangle skull with many Clay parts still asks a lot of the machine.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="construct.html"><small>Previous</small><b>← Build &amp; fix</b></a>
+      <a class="is-next" href="primitives.html"><small>Next</small><b>Primitive Generator →</b></a>
+    </nav>
+
+    <p class="small muted">Covers the painter's Vector Brush, brush effects, Clay Tool and Draw on surface, release 2.5.0
+      (<code>NEOTKOCM_RELEASE_2_50.md</code>). Quill by Gabriel Suchowolski (microbians), MIT.</p>
+  </main>
+</div>
+</div>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+<script>
+/* ---------------------------------------------------------------- PaintStroke.hpp, transcribed
+   stabilize · resample · widths · effect_pieces. Same order of operations and the same 32 bit LCG
+   (seeded by where the stroke starts), so the same input gives the same pieces as the C++. */
+var Stroke = (function () {
+  var FX = ['None', 'Hair', 'Stipple', 'Dashed', 'Grass', 'Calligraphy', 'TwoTone'];
+  function params(o) {
+    var P = { size: 14, stream: 35, tin: 15, tout: 30, minw: 25, speed: 45, step: 1.0, width: 'Speed',
+              inertia: 40, drops: 0, fx: 'None', fx_amount: 50, fx_len: 300, fx_jit: 40, fx_angle: 25, fx_dot: 40 };
+    for (var k in o) P[k] = o[k];
+    return P;
+  }
+  function stabilize(P, raw) {
+    var out = []; if (!raw.length) return out;
+    var k = 1 - P.stream / 100 * 0.92, x = raw[0].x, y = raw[0].y;
+    raw.forEach(function (q) { x += (q.x - x) * k; y += (q.y - y) * k; out.push({ x: x, y: y, p: q.p, t: q.t }); });
+    var last = raw[raw.length - 1];
+    for (var i = 0; i < 6 && P.stream > 0; ++i) { x += (last.x - x) * 0.5; y += (last.y - y) * 0.5; out.push({ x: x, y: y, p: last.p, t: last.t }); }
+    return out;
+  }
+  function resample(pts, step) {
+    if (pts.length < 2) return pts.slice();
+    var out = [pts[0]], carry = 0;
+    for (var i = 1; i < pts.length; ++i) {
+      var a = pts[i - 1], b = pts[i], d = Math.hypot(b.x - a.x, b.y - a.y), s = step - carry;
+      while (s <= d) {
+        var f = s / d;
+        out.push({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, p: a.p + (b.p - a.p) * f, t: a.t + (b.t - a.t) * f });
+        s += step;
+      }
+      carry = d - (s - step);
+    }
+    var L = pts[pts.length - 1], o = out[out.length - 1];
+    if (Math.hypot(L.x - o.x, L.y - o.y) > step * 0.3) out.push(L);
+    return out;
+  }
+  function lcg(x, y) {
+    var seed = ((Math.floor(x * 7 + y * 13) & 0x7fffffff) | 1) >>> 0;
+    return function () { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return (seed >>> 8) / 16777216; };
+  }
+  function widths(P, pts) {
+    var n = pts.length, w = new Array(n), minf = P.minw / 100, i;
+    for (i = 0; i < n; ++i) {
+      var j = i >= 3 ? i - 3 : 0, dt = Math.max(1, pts[i].t - pts[j].t);
+      var v = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) / dt;
+      w[i] = Math.max(minf, 1 - (P.speed / 100) * Math.min(1, v / 2.5));
+    }
+    if (P.width === 'Constant') w.fill(1);
+    else if (P.width === 'Ink' && n > 0) {
+      var Ln = Math.max(1, P.size * (0.2 + P.inertia / 100 * 6)), f0 = w[0];
+      for (i = 0; i < n; ++i) {
+        var ds = i ? Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y) : 0;
+        f0 += (w[i] - f0) * (1 - Math.exp(-ds / Ln)); w[i] = f0;
+      }
+    }
+    if (P.drops > 0 && n > 0) {
+      var rnd = lcg(pts[0].x, pts[0].y), bump = 0, acc = 0;
+      for (i = 0; i < n; ++i) {
+        var d2 = i ? Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y) : 0;
+        bump *= Math.exp(-d2 / P.size); acc += d2;
+        while (acc >= P.size) { acc -= P.size; if (rnd() * 100 < P.drops) bump = Math.max(bump, 0.3 + 0.7 * rnd()); }
+        w[i] *= 1 + bump;
+      }
+    }
+    for (var it = 0; it < 4; ++it) for (i = 1; i + 1 < n; ++i) w[i] = (w[i - 1] + 2 * w[i] + w[i + 1]) / 4;
+    var len = 0, accs = [0];
+    for (i = 1; i < n; ++i) { len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y); accs.push(len); }
+    var ti = len * P.tin / 100, to = len * P.tout / 100;
+    for (i = 0; i < n; ++i) {
+      var f = 1;
+      if (ti > 0 && accs[i] < ti) f = Math.min(f, accs[i] / ti);
+      if (to > 0 && len - accs[i] < to) f = Math.min(f, (len - accs[i]) / to);
+      f = f * f * (3 - 2 * f);
+      w[i] = P.size * Math.max(w[i] * f, minf * 0.35 * (f > 0 ? 1 : 0.6));
+    }
+    return w;
+  }
+  function pieces(P, raw) {
+    var out = []; if (!raw.length) return out;
+    var c = resample(stabilize(P, raw), P.step), w = widths(P, c), n = c.length;
+    if (P.fx === 'None' || n < 2) { out.push({ c: c, w: w }); return out; }
+    var cap = 4000, rnd = lcg(raw[0].x, raw[0].y);
+    var S = Math.max(1, P.size), jit = P.fx_jit / 100, deg = Math.PI / 180, i;
+    function tan(i) {
+      var a = c[i ? i - 1 : 0], b = c[Math.min(n - 1, i + 1)], tx = b.x - a.x, ty = b.y - a.y, l = Math.hypot(tx, ty) || 1;
+      return [tx / l, ty / l];
+    }
+    var s = new Array(n); s[0] = 0;
+    for (i = 1; i < n; ++i) s[i] = s[i - 1] + Math.hypot(c[i].x - c[i - 1].x, c[i].y - c[i - 1].y);
+    function strand(x, y, dx, dy, len, root, bend, tip) {
+      var pc = { c: [], w: [] }, N = Math.max(4, Math.trunc(len / 2));
+      for (var j = 0; j <= N; ++j) {
+        var u = j / N;
+        pc.c.push({ x: x, y: y }); pc.w.push(Math.max(root * tip, root * (1 - u * u * (2 - tip))));
+        var cb = Math.cos(bend), sb = Math.sin(bend), nx = dx * cb - dy * sb, ny = dx * sb + dy * cb;
+        dx = nx; dy = ny; x += dx * len / N; y += dy * len / N;
+      }
+      out.push(pc);
+    }
+    if (P.fx === 'Calligraphy') {
+      var pc = { c: c, w: w.slice() }, thin = P.fx_dot / 100, nib = P.fx_angle * deg;
+      for (i = 0; i < n; ++i) { var t = tan(i); pc.w[i] *= thin + (1 - thin) * Math.abs(Math.sin(Math.atan2(t[1], t[0]) - nib)); }
+      out.push(pc); return out;
+    }
+    var acc = 0, dot, per, t2;
+    if (P.fx === 'TwoTone') {
+      out.push({ c: c, w: w });
+      dot = S * P.fx_dot / 100; var halo = S * P.fx_len / 100; per = P.fx_amount / 100 * 0.25;
+      var fall = 0.3 + 3.7 * jit;
+      for (i = 1; i < n; ++i) {
+        var env = w[i] / S, hb = halo * env;
+        acc += (s[i] - s[i - 1]) * per * (2 * hb / Math.max(1e-6, dot));
+        t2 = tan(i);
+        while (acc >= 1 && out.length < cap) {
+          acc -= 1;
+          var u = rnd();
+          if (rnd() > Math.pow(1 - u, fall)) continue;
+          var side = rnd() < 0.5 ? -1 : 1, off = side * (w[i] / 2 + u * hb), along = (rnd() - 0.5) * 2 * P.step;
+          var d = dot * (0.7 + 0.6 * rnd()) * Math.max(0.4, env);
+          out.push({ c: [{ x: c[i].x - t2[1] * off + t2[0] * along, y: c[i].y + t2[0] * off + t2[1] * along }], w: [d] });
+        }
+      }
+      return out;
+    }
+    if (P.fx === 'Dashed') {
+      var dash = Math.max(2, S * P.fx_len / 100), gap = dash * (1.05 - P.fx_amount / 100);
+      i = 0;
+      while (i < n) {
+        var s0 = s[i], p2 = { c: [], w: [] };
+        for (; i < n && s[i] - s0 <= dash; ++i) { p2.c.push(c[i]); p2.w.push(w[i]); }
+        if (p2.c.length >= 2) out.push(p2);
+        while (i < n && s[i] - s0 < dash + gap) ++i;
+      }
+      return out;
+    }
+    if (P.fx === 'Stipple') {
+      dot = S * P.fx_dot / 100; per = P.fx_amount / 100 * 0.25;
+      for (i = 1; i < n; ++i) {
+        acc += (s[i] - s[i - 1]) * per * (w[i] / dot);
+        t2 = tan(i);
+        while (acc >= 1 && out.length < cap) {
+          acc -= 1;
+          var u2 = rnd() * 2 - 1;
+          if (rnd() < jit * Math.abs(u2)) continue;
+          var off2 = u2 * w[i] / 2, al2 = (rnd() - 0.5) * 2 * P.step, d3 = dot * (1 - 0.5 * jit * rnd());
+          out.push({ c: [{ x: c[i].x - t2[1] * off2 + t2[0] * al2, y: c[i].y + t2[0] * off2 + t2[1] * al2 }], w: [d3] });
+        }
+      }
+      return out;
+    }
+    var gp = Math.max(1, S * (1.2 - P.fx_amount / 100 * 1.05) * (P.fx === 'Grass' ? 0.6 : 0.35));
+    for (var at = 0; at <= s[n - 1] && out.length < cap; at += gp * (0.7 + 0.6 * rnd())) {
+      i = 0;
+      while (i + 1 < n && s[i + 1] < at) ++i;
+      var tt = tan(i), tx = tt[0], ty = tt[1], en = w[i] / S;
+      if (en <= 0.02) continue;
+      var len = S * P.fx_len / 100 * (1 - 0.6 * jit * rnd()) * Math.sqrt(en);
+      var root = Math.max(1, S * P.fx_dot / 100 * en);
+      if (P.fx === 'Hair') {
+        var of3 = (rnd() - 0.5) * w[i], sd = of3 >= 0 ? 1 : -1;
+        var a = (P.fx_angle + (rnd() * 2 - 1) * 30 * jit) * deg;
+        var dx = tx * Math.cos(a) - ty * sd * Math.sin(a), dy = ty * Math.cos(a) + tx * sd * Math.sin(a);
+        strand(c[i].x - ty * of3, c[i].y + tx * of3, dx, dy, len, root, sd * (0.02 + 0.06 * jit * rnd()), 0.15);
+      } else {
+        var a2 = (rnd() * 2 - 1) * P.fx_angle * deg, nx = -ty, ny = tx;
+        var gx = nx * Math.cos(a2) + tx * Math.sin(a2), gy = ny * Math.cos(a2) + ty * Math.sin(a2);
+        strand(c[i].x, c[i].y, -gx, -gy, len, root, (rnd() - 0.5) * 0.12 * (0.3 + jit), 0.1);
+      }
+    }
+    return out;
+  }
+  return { FX: FX, params: params, pieces: pieces };
+})();
+
+/* ---------------------------------------------------------------- brushlab */
+Tour.demo('brushlab', function (host) {
+  var el = Tour.el;
+  var FIL = Optics.DEFAULT_FILAMENTS;
+  var NAMES = [['None', 'Plain'], ['Hair', 'Hair / fur'], ['Stipple', 'Stipple'], ['Dashed', 'Dashed'],
+               ['Grass', 'Grass'], ['Calligraphy', 'Calligraphy'], ['TwoTone', 'Dither edge']];
+  var S = { fx: 'Hair', size: 14, fil: 2, strokes: [], cur: null };
+
+  // a demo stroke like the app's preview: a wave, slow at the ends, so Speed thinning shows
+  function wave(w, h, y0, amp, ph) {
+    var pts = [], N = 90, t = 0;
+    for (var i = 0; i <= N; ++i) {
+      var u = i / N, sp = 0.35 + 1.4 * Math.sin(Math.PI * u);
+      t += 6 / sp;
+      pts.push({ x: w * (0.08 + 0.84 * u), y: y0 + amp * Math.sin(u * Math.PI * 2 + ph), p: 1, t: t });
+    }
+    return pts;
+  }
+  function seed(w, h) {
+    S.strokes = [
+      { raw: wave(w, h, h * 0.55, h * 0.16, 0.3), P: Stroke.params({ size: 16, fx: S.fx === 'None' ? 'Hair' : S.fx }), fil: 2 },
+      { raw: wave(w, h, h * 0.55, h * 0.16, 0.3), P: Stroke.params({ size: 6, fx: 'None', width: 'Constant' }), fil: 3 }
+    ];
+  }
+
+  function drawPieces(ctx, pcs, col, plain) {
+    ctx.fillStyle = col;
+    pcs.forEach(function (pc) {
+      var c = pc.c, w = pc.w, round = plain || c.length === 1;
+      for (var i = 0; i < c.length; ++i) {
+        if (round || i === 0 || i === c.length - 1) { ctx.beginPath(); ctx.arc(c[i].x, c[i].y, Math.max(0.3, w[i] / 2), 0, Math.PI * 2); ctx.fill(); }
+        if (i) {
+          var dx = c[i].x - c[i - 1].x, dy = c[i].y - c[i - 1].y, l = Math.hypot(dx, dy);
+          if (l < 1e-3) continue;
+          var nx = -dy / l, ny = dx / l, ha = w[i - 1] / 2, hb = w[i] / 2;
+          ctx.beginPath();
+          ctx.moveTo(c[i - 1].x + nx * ha, c[i - 1].y + ny * ha); ctx.lineTo(c[i].x + nx * hb, c[i].y + ny * hb);
+          ctx.lineTo(c[i].x - nx * hb, c[i].y - ny * hb); ctx.lineTo(c[i - 1].x - nx * ha, c[i - 1].y - ny * ha);
+          ctx.closePath(); ctx.fill();
+        }
+      }
+    });
+  }
+
+  var cv = Tour.canvas(el('div.bl__cv'), function (ctx, w, h) {
+    ctx.fillStyle = Tour.token('--surface-2'); ctx.fillRect(0, 0, w, h);
+    if (!S.strokes.length && !S.cur) seed(w, h);
+    var all = S.strokes.concat(S.cur ? [S.cur] : []);
+    all.forEach(function (st) {
+      if (!st.pcs || st.dirty) { st.pcs = Stroke.pieces(st.P, st.raw); st.dirty = false; }
+      drawPieces(ctx, st.pcs, FIL[st.fil].hex, st.P.fx === 'None');
+    });
+  }, { height: 300 });
+
+  var t0 = 0;
+  Tour.draggable(cv.canvas, {
+    onDown: function (p) {
+      t0 = performance.now();
+      S.cur = { raw: [{ x: p.x, y: p.y, p: 1, t: 0 }], P: Stroke.params({ size: S.size, fx: S.fx }), fil: S.fil, dirty: true };
+      cv.render();
+    },
+    onMove: function (p) {
+      if (!S.cur) return;
+      S.cur.raw.push({ x: p.x, y: p.y, p: 1, t: performance.now() - t0 }); S.cur.dirty = true; cv.render();
+    },
+    onUp: function () { if (S.cur) { S.strokes.push(S.cur); S.cur = null; cv.render(); } }
+  });
+
+  var fxSel = Tour.select({ label: 'Effect', value: S.fx, options: NAMES, onChange: function (v) { S.fx = v; } });
+  var szS = Tour.slider({ label: 'Size', min: 4, max: 40, step: 1, value: S.size, format: function (v) { return v + ' px'; },
+    onInput: function (v) { S.size = v; } });
+
+  var sw = el('div.bl__sw');
+  var btns = FIL.map(function (f, i) {
+    var b = el('button', { type: 'button', title: f.name, 'aria-label': f.name, 'aria-pressed': String(i === S.fil),
+      style: 'background:' + f.hex,
+      onclick: function () { S.fil = i; btns.forEach(function (x, k) { x.setAttribute('aria-pressed', String(k === i)); }); } });
+    return b;
+  });
+  btns.forEach(function (b) { sw.appendChild(b); });
+  var clear = el('button.bl__btn', { type: 'button', text: 'Clear', onclick: function () { S.strokes = []; S.cur = null; S.cleared = true; cv.render(); } });
+
+  // keep the canvas empty after Clear (seed only fills it the first time)
+  var draw0 = seed; seed = function (w, h) { if (!S.cleared) draw0(w, h); };
+
+  host.appendChild(el('div.bl', null, [
+    cv.canvas.parentNode || cv.canvas,
+    el('div.bl__row', null, [
+      fxSel, szS,
+      el('div', null, [el('div.bl__lab', { text: 'Filament of the next stroke' }), sw]),
+      el('div', null, [clear])
+    ])
+  ]));
+
+  var ORDER = ['Hair', 'Stipple', 'Dashed', 'Grass', 'Calligraphy', 'TwoTone'];
+  Tour.attract({
+    host: host, period: 12000,
+    hint: 'playing · touch anything to take over', idleHint: 'draw on the canvas',
+    onFrame: function (k, phase) {
+      var fx = ORDER[Math.min(ORDER.length - 1, Math.floor(phase * ORDER.length))];
+      if (S.strokes[0] && S.strokes[0].P.fx !== fx) { S.strokes[0].P = Stroke.params({ size: 16, fx: fx }); S.strokes[0].dirty = true; }
+      S.fx = fx; fxSel.querySelector('select').value = fx;
+    },
+    render: function () { cv.render(); }
+  });
+  cv.render();
+});
+
+/* ---------------------------------------------------------------- claysection (diagram) */
+Tour.demo('claysection', function (host) {
+  var el = Tour.el;
+  var S = { H: 1.0, smooth: 0.2, minOn: true };
+  var X0 = 0, X1 = 40, D0 = 4, D1 = 34;
+  function surf(x) {   // mm: a gentle dome, a vein, and a steep side on the right
+    return 3 + 0.8 * Math.sin(x / 9) + 0.6 * Math.exp(-Math.pow((x - 13) / 0.7, 2)) + (x > 28 ? 0.45 * Math.pow(x - 28, 2) : 0);
+  }
+  function blur(xs, ys, sig) {
+    if (sig <= 0) return ys.slice();
+    return xs.map(function (x) {
+      var a = 0, wsum = 0;
+      for (var j = 0; j < xs.length; ++j) { var d = xs[j] - x, wt = Math.exp(-d * d / (2 * sig * sig)); a += wt * ys[j]; wsum += wt; }
+      return a / wsum;
+    });
+  }
+  function model() {
+    var xs = [], ys = [], N = 360, i;
+    for (i = 0; i <= N; ++i) { var x = D0 + (D1 - D0) * i / N; xs.push(x); ys.push(surf(x)); }
+    var b = blur(xs, ys, S.smooth), pts = [], thin = 0, minT = 1e9;
+    for (i = 0; i <= N; ++i) {
+      var top = S.smooth > 0 ? Math.max(b[i] + S.H, ys[i] + Math.min(0.4, S.H)) : ys[i] + S.H;
+      var dx = 1e-3, sl = (surf(xs[i] + dx) - surf(xs[i] - dx)) / (2 * dx), nl = Math.hypot(1, sl);
+      var nx = -sl / nl, ny = 1 / nl;              // surface normal
+      var t = (top - ys[i]) * ny;                  // thickness along the normal (growth is straight up)
+      var need = Math.min(0.42, S.H), px = xs[i], py = top;
+      if (S.minOn && t < need) { px = xs[i] + nx * need; py = ys[i] + ny * need; t = need; }
+      if (t < 0.42 - 1e-6) thin++;
+      minT = Math.min(minT, t);
+      pts.push({ x: px, y: py, sx: xs[i], sy: ys[i], thin: t < 0.42 - 1e-6 });
+    }
+    return { pts: pts, thinPct: 100 * thin / pts.length, minT: minT };
+  }
+  var read = el('p.cs__read');
+  var cv = Tour.canvas(el('div', { style: 'border:1px solid var(--rule);border-radius:6px;overflow:hidden' }), function (ctx, w, h) {
+    var m = model(), ymax = 22;
+    var sc = Math.min((w - 20) / (X1 - X0), (h - 20) / ymax), ox = (w - (X1 - X0) * sc) / 2;
+    function X(x) { return ox + (x - X0) * sc; }
+    function Y(y) { return h - 10 - y * sc; }
+    ctx.fillStyle = Tour.token('--surface-2'); ctx.fillRect(0, 0, w, h);
+    // the object
+    ctx.beginPath(); ctx.moveTo(X(X0), Y(0));
+    for (var x = X0; x <= 35; x += 0.05) ctx.lineTo(X(x), Y(surf(x)));
+    ctx.lineTo(X(35), Y(0)); ctx.closePath();
+    ctx.fillStyle = Tour.isDark() ? '#3a3f47' : '#c9ccd1'; ctx.fill();
+    // the Clay part
+    var p = m.pts;
+    ctx.beginPath(); ctx.moveTo(X(p[0].sx), Y(p[0].sy));
+    p.forEach(function (q) { ctx.lineTo(X(q.x), Y(q.y)); });
+    for (var i = p.length - 1; i >= 0; --i) ctx.lineTo(X(p[i].sx), Y(p[i].sy));
+    ctx.closePath(); ctx.fillStyle = Optics.DEFAULT_FILAMENTS[2].hex; ctx.fill();
+    // too thin to print
+    ctx.strokeStyle = Tour.token('--alert'); ctx.lineWidth = 3;
+    p.forEach(function (q, k) {
+      if (!q.thin || !k) return;
+      ctx.beginPath(); ctx.moveTo(X(p[k - 1].x), Y(p[k - 1].y)); ctx.lineTo(X(q.x), Y(q.y)); ctx.stroke();
+    });
+    // the view direction
+    ctx.strokeStyle = Tour.token('--ink-faint'); ctx.fillStyle = Tour.token('--ink-faint'); ctx.lineWidth = 1.2;
+    [6, 18].forEach(function (x) {
+      ctx.beginPath(); ctx.moveTo(X(x), Y(21)); ctx.lineTo(X(x), Y(15)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(X(x), Y(21) - 6); ctx.lineTo(X(x) - 4, Y(21) + 2); ctx.lineTo(X(x) + 4, Y(21) + 2); ctx.closePath(); ctx.fill();
+    });
+    ctx.font = '11px ' + Tour.token('--mono'); ctx.fillStyle = Tour.token('--ink');
+    ctx.fillText('grows straight towards the view', X(7), Y(18));
+    ctx.fillText('vein', X(12.2), Y(surf(13) + S.H + 1.2));
+    ctx.fillText('steep side', X(24.5), Y(11));
+    read.innerHTML = 'thinnest across the surface <b>' + m.minT.toFixed(2) + ' mm</b><br>' +
+      (m.thinPct > 0.5 ? '<span class="air">' + m.thinPct.toFixed(0) + ' % thinner than one line (0.42 mm): the slicer may drop it</span>'
+                       : '<span class="hit">every part is at least one line thick</span>');
+  }, { height: 300 });
+
+  var sH = Tour.slider({ label: 'Height', min: 0.2, max: 3, step: 0.1, value: S.H, format: function (v) { return v.toFixed(1) + ' mm'; },
+    onInput: function (v) { S.H = v; cv.render(); } });
+  var sS = Tour.slider({ label: 'Surface smooth', min: 0, max: 2, step: 0.05, value: S.smooth, format: function (v) { return v.toFixed(2) + ' mm'; },
+    onInput: function (v) { S.smooth = v; cv.render(); } });
+  var tM = Tour.toggle({ label: 'Min thickness 0.42 mm', value: S.minOn, onChange: function (v) { S.minOn = v; cv.render(); } });
+
+  host.appendChild(el('div.bl', null, [cv.canvas.parentNode || cv.canvas, el('div.bl__row', null, [sH, sS, tM]), read]));
+
+  Tour.attract({
+    host: host, period: 9000,
+    hint: 'playing · touch anything to take over', idleHint: 'move Height and Surface smooth',
+    onFrame: function (k) { S.smooth = Math.round(k * 1.2 * 20) / 20; sS.set(S.smooth); },
+    render: function () { cv.render(); }
+  });
+  cv.render();
+});
+</script>
+</body>
+</html>

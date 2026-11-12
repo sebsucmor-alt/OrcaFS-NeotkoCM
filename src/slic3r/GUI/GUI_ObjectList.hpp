@@ -290,8 +290,18 @@ public:
     // NEOTKO_CONSTRUCT_TAG s363 — adds `mesh_world` (already where it should be seen, in world
     // coordinates) as a model part of the object, without moving anything else.
     // s367: returns the new part (nullptr when nothing was added).
+    // NEOTKO_PRIMGEN_TAG 5-nov-2026 — Primitive Generator: add `mesh` (mm, any placement) as a new
+    // object (type INVALID) or as a part / negative / modifier of the selected object, placed like
+    // Add Primitive does. Stores `recipe` on the new volume. Returns it, or nullptr.
+    ModelVolume*        neotko_add_primitive(TriangleMesh mesh, const std::string &name, ModelVolumeType type,
+                                             const std::string &recipe);
+    // NEOTKO_PRIMGEN_TAG — a multi-part OpenSCAD shape: ONE new object, one part per piece, kept
+    // where the script puts them. `extruders` 1-based (0 = the object's). Returns the object.
+    struct NeoPrimPart { std::string name; TriangleMesh mesh; int extruder = 0; };
+    ModelObject*        neotko_add_primitive_parts(std::vector<NeoPrimPart> parts, const std::string &name,
+                                                   const std::string &recipe, const std::string &script);
     ModelVolume*        neotko_add_mesh_part(int obj_idx, TriangleMesh mesh_world, const std::string &name,
-                                             bool negative = false); // NEOTKO_HOLLOW_TAG: a negative part
+                                             bool negative = false, int extruder = -1); // NEOTKO_HOLLOW_TAG: a negative part; extruder >= 0 overrides the object's (Clay)
     // BBS
     void                switch_to_object_process();
     bool                del_object(const int obj_idx, bool refresh_immediately = true);

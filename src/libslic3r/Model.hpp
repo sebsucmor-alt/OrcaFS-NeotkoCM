@@ -1,6 +1,7 @@
 #ifndef slic3r_Model_hpp_
 #define slic3r_Model_hpp_
 
+#include "PaintStroke.hpp"   // NEOTKO_SURFACE_TAG (Wrap keeps the brush knobs)
 #include "libslic3r.h"
 #include "enum_bitmask.hpp"
 #include "Geometry.hpp"
@@ -398,6 +399,91 @@ struct PaintDecalGroups
 PaintDecalGroups paint_decal_groups(const std::string& svg_data, const std::vector<PaintDecalZone>& zones,
                                     const std::vector<PaintDecalPart>& parts);
 
+// NEOTKO_CLAY_TAG — Clay Tool (2_50): the decal raised over the surface as parts of their own, one
+// per visible colour, instead of (or as well as) painting it. Built in the object frame by
+// paint_clay_bake() (PaintClay.cpp) and added as normal parts named "Clay · <decal> · <colour>".
+struct PaintDecalClay
+{
+    bool   on          = false;
+    double height      = 0.4;    // mm
+    int    profile     = 2;      // 0 Flat, 1 Chamfer, 2 Round, 3 Dome (clay::Profile)
+    double falloff     = 0.6;    // mm, edge falloff (not Flat / Dome)
+    bool   paint_under = false;  // also paint the colour under the part, so it melts in
+    // Raised colours over an engraved one reach down to its floor (+0.1 mm), so they don't float once the
+    // engrave is cut out.
+    bool   anchor      = true;
+    // Grow straight along the decal's view (a stamp): over grooves and sharp edges it copies them but
+    // cannot fold. false = along the surface normals (the old way, folds over grooves).
+    bool   straight    = true;
+    // mm (gaussian); > 0 fills the dips and grooves under the part before raising it. 0 = off.
+    double smooth_surface = 0.2;   // 0.1-0.3 rounds veins/edges under the decal softly (30-oct)
+    // Straight only (advanced): growth follows the surface normal averaged over this radius, mm (0 = the view);
+    // and the top stretches over depth jumps (rim -> socket) up to stretch mm, falling at stretch_slope (1 = 45°).
+    double follow_surface = 0.;
+    double stretch        = 0.;
+    double stretch_slope  = 1.;
+    // Straight: least thickness measured along the surface normal, mm (0 = off). Where the surface is seen
+    // edge-on from the card, growing towards the view slides along the skin and leaves a sliver the slicer drops.
+    double min_thick      = 0.42;
+    int    smooth      = 20;     // passes smoothing the direction the top is raised along (bumps of the surface fade)
+    // Height per colour group (index = the decal's group); <= 0 or missing = `height`.
+    std::vector<double> group_height;
+    // What each colour group does (index = group; missing = Raise). Engrave sinks it `height_of()` deep.
+    enum Mode { Raise = 0, Engrave = 1, Off = 2 };
+    std::vector<int> group_mode;
+    // 3 (3-nov): frozen = its parts stay as they are (the decal is locked) and count as part of the
+    // object: other decals' Clay grows on top of them. frozen_was_locked = the lock before freezing.
+    bool frozen            = false;
+    bool frozen_was_locked = false;
+
+    double height_of(size_t group) const { return group < group_height.size() && group_height[group] > 0. ? group_height[group] : height; }
+    Mode   mode_of(size_t group) const { return group < group_mode.size() && group_mode[group] >= 0 && group_mode[group] <= 2 ? Mode(group_mode[group]) : Raise; }
+
+    template<class Archive> void serialize(Archive& ar) { ar(on, height, profile, falloff, paint_under, anchor, straight, smooth_surface, follow_surface, stretch, stretch_slope, min_thick, smooth, group_height, group_mode, frozen, frozen_was_locked); }
+    bool operator==(const PaintDecalClay& o) const
+    {
+        return on == o.on && height == o.height && profile == o.profile && falloff == o.falloff && paint_under == o.paint_under && anchor == o.anchor && straight == o.straight && smooth_surface == o.smooth_surface &&
+               follow_surface == o.follow_surface && stretch == o.stretch && stretch_slope == o.stretch_slope && min_thick == o.min_thick &&
+               smooth == o.smooth && group_height == o.group_height && group_mode == o.group_mode &&
+               frozen == o.frozen && frozen_was_locked == o.frozen_was_locked;
+    }
+    bool operator!=(const PaintDecalClay& o) const { return !(*this == o); }
+};
+
+// NEOTKO_SURFACE_TAG — On surface (2_50): a Line drawn click by click ON the object. Each click sits on
+// the surface (object frame) with its normal; out / in are its Bezier handles (in = 0 for a corner). The
+// dense curve is not stored: it is pasted again from the clicks (paint_surface_curve), so it follows
+// the mesh even after a Remesh. Empty clicks = an ordinary decal projected from its view.
+struct PaintSurfaceClick
+{
+    std::array<double, 3> p   { 0., 0., 0. };
+    std::array<double, 3> n   { 0., 0., 1. };
+    std::array<double, 3> out { 0., 0., 0. };
+    std::array<double, 3> in  { 0., 0., 0. };
+    template<class Archive> void serialize(Archive& ar) { ar(p[0], p[1], p[2], n[0], n[1], n[2], out[0], out[1], out[2], in[0], in[1], in[2]); }
+    bool operator==(const PaintSurfaceClick& o) const { return p == o.p && n == o.n && out == o.out && in == o.in; }
+};
+struct PaintSurfacePath
+{
+    std::vector<PaintSurfaceClick> clicks;
+    bool   closed = false;   // closed = a shape raised from its outline; open = a ribbon `width` wide
+    double width  = 2.;      // mm, open lines
+    // Wrap (Vector Brush): an open line whose width follows the brush knobs (taper, min width,
+    // drops...), `width` = the brush Size in mm. false = Draw on surface (Vector), even width.
+    bool           wrap = false;
+    stroke::Params brush;
+    bool   empty() const { return clicks.size() < 2; }
+    template<class Archive> void serialize(Archive& ar)
+    {
+        ar(clicks, closed, width, wrap);
+        int e = int(brush.engine), c = int(brush.curve), w = int(brush.width);
+        ar(e, brush.size, brush.stream, c, brush.tin, brush.tout, brush.minw, brush.speed, brush.step, brush.simplify, w, brush.inertia, brush.drops);
+        brush.engine = stroke::Engine(e); brush.curve = stroke::Curve(c); brush.width = stroke::Width(w);
+    }
+    bool operator==(const PaintSurfacePath& o) const { return clicks == o.clicks && closed == o.closed && width == o.width && wrap == o.wrap && brush == o.brush; }
+    bool operator!=(const PaintSurfacePath& o) const { return !(*this == o); }
+};
+
 struct PaintDecal
 {
     std::string           name;
@@ -410,6 +496,7 @@ struct PaintDecal
     std::array<double, 4> lin { 1., 0., 0., 1. };   // row major 2x2
     std::array<double, 2> off { 0., 0. };
     bool                  through = false;
+    double                through_depth = 0.;   // through only: paint at most this deep behind the first surface, mm (0 = all the way)
     std::vector<PaintDecalZone> zones;
     bool                  hidden = false;      // card not drawn, skipped by "Apply all"
     bool                  locked = false;      // cannot be edited or deleted
@@ -421,6 +508,8 @@ struct PaintDecal
     int                   mirror = 0;
     bool                  mirror_readable = false;   // copies placed mirrored but not flipped (text)
     std::vector<PaintDecalPart> parts;                // shapes set apart from their colour
+    PaintDecalClay        clay;                       // NEOTKO_CLAY_TAG
+    PaintSurfacePath      surface;                    // NEOTKO_SURFACE_TAG
 
     // 4x4 projective map from an OBJECT-frame point p to the SVG frame: with h = M * [p; 1],
     // svg = (h.x / h.w, h.y / h.w), valid while h.w > 0 (in front of the eye). Row 2 is unused.
@@ -438,17 +527,18 @@ struct PaintDecal
     template<class Archive> void serialize(Archive& ar)
     {
         ar(name, svg_data, centre[0], centre[1], centre[2], dir[0], dir[1], dir[2], up[0], up[1], up[2],
-           perspective, eye_dist, lin[0], lin[1], lin[2], lin[3], off[0], off[1], through, zones, hidden, locked);
+           perspective, eye_dist, lin[0], lin[1], lin[2], lin[3], off[0], off[1], through, through_depth, zones, hidden, locked);
         for (double& v : warp)
             ar(v);
-        ar(mirror, mirror_readable, parts);
+        ar(mirror, mirror_readable, parts, clay, surface);
     }
     bool operator==(const PaintDecal& o) const
     {
         return name == o.name && svg_data == o.svg_data && centre == o.centre && dir == o.dir && up == o.up &&
                perspective == o.perspective && eye_dist == o.eye_dist && lin == o.lin && off == o.off &&
-               through == o.through && zones == o.zones && hidden == o.hidden && locked == o.locked &&
-               warp == o.warp && mirror == o.mirror && mirror_readable == o.mirror_readable && parts == o.parts;
+               through == o.through && through_depth == o.through_depth && zones == o.zones && hidden == o.hidden && locked == o.locked &&
+               warp == o.warp && mirror == o.mirror && mirror_readable == o.mirror_readable && parts == o.parts &&
+               clay == o.clay && surface == o.surface;
     }
     bool operator!=(const PaintDecal& o) const { return !(*this == o); }
 };
@@ -516,11 +606,12 @@ struct ColorStitchStickerColor
     // vista, de ABAJO a ARRIBA, en mm. Vacía = este color no tiene receta de profundidad (va con profile_id).
     std::vector<ColorStitchDepthBlock> depth_blocks;
     float depth_de = -1.f;   // ΔE2000 predicho de esa receta (solo UI); <0 = sin calcular
+    int   depth_rgb = -1;    // 11-nov-2026 — color PREDICHO de esa receta (0xRRGGBB, vista previa); <0 = sin calcular
 
-    template<class Archive> void serialize(Archive& ar) { ar(rgb, profile_id, hidden, band_profiles, zone, depth_blocks, depth_de); }
+    template<class Archive> void serialize(Archive& ar) { ar(rgb, profile_id, hidden, band_profiles, zone, depth_blocks, depth_de, depth_rgb); }
     bool operator==(const ColorStitchStickerColor& o) const
         { return rgb == o.rgb && profile_id == o.profile_id && hidden == o.hidden && band_profiles == o.band_profiles
-              && zone == o.zone && depth_blocks == o.depth_blocks && depth_de == o.depth_de; }
+              && zone == o.zone && depth_blocks == o.depth_blocks && depth_de == o.depth_de && depth_rgb == o.depth_rgb; }
     bool operator!=(const ColorStitchStickerColor& o) const { return !(*this == o); }
 };
 
@@ -537,16 +628,30 @@ struct ColorStitchSticker
     int         color_mode = 0;
     bool        hidden     = false;                    // whole layer off ⇒ not cut
     // 22-oct-2026 — modo PROFUNDIDAD: cada color usa su `depth_blocks` (capas enteras bajo la cara vista)
-    // hasta `depth_max_mm` como mucho. Lo resuelve una extensión opcional del build; sin ella se ignora y
-    // el sticker sigue con sus recetas de siempre. `depth_blocks` de aquí = el del sticker de 1 color.
+    // hasta `depth_max_mm` como mucho (StickerDepth.cpp). `depth_blocks` de aquí = el del sticker de 1 color.
     bool        depth_mode   = false;
     float       depth_max_mm = 5.f;
     std::vector<ColorStitchDepthBlock> depth_blocks;
+    // 11-nov-2026 — Select area: triángulos de la cara elegida con el cubo, en el frame del OBJETO
+    // (9 floats por triángulo). El slice recorta la silueta a su planta. Vacío = recorte automático.
+    // Mover el sticker sobre la cara NO los mueve; cambiar el frame del objeto sí (transform_frame).
+    std::vector<float> area_tris;
 
     bool is_multicolor() const { return !colors.empty(); }
+    bool has_area() const { return area_tris.size() >= 9; }
+
+    // Cambio de frame del OBJETO (merge, split, Remesh, origen): mueve la pose y el área juntas.
+    void transform_frame(const Transform3d& m)
+    {
+        transform = m * transform;
+        for (size_t i = 0; i + 2 < area_tris.size(); i += 3) {
+            const Vec3d p = m * Vec3d(area_tris[i], area_tris[i + 1], area_tris[i + 2]);
+            area_tris[i] = float(p.x()); area_tris[i + 1] = float(p.y()); area_tris[i + 2] = float(p.z());
+        }
+    }
 
     template<class Archive> void serialize(Archive& ar)
-        { ar(name, svg_data, transform, profile_id, colors, color_mode, hidden, depth_mode, depth_max_mm, depth_blocks); }
+        { ar(name, svg_data, transform, profile_id, colors, color_mode, hidden, depth_mode, depth_max_mm, depth_blocks, area_tris); }
 };
 
 inline bool operator==(const ColorStitchSticker& a, const ColorStitchSticker& b)
@@ -560,7 +665,8 @@ inline bool operator==(const ColorStitchSticker& a, const ColorStitchSticker& b)
         && a.hidden == b.hidden
         && a.depth_mode == b.depth_mode
         && a.depth_max_mm == b.depth_max_mm
-        && a.depth_blocks == b.depth_blocks;
+        && a.depth_blocks == b.depth_blocks
+        && a.area_tris == b.area_tris;
 }
 inline bool operator!=(const ColorStitchSticker& a, const ColorStitchSticker& b) { return !(a == b); }
 
@@ -1186,6 +1292,13 @@ public:
     // the GUI into neotko_print_order_part_ranks, 3mf (omitted when 0) and undo/redo.
     int                 neotko_print_rank = 0;
 
+    // NEOTKO_PRIMGEN_TAG 5-nov-2026 — Primitive Generator recipe ("ring;d=18;w=3;h=6"), empty for any
+    // other mesh. Lets the generator reopen the shape with its numbers. 3mf + undo/redo + copies.
+    std::string         neotko_primitive_recipe;
+    // NEOTKO_PRIMGEN_TAG — for an OpenSCAD shape, the script itself (plain text), so a 3mf carries
+    // its own "factory". Empty for built-in shapes. 3mf (base64) + undo/redo + copies.
+    std::string         neotko_primitive_script;
+
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;
     mutable Timestamp        mmuseg_ts;
@@ -1442,6 +1555,8 @@ private:
             this->texture_bump_slot_to_zone_id[_s] = other.texture_bump_slot_to_zone_id[_s];
         this->texture_bump_zones_fingerprint = other.texture_bump_zones_fingerprint;
         this->neotko_print_rank = other.neotko_print_rank; // NEOTKO_PRINTORDER_TAG 2_49
+        this->neotko_primitive_recipe = other.neotko_primitive_recipe; // NEOTKO_PRIMGEN_TAG
+        this->neotko_primitive_script = other.neotko_primitive_script; // NEOTKO_PRIMGEN_TAG
         this->set_material_id(other.material_id());
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
@@ -1520,6 +1635,8 @@ private:
         cereal::load_by_value(ar, texture_bump_paint_facets);
         ar(texture_bump_slot_to_zone_id);
         ar(neotko_print_rank); // NEOTKO_PRINTORDER_TAG 2_49 — same position in save()
+        ar(neotko_primitive_recipe); // NEOTKO_PRIMGEN_TAG — same position in save()
+        ar(neotko_primitive_script); // NEOTKO_PRIMGEN_TAG — same position in save()
         cereal::load_by_value(ar, config);
         cereal::load(ar, text_configuration);
         cereal::load(ar, emboss_shape);
@@ -1548,6 +1665,8 @@ private:
         cereal::save_by_value(ar, texture_bump_paint_facets);
         ar(texture_bump_slot_to_zone_id);
         ar(neotko_print_rank); // NEOTKO_PRINTORDER_TAG 2_49 — same position in load()
+        ar(neotko_primitive_recipe); // NEOTKO_PRIMGEN_TAG — same position in load()
+        ar(neotko_primitive_script); // NEOTKO_PRIMGEN_TAG — same position in load()
         cereal::save_by_value(ar, config);
         cereal::save(ar, text_configuration);
         cereal::save(ar, emboss_shape);

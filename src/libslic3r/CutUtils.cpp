@@ -132,15 +132,46 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
         // The cap lies on the plane (z = 0 here): a few huge new facets that are not skin. Resampling
         // them split them into millions of slivers along the painted rim (9 s, and a viewport at
         // 1 fps on a 1M skull), so they are left unpainted without sampling.
+        // KNOWN LIMIT (audit 12-nov-2026): a facet counts as cap when it is within 0.05 mm of the plane and faces
+        // straight up or down. If the cut goes exactly through a nearly flat PAINTED surface of the model (closer
+        // than 0.05 mm to the plane), the pieces of the facets the plane splits there are taken for cap and lose
+        // their painting. Rare, accepted; lower the 0.05 mm or add a test against the source facet if it shows up.
         auto mark_cap = [](const indexed_triangle_set& its, std::vector<int>& map) {
             const float eps = 1e-4f;
+            // 12-nov-2026 — SONDA (caso Jay: la tapa salió pintada y subdividida, 96k caracteres por faceta):
+            // cuántas sin pareja hay, cuántas se marcan tapa y, de las que no, lo cerca del plano que quedan.
+            size_t unmatched = 0, marked = 0, near_plane = 0;
+            float  worst_z = 0.f;
             for (size_t i = 0; i < map.size(); ++i)
                 if (map[i] < 0) {
+                    ++unmatched;
                     const auto& f = its.indices[i];
-                    if (std::abs(its.vertices[f(0)].z()) < eps && std::abs(its.vertices[f(1)].z()) < eps &&
-                        std::abs(its.vertices[f(2)].z()) < eps)
+                    const float z0 = std::abs(its.vertices[f(0)].z()), z1 = std::abs(its.vertices[f(1)].z()),
+                                z2 = std::abs(its.vertices[f(2)].z());
+                    // 12-nov-2026 — caso Jay: la malla trae vértices a milésimas del plano y el corte los usa en la
+                    // tapa, que queda «casi» en z=0 (hasta ~0,005 mm). Tapa = pegada al plano (< 0,05 mm) Y mirando
+                    // arriba/abajo; las tiras que corta el plano miran de lado y siguen remuestreándose.
+                    const bool on_plane = z0 < eps && z1 < eps && z2 < eps;
+                    bool flat_cap = false;
+                    if (!on_plane && std::max({ z0, z1, z2 }) < 0.05f) {
+                        const Vec3f n = (its.vertices[f(1)] - its.vertices[f(0)]).cross(its.vertices[f(2)] - its.vertices[f(0)]);
+                        const float l = n.norm();
+                        flat_cap = l > 0.f && std::abs(n.z()) > 0.999f * l;
+                    }
+                    if (on_plane || flat_cap) {
                         map[i] = PaintTransfer::FACET_UNPAINTED;
+                        ++marked;
+                    } else if (std::max({ z0, z1, z2 }) < 0.05f) {
+                        ++near_plane;
+                        worst_z = std::max(worst_z, std::max({ z0, z1, z2 }));
+                    }
                 }
+            {
+                std::ostringstream os;
+                os << "CUT_CAP facets=" << map.size() << " sin_pareja=" << unmatched << " tapa=" << marked
+                   << " cerca_no_tapa=" << near_plane << " peor_z=" << worst_z;
+                NeoDebug::write(NeoDebug::GRAVITY, os.str());
+            }
         };
         if (upper_map && attributes.has(ModelObjectCutAttribute::KeepUpper)) {
             *upper_map = matcher.match(upper_its);
@@ -151,6 +182,9 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
             mark_cap(lower_its, *lower_map);
         }
     }
+    else if (PaintTransfer::has_painting(*volume))   // 12-nov-2026 — SONDA: sin mapa = se remuestrea TODO, tapa incluida
+        NeoDebug::write(NeoDebug::GRAVITY, std::string("CUT_CAP sin_mapa vol='") + volume->name + "' maps=" +
+                        ((upper_map || lower_map) ? "1" : "0"));
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
         upper_mesh = TriangleMesh(upper_its);
     if (attributes.has(ModelObjectCutAttribute::KeepLower))

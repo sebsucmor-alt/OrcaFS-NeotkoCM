@@ -35,6 +35,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSupportZones.hpp" // NEOTKO_SUPPORTZONES_TAG s286
 #include "slic3r/GUI/Gizmos/GLGizmoNeoStroke.hpp" // NEOTKO_NEOSTROKE_TAG s337
 #include "slic3r/GUI/Gizmos/GLGizmoPrintOrder.hpp" // NEOTKO_PRINTORDER_TAG 2_49
+#include "slic3r/GUI/Gizmos/GLGizmoPrimitiveGenerator.hpp" // NEOTKO_PRIMGEN_TAG
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/Model.hpp"
@@ -209,6 +210,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::PrintOrder): // NEOTKO_PRINTORDER_TAG 2_49
             gizmo->set_icon_filename(m_is_dark ? "toolbar_print_order_dark.svg" : "toolbar_print_order.svg");
             break;
+        case (EType::PrimitiveGenerator): // NEOTKO_PRIMGEN_TAG
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_primitive_generator_dark.svg" : "toolbar_primitive_generator.svg");
+            break;
         }
 
     }
@@ -273,6 +277,8 @@ bool GLGizmosManager::init()
     // NEOTKO_PRINTORDER_TAG 2_49 — Print order (LibreMode-gated via on_is_activable). Right after
     // NeoStroke, same as in EType. 🚨 Both SVGs must exist or every gizmo is dropped.
     m_gizmos.emplace_back(new GLGizmoPrintOrder(m_parent, m_is_dark ? "toolbar_print_order_dark.svg" : "toolbar_print_order.svg", EType::PrintOrder));
+    // NEOTKO_PRIMGEN_TAG 5-nov-2026 — Primitive Generator, for everyone (no LibreMode). Same slot as in EType.
+    m_gizmos.emplace_back(new GLGizmoPrimitiveGenerator(m_parent, m_is_dark ? "toolbar_primitive_generator_dark.svg" : "toolbar_primitive_generator.svg", EType::PrimitiveGenerator));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -1049,7 +1055,9 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                         processed = mmu_seg->on_number_key_down(keyCode - '0');
                     }
                 }
-                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G') {
+                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G' ||
+                         keyCode == 'B' || keyCode == 'V' || keyCode == 'K' || keyCode == 'P' || keyCode == 'E' ||
+                         keyCode == WXK_RETURN || keyCode == WXK_NUMPAD_ENTER) {   // NEOTKO_CLAY_TAG — B / V / K / P: Brush, Vector, Clay, Vector Brush; E: eraser
                     processed = mmu_seg->on_key_down_select_tool_type(keyCode);
                     if (processed) {
                         // force extra frame to automatically update window size

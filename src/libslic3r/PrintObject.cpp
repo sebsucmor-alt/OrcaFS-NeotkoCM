@@ -539,13 +539,23 @@ void PrintObject::prepare_infill()
     this->apply_painted_surface_depth();
     m_print->throw_if_canceled();
 
-    // 22-oct-2026 — lo mismo con la máscara de la extensión opcional (vacía sin ella).
+    // 22-oct-2026 — lo mismo con la máscara del Depth recipe (StickerDepth.cpp; vacía si nada lo usa).
     {
         const std::vector<ExPolygons> extra = optional_extra_solid_mask(*this);
         if (!extra.empty()) {
             const size_t n = this->reclassify_internal_as_solid(extra);
             NEOTKO_LOG(PROFILE, "extra_solid_mask layers=" << extra.size() << " reclassified_region_layers=" << n);
         }
+        m_print->throw_if_canceled();
+    }
+    // 4-nov-2026 — y la del MixedFilament Object con receta por profundidad (vacía si está apagada).
+    {
+        const std::vector<ExPolygons> mf = mixed_depth_prepare(*this);
+        if (!mf.empty()) {
+            const size_t n = this->reclassify_internal_as_solid(mf);
+            NEOTKO_LOG(PROFILE, "mf_depth_mask layers=" << mf.size() << " reclassified_region_layers=" << n);
+        }
+        mixed_depth_eat_perimeters(*this);   // 5-nov-2026 — solo con Chamfer: come perímetros interiores
         m_print->throw_if_canceled();
     }
 
@@ -3724,6 +3734,9 @@ void PrintObject::update_slicing_parameters()
           const bool     keep_land_top          = m_slicing_params.neotko_land_top;
           m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, this->model_object()->max_z(),
                                                                    this->object_extruders(), this->print()->shrinkage_compensation());
+          NEOTKO_LOG(PENULTIMATE, "SCALECUT_SP obj='" << this->model_object()->name << "' max_z=" << this->model_object()->max_z()
+              << " raw_h=" << this->model_object()->raw_bounding_box().size().z() << " size_z=" << unscale<double>(m_size.z())
+              << " z_max=" << m_slicing_params.object_print_z_max);   // NEOTKO_SCALECUT_PROBE
           // neotko_floating_bottom_z / neotko_land_top (s362) ya no se calculan aquí: dependen de
           // «Stacked objects: real layers» y de los demás objetos, y los fija Print::apply() justo
           // después con neotko_set_stack_landing().
@@ -4414,6 +4427,12 @@ bool PrintObject::update_layer_height_profile(const ModelObject          &model_
         // The layer height profile is already compressed.
         updated = true;
     }
+    // NEOTKO_SCALECUT_PROBE (4-nov-2026) — escalado al 120 % y el laminado se corta en la altura vieja:
+    // de dónde sale la última Z. Temporal, quitar al cerrar el bug.
+    NEOTKO_LOG(PENULTIMATE, "SCALECUT_LHP obj='" << model_object.name << "' model_profile=" << model_object.layer_height_profile.get().size()
+        << " ranges=" << model_object.layer_config_ranges.size() << " dither=" << has_dithering_ranges
+        << " z_max=" << slicing_parameters.object_print_z_max << " z_unc_max=" << slicing_parameters.object_print_z_uncompensated_max
+        << " max_z=" << model_object.max_z() << " last=" << (layer_height_profile.size() >= 2 ? layer_height_profile[layer_height_profile.size() - 2] : -1.));
 
     return updated;
 }
@@ -4929,9 +4948,6 @@ size_t PrintObject::reclassify_internal_as_solid(const std::vector<ExPolygons>& 
     return reclassified_layers.load();
 }
 
-#ifndef NEOTKO_PRIVATE_TOWER
-std::vector<ExPolygons> optional_extra_solid_mask(const PrintObject&) { return {}; }
-#endif
 // NEOTKO_PAINTERPRO_TAG_END
 
 // combine fill surfaces across layers to honor the "infill every N layers" option

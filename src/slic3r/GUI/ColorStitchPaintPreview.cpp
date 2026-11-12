@@ -4,6 +4,7 @@
 // cambio funcional es que el ModelObject dueño llega por parámetro en vez de salir de
 // m_c->selection_info(), porque aquí no hay gizmo del que colgar.
 #include "ColorStitchPaintPreview.hpp"
+#include "libslic3r/LocalesUtils.hpp" // NEOTKO audit 1-nov: numbers in any UI language
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -76,7 +77,7 @@ void materials(Slic3r::ColorSci::Material out[4], std::vector<std::string>& fcol
         float td = 1.f;
         if (ac) {
             const std::string v = ac->get("neotko_td_" + std::to_string(t + 1));
-            try { if (!v.empty()) td = std::stof(v); } catch (...) {}
+            if (!v.empty()) td = float(Slic3r::neo_to_double(v, td));
         }
         td = std::max(0.01f, std::min(10.f, td));
         out[t] = Slic3r::ColorSci::material_from_hex(fcolors_out[t], td);
@@ -439,7 +440,7 @@ std::vector<int> colorstitch_tool_sequence(
         return d; };
     auto gd = [&](const char* k, double d) {
         const auto it = kv.find(pre + k);
-        if (it != kv.end()) { try { return std::stod(it->second); } catch (...) {} }
+        if (it != kv.end()) return Slic3r::neo_to_double(it->second, d);
         return d; };
     auto gb = [&](const char* k, bool d) {
         const auto it = kv.find(pre + k);
@@ -734,7 +735,7 @@ static bool gradient_field_weave(const std::map<std::string, std::string>& kv,
         return d; };
     auto gd = [&](const char* k, double d) {
         const auto it = kv.find(pre + k);
-        if (it != kv.end()) { try { return std::stod(it->second); } catch (...) {} }
+        if (it != kv.end()) return Slic3r::neo_to_double(it->second, d);
         return d; };
     auto gb = [&](const char* k, bool d) {
         const auto it = kv.find(pre + k);
@@ -832,7 +833,7 @@ colorstitch_make_weave(const std::map<std::string, std::string>& kv,
                                "interlayer_colormix_band_mm_c", "interlayer_colormix_band_mm_d" }) {
             const auto it = kv.find(k);
             if (it == kv.end()) continue;
-            try { period_mm += std::max(0.0, std::stod(it->second)); } catch (...) {}
+            period_mm += std::max(0.0, Slic3r::neo_to_double(it->second, 0.));
         }
         if (period_mm <= 1e-4) return w;
         // Un periodo entero medido en líneas. Si no cabe en la LUT de 64 se engorda el paso

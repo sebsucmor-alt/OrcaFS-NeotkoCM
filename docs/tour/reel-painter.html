@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painter Reel — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A 30 second retro reel of what the 2.4.9 Painter does: Shape mask with curves, Vector mode and SVG decals, parts, Mirror and Mirror brush.">
+<style>
+  /* reel — same CRT look as the intro on tour/index.html. Always dark on purpose: it is a CRT, not a page. */
+  :root { --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  html, body { margin: 0; height: 100%; background: #07090a; overflow: hidden; }
+  .intro { position: fixed; inset: 0; background: #07090a; color: #d9f7ef; font-family: var(--mono); overflow: hidden; }
+  .intro canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .intro__crt { position: absolute; inset: 0; pointer-events: none;
+    background:
+      repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.28) 2px 3px),
+      radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.75) 100%);
+    animation: introFlicker 4s steps(40) infinite; }
+  @keyframes introFlicker { 0%,100% { opacity: .92; } 47% { opacity: .85; } 48% { opacity: 1; } }
+  .intro__hud { position: absolute; left: 16px; right: 16px; top: 14px; display: flex; justify-content: space-between;
+    font-size: .72rem; letter-spacing: .08em; color: #2dd4bf; pointer-events: none; }
+  .intro__bar { position: absolute; left: 16px; right: 16px; bottom: 16px; display: flex; gap: 4px; align-items: center; }
+  .intro__bar i { flex: 1; height: 3px; background: rgba(45,212,191,.18); position: relative; overflow: hidden; }
+  .intro__bar i b { position: absolute; inset: 0; background: #2dd4bf; transform-origin: left; transform: scaleX(0); }
+  .intro__btn { margin-left: 10px; background: none; border: 1px solid rgba(45,212,191,.5); color: #2dd4bf;
+    font: inherit; font-size: .7rem; letter-spacing: .14em; padding: .3rem .7rem; cursor: pointer; text-decoration: none; }
+  .intro__btn:hover, .intro__btn:focus-visible { background: #2dd4bf; color: #07090a; outline: none; }
+  .clean .intro__hud, .clean .intro__bar { display: none; }
+</style>
+</head>
+<body>
+<div class="intro" id="intro" role="img" aria-label="Painter reel: Shape mask, Vector mode, SVG decals, Mirror and Mirror brush">
+  <canvas></canvas>
+  <div class="intro__crt"></div>
+  <div class="intro__hud"><span data-hud-l>NeotkoCM // painter</span><span data-hud-r>T+00.0</span></div>
+  <div class="intro__bar"><span style="display:contents" data-segs></span>
+    <button class="intro__btn" type="button" data-replay>Replay ▸</button>
+    <a class="intro__btn" href="painter.html">Back to the tour</a>
+  </div>
+</div>
+
+<script>
+/* ---------------------------------------------------------------------------
+ * reel-painter — a ~30 s reel of the 2.4.9 Painter, in the intro's CRT style.
+ * A diagram, not a port: nothing here runs the slicer. Four filaments on
+ * screen at most (the U1 has four slots); the grey head is the model.
+ * URL: ?loop plays it forever, ?clean hides the HUD and bar (for recording),
+ * ?t=12.5 freezes on that second.
+ * Keys: R or Space replays, Esc goes back to the tour.
+ * ------------------------------------------------------------------------- */
+(function () {
+  var root = document.getElementById('intro');
+  var cv = root.querySelector('canvas'), ctx = cv.getContext('2d');
+  var hudL = root.querySelector('[data-hud-l]'), hudR = root.querySelector('[data-hud-r]');
+  var FIL = ['#19c3d6', '#e0357a', '#f2c230', '#f1eee6'];       // cyan, magenta, yellow, white
+  var PH = '#2dd4bf', AMB = '#f0a14a', DIM = 'rgba(45,212,191,.22)', BLUE = '#5aa9ff', ORA = '#ff8a2a';
+  var SVGC = ['#7a4fd0', '#3fae5a', '#e8743a'];                    // the SVG's own colours, before mapping
+  var LOOP = /[?&]loop\b/.test(location.search);
+  if (/[?&]clean\b/.test(location.search)) root.classList.add('clean');
+  var SCENES = [
+    { id: 'boot',   dur: 1.6, label: 'Boot' },
+    { id: 'shape',  dur: 4.2, label: '01 Shape mask with curves' },
+    { id: 'vector', dur: 3.8, label: '02 Vector mode · SVG' },
+    { id: 'parts',  dur: 3.0, label: '03 Pick parts' },
+    { id: 'decals', dur: 4.0, label: '04 Decals' },
+    { id: 'mirror', dur: 4.2, label: '05 Mirror' },
+    { id: 'brush',  dur: 3.6, label: '06 Mirror brush' },
+    { id: 'draw',   dur: 3.8, label: '07 Draw shape → decal' },
+    { id: 'end',    dur: 2.4, label: 'Ready' }
+  ];
+  var TOTAL = SCENES.reduce(function (a, s) { return a + s.dur; }, 0);
+  var segHost = root.querySelector('[data-segs]'), segs = [];
+  SCENES.forEach(function () { var i = document.createElement('i'), b = document.createElement('b'); i.appendChild(b); segHost.appendChild(i); segs.push(b); });
+
+  var W = 0, H = 0, S = 1, raf = 0, t0 = 0, running = false;
+  function size() {
+    var d = window.__reelD || Math.min(window.devicePixelRatio || 1, 2);
+    W = root.clientWidth; H = root.clientHeight;
+    cv.width = W * d; cv.height = H * d; ctx.setTransform(d, 0, 0, d, 0, 0);
+    S = Math.min(W, H) / 22;
+  }
+
+  /* ---- tiny helpers ---- */
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function ease(t) { t = clamp(t, 0, 1); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+  function back(t) { t = clamp(t, 0, 1); var c = 1.9; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); }
+  function win(k, a, b) { return clamp((k - a) / (b - a), 0, 1); }
+  function txt(s, x, y, px, col, align, weight) {
+    ctx.font = (weight || '600') + ' ' + px + 'px ' + getComputedStyle(root).fontFamily;
+    ctx.fillStyle = col; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+  }
+  function typed(s, k) { return s.slice(0, Math.floor(clamp(k, 0, 1) * s.length)); }
+  function title(label, k) {
+    var px = Math.max(14, Math.min(28, W / 26));
+    txt(typed(label, k * 3) + (k < .34 && (Date.now() / 120 | 0) % 2 ? '█' : ''), 16, 58, px, PH);
+  }
+  function caption(s, k) { txt(typed(s, k * 6), 16, H - 44, 13, AMB); }
+  function cursor(x, y, down) {
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 11, y + 12); ctx.lineTo(x + 4, y + 12); ctx.lineTo(x, y + 17); ctx.closePath(); ctx.fill();
+    if (down) { ctx.strokeStyle = AMB; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.stroke(); ctx.lineWidth = 1; }
+  }
+  function eye(x, y) {                                             // drawn, not emoji: the export has no emoji font
+    ctx.strokeStyle = PH; ctx.lineWidth = 1.3; ctx.beginPath(); ctx.ellipse(x, y, 6, 3.6, 0, 0, 7); ctx.stroke();
+    ctx.fillStyle = PH; ctx.beginPath(); ctx.arc(x, y, 1.8, 0, 7); ctx.fill(); ctx.lineWidth = 1;
+  }
+  function eyeLock(x, y) {
+    eye(x + 6, y);
+    ctx.strokeStyle = PH; ctx.lineWidth = 1.3; ctx.beginPath(); ctx.arc(x + 24, y - 2, 3, Math.PI, 0); ctx.stroke();
+    ctx.fillStyle = PH; ctx.fillRect(x + 20, y - 2, 8, 6); ctx.lineWidth = 1;
+  }
+  function chip(x, y, s, col) { ctx.fillStyle = col; ctx.fillRect(x, y - s / 2, s, s); ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.strokeRect(x + .5, y - s / 2 + .5, s - 1, s - 1); }
+  function button(x, y, label, on, px) {
+    px = px || 12; ctx.font = '600 ' + px + 'px ' + getComputedStyle(root).fontFamily;
+    var w = ctx.measureText(label).width + px * 1.4, h = px * 1.9;
+    ctx.fillStyle = on ? PH : 'rgba(45,212,191,.08)'; ctx.fillRect(x, y - h / 2, w, h);
+    ctx.strokeStyle = PH; ctx.strokeRect(x + .5, y - h / 2 + .5, w - 1, h - 1);
+    txt(label, x + px * .7, y, px, on ? '#07090a' : PH);
+    return w;
+  }
+
+  /* ---- the model: a shaded head, front view ---- */
+  var hd = { x: 0, y: 0, rx: 0, ry: 0 };
+  function head(x, y, r) {
+    hd.x = x; hd.y = y; hd.rx = r * .82; hd.ry = r;
+    var g = ctx.createRadialGradient(x - hd.rx * .35, y - hd.ry * .4, r * .05, x, y, r * 1.05);
+    g.addColorStop(0, '#6b7a80'); g.addColorStop(.6, '#3a4a50'); g.addColorStop(1, '#141b1e');
+    ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.beginPath(); ctx.ellipse(x, y + hd.ry * 1.02, hd.rx * .8, hd.ry * .12, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(x, y, hd.rx, hd.ry, 0, 0, 7); ctx.fill();
+  }
+  function clipHead() { ctx.beginPath(); ctx.ellipse(hd.x, hd.y, hd.rx, hd.ry, 0, 0, 7); ctx.clip(); }
+  // place a decal on the head: u is the turn from the front (radians), v the height (-1..1).
+  // The wrap is drawn as a horizontal squeeze by cos(u), enough to read as "laid on the surface".
+  function onHead(u, v, sc, draw, flip) {
+    ctx.save(); clipHead();
+    ctx.translate(hd.x + Math.sin(u) * hd.rx, hd.y + v * hd.ry);
+    ctx.scale(sc * Math.cos(u) * (flip || 1), sc);
+    draw(); ctx.restore();
+  }
+  function shadeHead() {                                           // light over the paint, so it reads as on the model
+    ctx.save(); clipHead();
+    var g = ctx.createRadialGradient(hd.x - hd.rx * .35, hd.y - hd.ry * .4, 0, hd.x, hd.y, hd.ry * 1.05);
+    g.addColorStop(0, 'rgba(255,255,255,.12)'); g.addColorStop(.6, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.55)');
+    ctx.fillStyle = g; ctx.fillRect(hd.x - hd.rx, hd.y - hd.ry, hd.rx * 2, hd.ry * 2); ctx.restore();
+  }
+  function plane(k) {                                              // mirror plane and its orange centre
+    ctx.globalAlpha *= k;
+    ctx.strokeStyle = ORA; ctx.setLineDash([4, 5]);
+    ctx.beginPath(); ctx.moveTo(hd.x, hd.y - hd.ry * 1.15); ctx.lineTo(hd.x, hd.y + hd.ry * 1.15); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = ORA; ctx.beginPath(); ctx.arc(hd.x, hd.y, 5, 0, 7); ctx.fill();
+    ctx.strokeStyle = ORA; ctx.beginPath(); ctx.arc(hd.x, hd.y, 10, 0, 7); ctx.stroke();
+    ctx.globalAlpha /= k || 1;
+  }
+
+  /* ---- the SVG: a flower with a ring, six petals and a centre, unit radius ---- */
+  var PET = 6;
+  function petalPath(i) {
+    var a = i / PET * 6.283 - 1.571; ctx.beginPath(); ctx.ellipse(Math.cos(a) * .46, Math.sin(a) * .46, .3, .15, a, 0, 7);
+  }
+  // o: { ring, petal, centre, pet:{i:col}, sel:{i:true}, ghost:colour of an outline-only draw }
+  function emblem(o) {
+    var lw = 1 / Math.max(1, ctx.getTransform().a / (window.devicePixelRatio || 1));
+    if (o.ghost) {
+      ctx.strokeStyle = o.ghost; ctx.lineWidth = 1.6 * lw; ctx.setLineDash([5 * lw, 4 * lw]);
+      ctx.beginPath(); ctx.arc(0, 0, .95, 0, 7); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, .8, 0, 7); ctx.stroke();
+      for (var g = 0; g < PET; g++) { petalPath(g); ctx.stroke(); }
+      ctx.beginPath(); ctx.arc(0, 0, .2, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+      return;
+    }
+    ctx.fillStyle = o.ring; ctx.beginPath(); ctx.arc(0, 0, .95, 0, 6.2832); ctx.moveTo(.8, 0); ctx.arc(0, 0, .8, 6.2832, 0, true); ctx.fill();
+    for (var i = 0; i < PET; i++) {
+      var c = o.pet && o.pet[i] ? o.pet[i] : o.petal;
+      if (c === 'off') continue;
+      ctx.fillStyle = c; petalPath(i); ctx.fill();
+    }
+    ctx.fillStyle = o.centre; ctx.beginPath(); ctx.arc(0, 0, .2, 0, 7); ctx.fill();
+    if (o.sel) for (var j in o.sel) { ctx.strokeStyle = ORA; ctx.lineWidth = 3 * lw; petalPath(+j); ctx.stroke(); }
+    if (o.edge) { ctx.strokeStyle = o.edge; ctx.lineWidth = 2 * lw; ctx.beginPath(); ctx.arc(0, 0, 1.0, 0, 7); ctx.stroke(); }
+    ctx.lineWidth = 1;
+  }
+  function neo(col, ghost) {                                       // a text decal, so a mirror shows
+    ctx.save(); ctx.scale(.01, .01);                                // a 1px font is clamped by some browsers
+    ctx.font = '900 100px ' + getComputedStyle(root).fontFamily; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    var lw = 1 / Math.max(.01, Math.abs(ctx.getTransform().d) / (window.devicePixelRatio || 1));
+    if (ghost) { ctx.strokeStyle = ghost; ctx.lineWidth = 1.6 * lw; ctx.setLineDash([4 * lw, 3 * lw]); ctx.strokeText('NEO', 0, 0); ctx.setLineDash([]); }
+    else { ctx.fillStyle = col; ctx.fillText('NEO', 0, 0); }
+    ctx.restore();
+  }
+
+  /* ---- curves: nodes with one handle each (the other mirrors it), like a vector program ---- */
+  function bez(nodes, n, close) {                                  // trace the first n nodes as a path
+    var m = function (p) { return p; };
+    ctx.beginPath(); ctx.moveTo(nodes[0].p[0], nodes[0].p[1]);
+    var last = close ? n : n - 1;
+    for (var i = 0; i < last; i++) {
+      var a = nodes[i], b = nodes[(i + 1) % nodes.length];
+      ctx.bezierCurveTo(a.p[0] + a.h[0], a.p[1] + a.h[1], b.p[0] - b.h[0], b.p[1] - b.h[1], b.p[0], b.p[1]);
+    }
+    if (close) ctx.closePath();
+    return m;
+  }
+  function handles(nodes, n, col) {
+    for (var i = 0; i < n; i++) {
+      var a = nodes[i];
+      if (a.h[0] || a.h[1]) {
+        ctx.strokeStyle = col; ctx.beginPath(); ctx.moveTo(a.p[0] - a.h[0], a.p[1] - a.h[1]); ctx.lineTo(a.p[0] + a.h[0], a.p[1] + a.h[1]); ctx.stroke();
+        [[1], [-1]].forEach(function (sg) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(a.p[0] + a.h[0] * sg[0], a.p[1] + a.h[1] * sg[0], 3.2, 0, 7); ctx.fill(); });
+      }
+      ctx.fillStyle = '#07090a'; ctx.strokeStyle = '#fff'; ctx.fillRect(a.p[0] - 4, a.p[1] - 4, 8, 8); ctx.strokeRect(a.p[0] - 3.5, a.p[1] - 3.5, 7, 7);
+    }
+  }
+  // build nodes in screen space from unit nodes around (x, y) at scale s; g grows the handle of node `grow`
+  function place(unit, x, y, s, grow, g) {
+    return unit.map(function (u, i) { var f = i === grow ? g : i > grow && grow >= 0 ? 0 : 1; return { p: [x + u[0] * s, y + u[1] * s], h: [u[2] * s * f, u[3] * s * f] }; });
+  }
+  // draws a shape being drawn: k01 runs the clicks, returns { nodes, closed, cur }
+  function drawing(unit, x, y, s, k01) {
+    var n = unit.length, per = 1 / (n + 1), i = Math.min(n, Math.floor(k01 / per)), f = (k01 - i * per) / per;
+    var curved = i < n && (unit[i][2] || unit[i][3]);
+    var nodes = place(unit, x, y, s, i < n ? i : -1, curved ? ease(f * 1.6 - .3) : 1);
+    var shown = Math.min(n, i + (i < n && f > .25 ? 1 : 0));
+    var cur;
+    if (i < n) {
+      var from = i ? nodes[i - 1].p : [x + s * 1.6, y + s * 1.6], to = nodes[i].p, t = ease(f / .3);
+      cur = [lerp(from[0], to[0], t), lerp(from[1], to[1], t)];
+      if (f > .3 && curved) { var hh = ease(f * 1.6 - .3); cur = [to[0] + unit[i][2] * s * hh, to[1] + unit[i][3] * s * hh]; }
+    } else { cur = [lerp(nodes[n - 1].p[0], nodes[0].p[0], ease(f / .5)), lerp(nodes[n - 1].p[1], nodes[0].p[1], ease(f / .5))]; }
+    return { nodes: nodes, shown: shown, closed: i >= n && f > .5, cur: cur, down: f > .25 };
+  }
+
+  var SHAPE1 = [[-3, -1.5, 0, 0], [0.5, -3.2, 2.2, 0], [3.6, -0.2, 0, 2], [0.8, 2.8, -2.2, 0.2], [-2.6, 1.6, 0, 0]];
+  var HEART = [[0, -1.0, 0, 0], [1.9, -2.0, 0.2, 1.4], [0, 2.0, 0, 0], [-1.9, -2.0, -0.2, -1.4]];
+  HEART[1] = [1.9, -2.0, 1.2, 1.6];  HEART[3] = [-1.9, -2.0, 1.2, -1.6];
+
+  /* ---- scenes: k is 0..1 across the scene, ts is seconds into it ---- */
+  var DRAW = {
+    boot: function (k) {
+      var lines = ['> neotko.painter --2.4.9', '> brush ok · vector ok · mirror ok', '> curves ok · decals ok', '> loading reel_'];
+      var px = Math.max(12, Math.min(18, W / 42));
+      lines.forEach(function (l, i) {
+        txt(typed(l, k * 1.7 - i * .3), W * .12, H * .38 + i * px * 1.7, px, i === 3 ? AMB : PH);
+      });
+      for (var i = 0; i < 4; i++) { ctx.fillStyle = FIL[i]; ctx.globalAlpha = clamp(k * 3 - 1.4 - i * .2, 0, 1); ctx.fillRect(W * .12 + i * px * 1.6, H * .38 - px * 2.4, px, px); }
+      ctx.globalAlpha = 1;
+    },
+    shape: function (k) {
+      head(W * .4, H * .55, S * 7.2);
+      var s = S * 1.6, d = drawing(SHAPE1, hd.x, hd.y, s, win(k, .04, .62));
+      var apply = win(k, .74, .84), lock = k < .9;
+      if (apply > 0) {                                              // painted, only what is on the part
+        ctx.save(); clipHead(); bez(d.nodes, d.nodes.length, true); ctx.globalAlpha *= apply; ctx.fillStyle = FIL[1]; ctx.fill(); ctx.restore();
+        shadeHead();
+      }
+      if (apply < 1) {
+        if (d.closed) { bez(d.nodes, d.nodes.length, true); ctx.fillStyle = 'rgba(224,53,122,.35)'; ctx.fill(); }
+        bez(d.nodes, d.shown, d.closed); ctx.strokeStyle = PH; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+        handles(d.nodes, d.shown, AMB);
+        if (k < .7) cursor(d.cur[0], d.cur[1], d.down);
+      }
+      var bx = W * .74, by = H * .3;
+      button(bx, by, 'Apply', apply > 0 && apply < 1 || (k > .72 && k < .76));
+      button(bx, by + 34, 'Keep shape after Apply', false);
+      button(bx, by + 68, 'Lock view ✓', lock);
+      caption(k < .62 ? 'click = corner · drag = curve' : k < .74 ? 'closed: still editable' : 'Apply → painted, only what you see', win(k, k < .62 ? 0 : k < .74 ? .62 : .74, 1));
+    },
+    vector: function (k, ts) {
+      var cx = W * .4, cy = H * .56, r = S * 5.2;
+      var mapK = win(k, .06, .34), sc = 1 + .25 * Math.sin(win(k, .36, .62) * 3.1416), rot = ease(win(k, .36, .62)) * .7;
+      var deform = ease(win(k, .64, .86));
+      var mapped = [mapK > .2 ? FIL[0] : SVGC[0], mapK > .5 ? FIL[1] : SVGC[1], mapK > .8 ? FIL[2] : SVGC[2]];
+      ctx.save(); ctx.translate(cx, cy); ctx.rotate(rot);
+      ctx.transform(1, deform * .1, deform * -.3, 1 - deform * .2, 0, 0);   // corners pulled: a face that leans back
+      ctx.scale(r * sc, r * sc);
+      emblem({ ring: mapped[0], petal: mapped[1], centre: mapped[2] });
+      var c = [[-1.1, -1.1], [1.1, -1.1], [1.1, 1.1], [-1.1, 1.1]];
+      ctx.restore();
+      // the frame and its four corners, transformed the same way
+      var m = new DOMMatrix().translate(cx, cy).rotate(rot * 57.3).multiply(new DOMMatrix([1, deform * .1, deform * -.3, 1 - deform * .2, 0, 0])).scale(r * sc);
+      var pts = c.map(function (p) { var q = m.transformPoint(new DOMPoint(p[0], p[1])); return [q.x, q.y]; });
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = PH; ctx.beginPath(); pts.forEach(function (p, i) { i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); }); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+      if (deform > 0) pts.forEach(function (p) { ctx.fillStyle = ORA; ctx.fillRect(p[0] - 5, p[1] - 5, 10, 10); });
+      // colour rows: each SVG colour picks a filament
+      var lx = W * .7, ly = H * .3, px = 13;
+      txt('Load SVG...', lx, ly - 30, px, PH);
+      ['ring', 'petals', 'centre'].forEach(function (nm, i) {
+        var y = ly + i * 30, on = mapK > [.2, .5, .8][i];
+        chip(lx, y, 16, SVGC[i]); txt(nm, lx + 24, y, 12, PH); txt('→', lx + 96, y, 12, AMB);
+        chip(lx + 116, y, 16, on ? FIL[i] : 'rgba(45,212,191,.1)');
+      });
+      txt(deform > 0 ? 'Deform corners' : k > .36 ? 'Scale · Rotate' : 'every colour gets a filament', lx, ly + 110, 12, AMB);
+      caption('Vector mode (V): shapes and SVGs, placed and painted in one go', win(k, 0, .7));
+    },
+    parts: function (k) {
+      var cx = W * .4, cy = H * .56, r = S * 5.6;
+      var c1 = k > .22, c2 = k > .58, on = k > .4;
+      var sel = {}; if (c1) sel[0] = 1; if (c2) sel[3] = 1;
+      var pet = {}; if (on) { pet[0] = FIL[3]; if (c2 && k > .7) pet[3] = FIL[3]; }
+      ctx.save(); ctx.translate(cx, cy); ctx.scale(r, r);
+      emblem({ ring: FIL[0], petal: FIL[1], centre: FIL[2], pet: pet, sel: sel });
+      ctx.restore();
+      var a0 = -1.571, a3 = 3 / PET * 6.283 - 1.571;
+      var p0 = [cx + Math.cos(a0) * .46 * r, cy + Math.sin(a0) * .46 * r], p3 = [cx + Math.cos(a3) * .46 * r, cy + Math.sin(a3) * .46 * r];
+      var t = k < .22 ? ease(k / .22) : k < .45 ? 1 : 1 + ease((k - .45) / .13);
+      var cur = t <= 1 ? [lerp(W * .8, p0[0], t), lerp(H * .8, p0[1], t)] : [lerp(p0[0], p3[0], t - 1), lerp(p0[1], p3[1], t - 1)];
+      cursor(cur[0], cur[1], (k > .2 && k < .28) || (k > .56 && k < .64));
+      if (k > .56 && k < .72) txt('Shift', cur[0] + 18, cur[1] + 22, 11, AMB);
+      var lx = W * .7, ly = H * .34;
+      button(lx, ly, 'Pick parts', true);
+      if (c1) { txt('Selected', lx, ly + 40, 12, PH); txt('→', lx + 76, ly + 40, 12, AMB); chip(lx + 96, ly + 40, 16, on ? FIL[3] : FIL[1]); eye(lx + 128, ly + 40); }
+      caption('click any piece of the SVG, give it its own filament', win(k, 0, .8));
+    },
+    decals: function (k) {
+      head(W * .4, H * .55, S * 7.2);
+      var lay = ease(win(k, .42, .62)), paint = win(k, .76, .86);
+      // two decals: floating cards (On surface off) that land on the head
+      var D = [{ u: -.35, v: -.3, s: S * 2.4, card: [-5.5, -5], draw: function (gh) { emblem(gh ? { ghost: gh } : { ring: FIL[0], petal: FIL[1], centre: FIL[2] }); } },
+               { u: .45, v: .35, s: S * 1.5, card: [6, 3.4], draw: function (gh) { neo(FIL[2], gh); } }];
+      if (paint > 0) {
+        ctx.globalAlpha *= paint;
+        D.forEach(function (d) { onHead(d.u, d.v, d.s, function () { d.draw(); }); });
+        ctx.globalAlpha /= paint; shadeHead();
+      }
+      if (paint < 1) D.forEach(function (d, i) {
+        var a = clamp(k * 4 - i * .4, 0, 1); if (a <= 0) return;
+        ctx.globalAlpha *= a;
+        var tx = hd.x + Math.sin(d.u) * hd.rx, ty = hd.y + d.v * hd.ry;
+        if (lay < 1) {                                               // the card, floating near where it paints
+          var fx = lerp(hd.x + d.card[0] * S, tx, lay), fy = lerp(hd.y + d.card[1] * S, ty, lay);
+          ctx.strokeStyle = DIM; ctx.setLineDash([2, 4]); ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(tx, ty); ctx.stroke(); ctx.setLineDash([]);
+          ctx.save(); ctx.translate(fx, fy); ctx.scale(d.s * lerp(1, Math.cos(d.u), lay), d.s);
+          ctx.fillStyle = 'rgba(20,30,34,.85)'; ctx.fillRect(-1.15, -1.15, 2.3, 2.3); d.draw(); ctx.restore();
+        }
+        if (lay > 0) { ctx.globalAlpha *= lay; onHead(d.u, d.v, d.s, function () { d.draw(); d.draw(BLUE); }); ctx.globalAlpha /= lay; }
+        ctx.globalAlpha /= a;
+      });
+      // the Decals list
+      var lx = W * .72, ly = H * .3;
+      txt('Decals', lx, ly - 28, 13, PH);
+      ['flower.svg', 'neo.svg'].forEach(function (nm, i) {
+        var y = ly + i * 28, a = clamp(k * 4 - i * .4, 0, 1); if (a <= 0) return;
+        ctx.globalAlpha *= a;
+        ctx.strokeStyle = DIM; ctx.strokeRect(lx - 6, y - 12, 190, 24);
+        eyeLock(lx, y); txt(nm, lx + 50, y, 12, '#d9f7ef');
+        ctx.globalAlpha /= a;
+      });
+      button(lx, ly + 72, 'On surface ' + (lay > .02 ? '✓' : ' '), lay > .02);
+      button(lx, ly + 106, 'Apply all', paint > 0 && paint < 1);
+      caption(k < .42 ? 'Pin to view: the SVG stays, saved in the 3mf' : k < .76 ? 'On surface: exactly where it will paint' : 'Apply all, in list order', win(k, k < .42 ? 0 : k < .76 ? .42 : .76, 1));
+    },
+    mirror: function (k) {
+      head(W * .45, H * .55, S * 7.4);
+      var copy = win(k, .18, .3), readable = ease(win(k, .52, .66)), paint = win(k, .8, .9);
+      plane(win(k, .04, .16));
+      var u = -.55, v = -.05, s = S * 1.7;
+      var flip = lerp(-1, 1, readable);
+      if (paint > 0) {
+        ctx.globalAlpha *= paint;
+        onHead(u, v, s, function () { neo(FIL[1]); }); onHead(-u, v, s, function () { neo(FIL[1]); }, flip);
+        ctx.globalAlpha /= paint; shadeHead(); plane(1);
+      }
+      if (paint < 1) {
+        onHead(u, v, s, function () { neo(FIL[1]); neo(0, BLUE); });
+        if (copy > 0) { ctx.globalAlpha *= copy; onHead(-u, v, s, function () { neo(0, BLUE); }, Math.abs(flip) < .08 ? .08 : flip); ctx.globalAlpha /= copy; }
+      }
+      var lx = W * .74, ly = H * .32;
+      button(lx, ly, 'Left/Right', copy > 0);
+      button(lx, ly + 34, 'Front/Back', false);
+      button(lx, ly + 68, 'Top/Bottom', false);
+      button(lx, ly + 112, 'Keep readable', readable > .5);
+      button(lx, ly + 146, 'Pick on object', k < .16 && k > .04);
+      caption(k < .18 ? 'Mirror centre: the orange mark' : k < .52 ? 'Left/Right: a mirrored copy' : k < .8 ? 'Keep readable: text stays the right way round' : 'one decal, painted twice', win(k, k < .18 ? 0 : k < .52 ? .18 : k < .8 ? .52 : .8, 1));
+    },
+    brush: function (k) {
+      head(W * .45, H * .55, S * 7.4);
+      plane(1);
+      var R = S * .55, n = 70, t1 = win(k, .06, .8);
+      function at(t) { return [hd.x - hd.rx * (.18 + .5 * t), hd.y - hd.ry * .55 + hd.ry * 1.05 * t + Math.sin(t * 9) * hd.ry * .07]; }
+      ctx.save(); clipHead(); ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = R * 2;
+      [1, -1].forEach(function (sg) {
+        ctx.strokeStyle = FIL[2]; ctx.beginPath();
+        for (var i = 0; i <= n * t1; i++) { var p = at(i / n), x = sg > 0 ? p[0] : 2 * hd.x - p[0]; i ? ctx.lineTo(x, p[1]) : ctx.moveTo(x, p[1]); }
+        ctx.stroke();
+      });
+      ctx.restore(); shadeHead(); plane(1);
+      var p = at(t1), q = [2 * hd.x - p[0], p[1]];
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(p[0], p[1], R * 1.4, 0, 7); ctx.stroke();
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = ORA; ctx.beginPath(); ctx.arc(q[0], q[1], R * 1.4, 0, 7); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+      if (k < .85) cursor(p[0] + R * .3, p[1] + R * .3, true);
+      var lx = W * .74, ly = H * .32;
+      button(lx, ly, 'Brush (B)', true);
+      button(lx, ly + 44, 'Left/Right', true);
+      button(lx, ly + 78, 'Front/Back', false);
+      button(lx, ly + 112, 'Top/Bottom', false);
+      caption('every stroke, repeated on the mirrored side', win(k, 0, .7));
+    },
+    draw: function (k) {
+      head(W * .42, H * .55, S * 7.2);
+      var s = S * 1.6, ox = hd.x, oy = hd.y + S * .4;
+      var d = drawing(HEART, ox, oy, s, win(k, .03, .45));
+      var saved = k > .52, edit = win(k, .66, .86);
+      var nodes = d.nodes;
+      if (edit > 0) {                                               // Edit points: pull the top dip up and widen a lobe
+        var e = ease(Math.sin(edit * 3.1416 * .5));
+        nodes = place(HEART, ox, oy, s, -1, 1);
+        nodes[0].p[1] -= e * s * .9; nodes[1].h = [nodes[1].h[0] * (1 + e * .5), nodes[1].h[1] * (1 + e * .5)];
+      }
+      if (saved) {
+        ctx.save(); clipHead(); bez(nodes, nodes.length, true); ctx.fillStyle = FIL[1]; ctx.globalAlpha *= .55 + .45 * win(k, .88, .96); ctx.fill(); ctx.restore();
+        if (k < .88) { bez(nodes, nodes.length, true); ctx.strokeStyle = BLUE; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.6; ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1; }
+        shadeHead();
+        if (edit > 0 && edit < 1) handles(nodes, nodes.length, AMB);
+      } else {
+        if (d.closed) { bez(nodes, nodes.length, true); ctx.fillStyle = 'rgba(224,53,122,.35)'; ctx.fill(); }
+        bez(nodes, d.shown, d.closed); ctx.strokeStyle = PH; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+        handles(nodes, d.shown, AMB);
+        cursor(d.cur[0], d.cur[1], d.down);
+      }
+      var lx = W * .72, ly = H * .3;
+      button(lx, ly, 'Draw shape', !saved);
+      button(lx, ly + 34, 'Save as decal', k > .46 && k < .56);
+      if (saved) {
+        var y = ly + 84; ctx.strokeStyle = DIM; ctx.strokeRect(lx - 6, y - 12, 190, 24);
+        eyeLock(lx, y); txt('shape 1', lx + 50, y, 12, '#d9f7ef');
+        button(lx, y + 40, 'Edit points', edit > 0 && edit < 1);
+      }
+      caption(k < .46 ? 'your own curves, on the part' : k < .66 ? 'Save as decal: it keeps its points' : 'Edit points, Save, same decal', win(k, k < .46 ? 0 : k < .66 ? .46 : .66, 1));
+    },
+    end: function (k) {
+      var px = Math.max(34, Math.min(96, W / 8)), y = H * .42;
+      var glitch = k < .3 ? (Math.random() - .5) * 14 * (1 - k / .3) : 0;
+      FIL.forEach(function (c, i) { ctx.globalAlpha = .55; txt('NeotkoCM', W / 2 + glitch * (i - 1.5), y + (i - 1.5) * 2, px, c, 'center'); });
+      ctx.globalAlpha = 1; txt('NeotkoCM', W / 2, y, px, '#f1eee6', 'center');
+      txt('The Painter · 2.4.9', W / 2, y + px * .8, Math.max(13, px / 4.5), PH, 'center');
+      var sub = 'Shape mask · SVG decals · Mirror · Mirror brush';
+      txt(typed(sub, k * 2), W / 2, y + px * 1.25, Math.max(11, px / 7), AMB, 'center');
+      var bw = Math.min(W * .5, 320);
+      for (var i = 0; i < 4; i++) { ctx.fillStyle = FIL[i]; ctx.fillRect(W / 2 - bw / 2 + i * bw / 4, y + px * 1.6, bw / 4 * clamp(k * 3 - i * .3, 0, 1), 4); }
+    }
+  };
+
+  function render(el) {
+    ctx.fillStyle = '#07090a'; ctx.fillRect(0, 0, W, H);
+    var acc = 0, idx = 0;
+    while (idx < SCENES.length - 1 && el > acc + SCENES[idx].dur) acc += SCENES[idx++].dur;
+    var sc = SCENES[idx], ts = Math.min(el - acc, sc.dur), k = ts / sc.dur;
+    var last = idx === SCENES.length - 1;
+    ctx.globalAlpha = clamp(Math.min(ts / .25, last ? 1 : (sc.dur - ts) / .2), 0, 1);
+    DRAW[sc.id](k, ts);
+    ctx.globalAlpha = 1;
+    if (sc.id !== 'boot' && sc.id !== 'end') title(sc.label, k);
+    segs.forEach(function (b, i) { b.style.transform = 'scaleX(' + (i < idx ? 1 : i > idx ? 0 : k) + ')'; });
+    hudL.textContent = 'NeotkoCM // painter ' + (idx + 1 < 10 ? '0' : '') + (idx + 1) + '/' + SCENES.length;
+    hudR.textContent = 'T+' + el.toFixed(1).padStart(4, '0');
+  }
+  function frame(now) {
+    if (!running) return;
+    var el = (now - t0) / 1000;
+    if (el >= TOTAL) {
+      if (LOOP) { t0 = now; el = 0; }
+      else { render(TOTAL); running = false; return; }             // hold on the last frame
+    }
+    render(el);
+    raf = requestAnimationFrame(frame);
+  }
+  function play() { cancelAnimationFrame(raf); size(); running = true; t0 = performance.now(); raf = requestAnimationFrame(frame); }
+
+  root.querySelector('[data-replay]').addEventListener('click', play);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'r' || e.key === 'R' || e.key === ' ') { e.preventDefault(); play(); }
+    if (e.key === 'Escape') location.href = 'painter.html';
+  });
+  window.addEventListener('resize', function () { size(); if (!running) render(TOTAL); });
+  var calm = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var at = /[?&]t=([\d.]+)/.exec(location.search);                // ?t=12.5 freezes on that second
+  window.reelAt = function (s) { running = false; size(); render(Math.min(s, TOTAL)); };
+  // video export: fixes the size, then reelFrame(t) draws second t with the CRT baked into the canvas
+  window.reelTotal = TOTAL;
+  window.reelExport = function (w, h, d) {
+    running = false; cancelAnimationFrame(raf); window.__reelD = d || 1;
+    root.style.right = 'auto'; root.style.bottom = 'auto'; root.style.width = w + 'px'; root.style.height = h + 'px';
+    root.classList.add('clean'); size();
+    return cv;
+  };
+  window.reelFrame = function (t) {
+    render(Math.min(t, TOTAL));
+    ctx.fillStyle = 'rgba(0,0,0,.28)';
+    for (var y = 2; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+    var g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .3, W / 2, H / 2, Math.hypot(W, H) * .55);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.7)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    return cv;
+  };
+  if (at) reelAt(+at[1]);
+  else if (calm && !/[?&]play\b/.test(location.search)) { size(); render(TOTAL); } else play();
+})();
+</script>
+</body>
+</html>

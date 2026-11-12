@@ -139,6 +139,22 @@ namespace GUI {
     private:
         RenderData m_render_data;
 
+        // NEOTKO_SHAREDVERTS_TAG 4-nov — copia con vértices COMPARTIDOS (solo posiciones + índices
+        // del indexed_triangle_set original) para mallas grandes. La geometría normal repite 3
+        // vértices por triángulo para tener la normal de cara; esta no, y el shader saca la normal
+        // plana en el píxel (u_derived_normal en gouraud). Solo la usa el modo simple (sin sol)
+        // cuando s_prefer_shared está activo; el modo iluminado nunca la toca.
+        struct SharedData
+        {
+            std::vector<float>        positions;   // CPU hasta la primera subida a GPU
+            std::vector<unsigned int> indices;
+            unsigned int vbo_id{ 0 };
+            unsigned int ibo_id{ 0 };
+            size_t       indices_count{ 0 };
+        };
+        SharedData m_shared;
+        bool render_shared();
+
         // By default the vertex and index buffers data are sent to gpu at the first call to render() method.
         // If you need to initialize a model from outside the main thread, so that a call to render() may happen
         // before the initialization is complete, use the methods:
@@ -196,6 +212,13 @@ namespace GUI {
         // NEOTKO_SMOOTHNORMALS_TAG s229: faces closer than this many degrees are treated as one
         // smooth surface; anything sharper stays a hard edge (part rims, embossed text, chamfers).
         static constexpr float SmoothNormalsCreaseAngle = 30.0f;
+
+        // NEOTKO_SHAREDVERTS_TAG 4-nov — mientras sea true, render() de un modelo con copia
+        // compartida dibuja esa copia (si el shader activo declara u_derived_normal). Lo enciende
+        // y apaga GLCanvas3D alrededor de la pasada del modo simple.
+        static bool s_prefer_shared;
+        static constexpr size_t SharedMinTriangles = 50000;
+        bool has_shared() const { return m_shared.indices_count > 0 || !m_shared.indices.empty(); }
 
         size_t cpu_memory_used() const {
             size_t ret = 0;

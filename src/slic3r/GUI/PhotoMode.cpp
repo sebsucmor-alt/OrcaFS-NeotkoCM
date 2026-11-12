@@ -355,6 +355,23 @@ bool photo_mode_available()
     return ac != nullptr && ac->get_bool("neotko_libre_mode");
 }
 
+bool lit_render_switch()
+{
+    const AppConfig* ac = GUI::wxGetApp().app_config;
+    return ac == nullptr || ac->get("neotko_lit_render") != "0";
+}
+
+bool lit_render_on()
+{
+    return photo_mode_available() && (lit_render_switch() || photo_mode().active);
+}
+
+void lit_render_toggle()
+{
+    if (AppConfig* ac = GUI::wxGetApp().app_config)
+        ac->set("neotko_lit_render", lit_render_switch() ? "0" : "1");
+}
+
 bool photo_mode_hides_bed()
 {
     const PhotoModeState& s = photo_mode();

@@ -46,6 +46,7 @@ namespace NeoDebug {
         { "ORCA_DEBUG_SUPPORTZONES","SUPPORTZONES" }, // NEOTKO_SUPPORTZONES_TAG s289
         { "ORCA_DEBUG_NEOSTROKE",   "NEOSTROKE"    }, // NEOTKO_NEOSTROKE_TAG s335
         { "ORCA_DEBUG_PRINTORDER",  "PRINTORDER"   }, // NEOTKO_PRINTORDER_TAG 2_49
+        { "ORCA_DEBUG_FRAMEPROBE",  "FRAMEPROBE"   }, // NEOTKO_FRAMEPROBE_TAG 4-nov
     };
 
     const char* channel_name(Channel c) { return k_chans[static_cast<int>(c)].name; }
@@ -91,7 +92,8 @@ namespace NeoDebug {
                 // unconditional `return false` in enabled(). Now it simply starts OFF even under
                 // ORCA_DEBUG_ALL: asking for it explicitly still works, and the console can arm
                 // it as a conscious decision instead of it being impossible.
-                s_on[i].store((i == GRAVITY) ? own : (own || all), std::memory_order_relaxed);
+                // NEOTKO_FRAMEPROBE_TAG 4-nov — FRAMEPROBE igual: una línea por fotograma llena el disco.
+                s_on[i].store((i == GRAVITY || i == FRAMEPROBE) ? own : (own || all), std::memory_order_relaxed);
             }
         });
     }
@@ -173,6 +175,11 @@ namespace NeoDebug {
 
     void write(Channel c, const std::string& msg)
     {
+        // 12-nov-2026 (2_50): nothing is written unless the channel is switched on (console checkbox or
+        // ORCA_DEBUG_<CHANNEL>). Several probes called write() directly and filled /tmp/neotko_logs on every
+        // slice for every user.
+        if (!enabled(c))
+            return;
         ensure_dir();
         static std::mutex s_mtx;
         std::lock_guard<std::mutex> lk(s_mtx);

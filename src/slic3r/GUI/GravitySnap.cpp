@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <cstdlib>
 
 #include "3DScene.hpp"
 #include "GUI_App.hpp"
@@ -36,7 +38,72 @@ struct InstanceFootprint
     bool    valid = false;
 };
 
+InstanceFootprint compute_footprint_uncached(const GLVolumeCollection &volumes, int object_idx, int instance_idx);
+
+// NEOTKO_SNAPCACHE_TAG 4-nov — la huella se pedía varias veces en CADA movimiento del ratón al
+// arrastrar (la mía, la de cada candidata y la del indicador), y cada vez transformaba todos los
+// vértices de las envolventes 3D y rehacía la envolvente 2D: con el SKULL (27 piezas) eso eran
+// 110-210 ms por movimiento. Al arrastrar, la instancia solo se TRASLADA, así que la huella es la
+// misma desplazada. La caché guarda la huella con la traslación de la primera pieza y la clave
+// lleva todo lo demás (envolventes, giro/escala de cada pieza y su posición relativa): si solo
+// cambia la traslación común, se traslada el polígono. ORCA_NO_SNAP_CACHE=1 la desactiva.
 InstanceFootprint compute_footprint(const GLVolumeCollection &volumes, int object_idx, int instance_idx)
+{
+    static const bool no_cache = std::getenv("ORCA_NO_SNAP_CACHE") != nullptr;
+    if (no_cache)
+        return compute_footprint_uncached(volumes, object_idx, instance_idx);
+
+    struct Entry { size_t key = 0; Vec3d t0 = Vec3d::Zero(); InstanceFootprint fp; };
+    static std::map<std::pair<int, int>, Entry> cache;
+
+    size_t key = 1469598103934665603ull;
+    auto mix_bytes = [&key](const void *p, size_t n) {
+        const unsigned char *b = static_cast<const unsigned char *>(p);
+        for (size_t i = 0; i < n; ++i) { key ^= b[i]; key *= 1099511628211ull; }
+    };
+    bool  have_first = false;
+    Vec3d t_first    = Vec3d::Zero();
+    for (const GLVolume *v : volumes.volumes) {
+        if (v == nullptr || v->is_wipe_tower || v->is_modifier)
+            continue;
+        if (v->object_idx() != object_idx || v->instance_idx() != instance_idx)
+            continue;
+        const TriangleMesh *hull = v->convex_hull();
+        if (hull == nullptr || hull->its.vertices.empty())
+            continue;
+        const Transform3d m = v->world_matrix();
+        const Vec3d t = m.translation();
+        if (!have_first) { t_first = t; have_first = true; }
+        const Vec3d rel = t - t_first;
+        const Matrix3d lin = m.linear();
+        const size_t nv = hull->its.vertices.size();
+        mix_bytes(&hull, sizeof(hull));
+        mix_bytes(&nv, sizeof(nv));
+        mix_bytes(lin.data(), sizeof(double) * 9);
+        mix_bytes(rel.data(), sizeof(double) * 3);
+    }
+    if (!have_first)
+        return InstanceFootprint();
+
+    const std::pair<int, int> id(object_idx, instance_idx);
+    auto it = cache.find(id);
+    if (it != cache.end() && it->second.key == key) {
+        InstanceFootprint fp = it->second.fp;
+        const Vec3d d = t_first - it->second.t0;
+        fp.hull.translate(coord_t(scale_(d.x())), coord_t(scale_(d.y())));
+        fp.min_z += d.z();
+        fp.max_z += d.z();
+        return fp;
+    }
+    Entry e;
+    e.key = key;
+    e.t0  = t_first;
+    e.fp  = compute_footprint_uncached(volumes, object_idx, instance_idx);
+    cache[id] = e;
+    return e.fp;
+}
+
+InstanceFootprint compute_footprint_uncached(const GLVolumeCollection &volumes, int object_idx, int instance_idx)
 {
     InstanceFootprint fp;
     Points pts;

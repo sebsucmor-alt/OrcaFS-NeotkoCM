@@ -1,0 +1,752 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2.5.0 Reel — Neotko for Snapmaker Orca</title>
+<meta name="description" content="A 24 second reel of what is new in 2.5.0: Living Clay, the Primitive Generator with OpenSCAD scripts, and stickers built from the layers below, HueForge style.">
+<style>
+  /* reel 2.5.0 — Wipeout era race graphics in the tour's dark palette: flat colour, hard angles, chevrons,
+     hazard stripes, small codes. Always dark on purpose. */
+  :root { --sans: "Helvetica Neue", "Segoe UI", Arial, sans-serif; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  html, body { margin: 0; height: 100%; background: #111417; overflow: hidden; }
+  .reel { position: fixed; inset: 0; background: #111417; color: #eaf6ff; font-family: var(--sans); overflow: hidden; }
+  .reel canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .reel__bar { position: absolute; left: 18px; right: 18px; bottom: 16px; display: flex; gap: 5px; align-items: center; }
+  .reel__bar i { flex: 1; height: 4px; border-radius: 2px; background: #2a2f35; position: relative; overflow: hidden; }
+  .reel__bar i b { position: absolute; inset: 0; border-radius: 2px; transform-origin: left; transform: scaleX(0);
+    background: #2dd4bf; }
+  .reel__btn { margin-left: 10px; border: 1px solid #3a4149; color: #e9e7e2; background: #1d2226;
+    font: 500 .7rem var(--mono); letter-spacing: .08em; padding: .38rem .8rem; cursor: pointer; text-decoration: none; }
+  .reel__btn:hover, .reel__btn:focus-visible { background: #2dd4bf; color: #06201d; border-color: #2dd4bf; outline: none; }
+  .clean .reel__bar { display: none; }
+</style>
+</head>
+<body>
+<div class="reel" id="reel" role="img" aria-label="2.5.0 reel: Living Clay, the Primitive Generator with OpenSCAD, and Depth recipe stickers">
+  <canvas></canvas>
+  <div class="reel__bar"><span style="display:contents" data-segs></span>
+    <button class="reel__btn" type="button" data-replay>Replay ▸</button>
+    <a class="reel__btn" href="index.html">Back to the tour</a>
+  </div>
+</div>
+<script>
+/* Everything here is a drawing (a diagram of what the app does), except the last image of the sticker scene,
+   which is a photo of a real print, the head in the Living Clay scene (an illustration), and the skull scene, which is real app captures. Keep it that way: only shipped and approved features go in. */
+(function () {
+  'use strict';
+  var root = document.getElementById('reel');
+  var cv = root.querySelector('canvas'), ctx = cv.getContext('2d');
+  var W = 0, H = 0, D = 1, U = 1;   // U = one unit: 1/100 of the short side
+  var FIL = { c: '#14b6e8', m: '#e8247f', y: '#ffd51f', w: '#f2f4f7' };   // the four slots, never more on screen
+  var photo = new Image(); photo.src = '../images/Sticker-250-cloud-realprint.webp';
+  var head = new Image(); head.src = '../images/Reel-250-head.webp';   // the head illustration, background removed
+  var sword = new Image(); sword.src = '../images/Reel-250-sword.webp'; // the sword illustration (scene kept, not in SCENES)
+  var skullDecals = new Image(); skullDecals.src = '../images/Reel-250-skull-decals.webp';   // app screenshot
+  var crackSvg = new Image(); crackSvg.src = '../images/Reel-250-crack-svg.webp';         // app: SVG crack on the face
+  var crackSprite = new Image(); crackSprite.src = '../images/Reel-250-crack-sprite.webp'; // 30 frames of Decal-LivingClay.mov, 6x5
+  var crackSlice = new Image(); crackSlice.src = '../images/Reel-250-crack-slice.webp';    // the crack engraved, G-code preview
+  var skullSprite = new Image(); skullSprite.src = '../images/Reel-250-skull-sprite.webp';   // 25 frames of Clay-akira-skull.gif
+
+  var SCENES = [
+    { id: 'open',   dur: 2.4, label: '' },
+    { id: 'clay',   dur: 7.0, label: 'Living Clay', sub: 'change the shape, not only the colour' },
+    { id: 'crack',  dur: 7.5, label: 'Living Clay, live', sub: 'an SVG crack, raised, moved, engraved' },
+    { id: 'skull',  dur: 6.5, label: 'Clay, for real', sub: 'the Akira skull, painted and raised in the app' },
+    { id: 'prim',   dur: 6.0, label: 'Primitive Generator', sub: 'real sizes, and your OpenSCAD scripts' },
+    { id: 'stick',  dur: 7.0, label: 'Stickers from the layers below', sub: 'HueForge style, on any flat face' },
+    { id: 'end',    dur: 2.8, label: '' }
+  ];
+  var TOTAL = SCENES.reduce(function (a, s) { return a + s.dur; }, 0);
+  var segHost = root.querySelector('[data-segs]'), segs = [];
+  SCENES.forEach(function () { var i = document.createElement('i'), b = document.createElement('b'); i.appendChild(b); segHost.appendChild(i); segs.push(b); });
+
+  function size() {
+    D = window.__reelD || window.devicePixelRatio || 1;
+    var r = root.getBoundingClientRect();
+    W = Math.round(r.width); H = Math.round(r.height);
+    cv.width = W * D; cv.height = H * D; ctx.setTransform(D, 0, 0, D, 0, 0);
+    U = Math.min(W, H) / 100;
+  }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function ease(t) { t = clamp(t, 0, 1); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+  function seg(k, a, b) { return clamp((k - a) / (b - a), 0, 1); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function hex(h, a) { var n = parseInt(h.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + (a == null ? 1 : a) + ')'; }
+  function shade(h, f) { var n = parseInt(h.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+    function c(v) { return Math.round(clamp(f < 0 ? v * (1 + f) : v + (255 - v) * f, 0, 255)); }
+    return 'rgb(' + c(r) + ',' + c(g) + ',' + c(b) + ')'; }
+
+  /* ---------------------------------------------------------------- the look: Wipeout era race graphics, in the
+     tour's own palette. Flat colour, hard angles, chevrons, hazard stripes, small technical labels. No gloss. */
+  var P = { bg: '#111417', bg2: '#171b1e', panel: '#1d2226', rule: '#2a2f35', firm: '#3a4149', ink: '#e9e7e2',
+            soft: '#9aa2ad', faint: '#6f7883', acc: '#2dd4bf', warn: '#e0a458', alert: '#f47a9b' };
+  var SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace';
+  var SCENE_NO = 0;
+  function backdrop(t) {
+    ctx.fillStyle = P.bg; ctx.fillRect(0, 0, W, H);
+    // a thin grid, slowly sliding: the track
+    var g = U * 6, off = (t * U * 4) % g;
+    ctx.strokeStyle = 'rgba(42,47,53,.7)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (var x = -g + off; x < W + g; x += g) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    for (var y = 0; y < H; y += g) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+    // a big faint diagonal band
+    ctx.save(); ctx.globalAlpha = .06; ctx.fillStyle = P.acc;
+    ctx.beginPath(); ctx.moveTo(W * .55, 0); ctx.lineTo(W * .78, 0); ctx.lineTo(W * .48, H); ctx.lineTo(W * .25, H); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    // frame: corner brackets and the small codes
+    var m = U * 3, L = U * 5;
+    ctx.strokeStyle = P.firm; ctx.lineWidth = 2; ctx.beginPath();
+    [[m, m, 1, 1], [W - m, m, -1, 1], [m, H - m, 1, -1], [W - m, H - m, -1, -1]].forEach(function (c) {
+      ctx.moveTo(c[0] + c[2] * L, c[1]); ctx.lineTo(c[0], c[1]); ctx.lineTo(c[0], c[1] + c[3] * L);
+    });
+    ctx.stroke();
+    ctx.font = '500 ' + U * 1.6 + 'px ' + MONO; ctx.fillStyle = P.faint; ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left'; ctx.fillText('NTK // 2.5.0', m + U * 1.5, m + U * 1.5);
+    ctx.textAlign = 'right'; ctx.fillText('SNAPMAKER U1 · 4 SLOTS', W - m - U * 1.5, m + U * 1.5);
+    ctx.fillText(('0' + SCENE_NO).slice(-2) + ' / 06', W - m - U * 1.5, H - m - U * 1.5);
+    ctx.textBaseline = 'alphabetic';
+  }
+  function glass(x, y, w, h) {   // a flat panel with one cut corner and an accent edge
+    var c = Math.min(w, h) * .18;
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w - c, y); ctx.lineTo(x + w, y + c); ctx.lineTo(x + w, y + h); ctx.lineTo(x, y + h); ctx.closePath();
+    ctx.fillStyle = 'rgba(29,34,38,.92)'; ctx.fill();
+    ctx.strokeStyle = P.firm; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = P.acc; ctx.fillRect(x, y, U * .6, h);
+    ctx.restore();
+  }
+  function chevrons(x, y, n, size, col, a, t) {
+    ctx.save(); ctx.globalAlpha *= a; ctx.strokeStyle = col; ctx.lineWidth = size * .28; ctx.lineJoin = 'miter';
+    for (var i = 0; i < n; ++i) {
+      var k = ((t * 2 + i / n) % 1);
+      ctx.globalAlpha = a * (.25 + .75 * k);
+      var cx = x + i * size * .9;
+      ctx.beginPath(); ctx.moveTo(cx, y - size / 2); ctx.lineTo(cx + size * .45, y); ctx.lineTo(cx, y + size / 2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function hazard(x, y, w, h, col) {
+    ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.fillStyle = P.bg2; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = col;
+    for (var i = -h; i < w + h; i += h * 1.4) { ctx.beginPath(); ctx.moveTo(x + i, y + h); ctx.lineTo(x + i + h * .7, y + h); ctx.lineTo(x + i + h * 1.4, y); ctx.lineTo(x + i + h * .7, y); ctx.closePath(); ctx.fill(); }
+    ctx.restore();
+  }
+  function sweep(k, a, b) {   // speed lines crossing the screen
+    var p = seg(k, a, b); if (p <= 0 || p >= 1) return;
+    ctx.save(); ctx.strokeStyle = P.acc; ctx.lineWidth = 2;
+    for (var i = 0; i < 9; ++i) {
+      var y = H * (.12 + i * .09), len = W * (.15 + (i * 37 % 10) / 30), x = lerp(-len, W + len, ease(clamp(p * 1.3 - i * .03, 0, 1)));
+      ctx.globalAlpha = .35 + (i % 3) * .15;
+      ctx.beginPath(); ctx.moveTo(x - len, y); ctx.lineTo(x, y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function chromeText(txt, x, y, px, align, a) {   // the title: flat, medium weight, with an accent rule under it
+    ctx.save(); ctx.globalAlpha *= (a == null ? 1 : a);
+    ctx.font = '600 ' + px + 'px ' + SANS; ctx.textAlign = align || 'center';
+    ctx.fillStyle = P.ink; ctx.fillText(txt, x, y);
+    var w = ctx.measureText(txt).width, x0 = align === 'left' ? x : x - w / 2;
+    ctx.fillStyle = P.acc; ctx.fillRect(x0, y + px * .22, w * (a == null ? 1 : a), Math.max(2, px * .05));
+    ctx.restore();
+  }
+  function lowerThird(label, sub, k) {
+    var a = ease(seg(k, .02, .12)) * (1 - ease(seg(k, .92, 1)));
+    if (a <= 0) return;
+    ctx.font = '600 ' + U * 3.6 + 'px ' + SANS;
+    var h = U * 8, tw = ctx.measureText(label).width, w = tw + U * 18;
+    var x = lerp(-w, U * 4, ease(seg(k, .02, .14))), y = H - U * 19;
+    ctx.save(); ctx.globalAlpha *= a;
+    // the plate, cut on the right like a parallelogram
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w - h * .55, y + h); ctx.lineTo(x, y + h); ctx.closePath();
+    ctx.fillStyle = P.panel; ctx.fill(); ctx.strokeStyle = P.firm; ctx.lineWidth = 1; ctx.stroke();
+    // the number block in accent
+    ctx.fillStyle = P.acc; ctx.fillRect(x, y, U * 7, h);
+    ctx.fillStyle = '#06201d'; ctx.font = '700 ' + U * 2.6 + 'px ' + MONO; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(('0' + SCENE_NO).slice(-2), x + U * 3.5, y + h / 2);
+    ctx.fillStyle = P.ink; ctx.font = '600 ' + U * 3.6 + 'px ' + SANS; ctx.textAlign = 'left';
+    ctx.fillText(label, x + U * 9.5, y + h / 2);
+    if (sub) {
+      ctx.font = '500 ' + U * 1.9 + 'px ' + MONO; ctx.fillStyle = 'rgba(154,162,173,' + ease(seg(k, .08, .2)) + ')';
+      ctx.fillText(sub, x + U * 9.5, y + h + U * 3);
+    }
+    hazard(x + w - h * .1, y + h - U * 1.4, U * 10, U * 1.4, P.warn);
+    // the four slots as flat squares
+    ['c', 'm', 'y', 'w'].forEach(function (f, i) { bead(x + w + U * 3 + i * U * 3, y + h / 2, U * 1.1, FIL[f]); });
+    ctx.textBaseline = 'alphabetic';
+    ctx.restore();
+  }
+  function bead(x, y, r, col) {
+    ctx.fillStyle = col; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 1; ctx.strokeRect(x - r + .5, y - r + .5, r * 2 - 1, r * 2 - 1);
+  }
+  /* an isometric slab: (cx, cy) centre of its top face, w × d footprint, h tall */
+  function iso(x, y, z) { return [W * .5 + (x - y) * U * .86, H * .56 + (x + y) * U * .5 - z * U]; }
+  function poly(pts, fill, stroke) {
+    ctx.beginPath(); pts.forEach(function (p, i) { if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); });
+    ctx.closePath(); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+  }
+  function prismOf(shape, z0, z1, col, ox, oy) {   // shape: [[x,y]...] in plate units; extruded between z0 and z1
+    var top = shape.map(function (p) { return iso(p[0] + ox, p[1] + oy, z1); });
+    var bot = shape.map(function (p) { return iso(p[0] + ox, p[1] + oy, z0); });
+    for (var i = 0; i < shape.length; ++i) {
+      var j = (i + 1) % shape.length, a = shape[i], b = shape[j];
+      var nx = b[1] - a[1], ny = -(b[0] - a[0]);            // outward-ish normal in plate space
+      if (nx + ny < 0) continue;                             // back faces (facing away from the camera)
+      poly([bot[i], bot[j], top[j], top[i]], shade(col, nx > ny ? -.28 : -.12));
+    }
+    poly(top, col, 'rgba(0,0,0,.35)');
+  }
+  function plate(t) {
+    var s = 26;
+    poly([iso(-s, -s, 0), iso(s, -s, 0), iso(s, s, 0), iso(-s, s, 0)], '#171b1e', '#3a4149');
+    ctx.save(); ctx.strokeStyle = 'rgba(58,65,73,.6)'; ctx.lineWidth = 1;
+    for (var g = -s; g <= s; g += 6.5) {
+      var a = iso(g, -s, 0), b = iso(g, s, 0), c = iso(-s, g, 0), d = iso(s, g, 0);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.moveTo(c[0], c[1]); ctx.lineTo(d[0], d[1]); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function star(n, r1, r2, rot) {
+    var pts = []; for (var i = 0; i < n * 2; ++i) { var r = i % 2 ? r2 : r1, a = rot + i * Math.PI / n; pts.push([Math.cos(a) * r, Math.sin(a) * r]); }
+    return pts;
+  }
+  function cursor(x, y, down) {
+    ctx.save(); ctx.translate(x, y);
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = '#0a2a55'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, U * 4.6); ctx.lineTo(U * 1.2, U * 3.4); ctx.lineTo(U * 2.2, U * 5.4);
+    ctx.lineTo(U * 2.9, U * 5); ctx.lineTo(U * 1.9, U * 3.1); ctx.lineTo(U * 3.4, U * 3.1); ctx.closePath(); ctx.fill(); ctx.stroke();
+    if (down) { ctx.strokeStyle = 'rgba(120,230,255,.8)'; ctx.beginPath(); ctx.arc(0, 0, U * 2.2, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.restore();
+  }
+
+  /* ---------------------------------------------------------------- scenes */
+  var DRAW = {};
+  DRAW.open = function (k, ts) {
+    backdrop(ts);
+    var a = ease(seg(k, .05, .4));
+    ['c', 'm', 'y', 'w'].forEach(function (f, i) {
+      var ang = ts * 1.6 + i * Math.PI / 2, rr = lerp(U * 40, U * 16, a);
+      bead(W / 2 + Math.cos(ang) * rr, H * .3 + Math.sin(ang) * rr * .2, U * 1.6, FIL[f]);
+    });
+    chromeText('Neotko 2.5.0', W / 2, H * .47, U * 8, 'center', a);
+    chevrons(W / 2 - U * 30, H * .66, 6, U * 3, P.acc, ease(seg(k, .3, .6)), ts);
+    hazard(W / 2 + U * 8, H * .655, U * 22, U * 1.6, P.warn);
+    ctx.save(); ctx.globalAlpha *= ease(seg(k, .35, .6));
+    ctx.font = '500 ' + U * 3 + 'px '+SANS+''; ctx.textAlign = 'center';
+    ctx.fillStyle = P.soft; ctx.fillText('the Orca fork for the Snapmaker U1', W / 2, H * .56);
+    ctx.restore();
+    sweep(k, .3, .9);
+  };
+
+  DRAW.clay = function (k, ts) {
+    backdrop(ts);
+    // a face, front and profile. Paint brows and a cheek tattoo, Clay raises them, then the brows grow and the
+    // tattoo is dragged: the parts follow and the shape of the face changes, not only its colour. (a drawing)
+    var paint = ease(seg(k, .04, .3)), rise = ease(seg(k, .32, .5)), grow = ease(seg(k, .56, .76)), drag = ease(seg(k, .74, .92));
+    // the head: an isometric illustration (393 × 611), everything else is drawn on top in its pixel space
+    var ih = H * .66, iw = ih * 393 / 611, ix = W * .34 - iw / 2, iy = H * .1, f = ih / 611;
+    function I(x, y) { return [ix + x * f, iy + y * f]; }
+    var R = Math.min(W * .17, H * .27), SKIN_D = '#c9a58e';
+    if (head.complete && head.naturalWidth) ctx.drawImage(head, ix, iy, iw, ih);
+    var browScale = 1 + grow * .3, browThick = 1 + grow * 1.2, lift = (rise * 5 + grow * 4) * f;
+    function strokePts(pts, col, w) {
+      if (pts.length < 2) return;
+      ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath(); pts.forEach(function (p, i) { if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); }); ctx.stroke();
+    }
+    // brows over the closed eyes (left eye ~ (250,330), right eye ~ (365,285), seen at three quarters)
+    function brow(x0, y0, x1, y1, arch, pr) {
+      var pts = [], N = 24, mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      for (var i = 0; i <= N * pr; ++i) {
+        var u = i / N, x = lerp(x0, x1, u), y = lerp(y0, y1, u) - Math.sin(u * Math.PI) * arch;
+        x = mx + (x - mx) * browScale; y = my + (y - my) * browScale - (browScale - 1) * 10;
+        pts.push(I(x, y));
+      }
+      return pts;
+    }
+    var BROWS = [[212, 312, 292, 300, 13], [338, 268, 388, 252, 9]];
+    var tx = lerp(222, 128, drag), ty = lerp(420, 205, drag);
+    function tattoo(pr) {
+      var pts = []; for (var i = 0; i <= 30 * pr; ++i) { var u = i / 30, r = 9 + 9 * Math.cos(u * Math.PI * 6);
+        pts.push(I(tx + Math.cos(u * Math.PI * 2) * r, ty + Math.sin(u * Math.PI * 2) * r * .8)); }
+      return pts;
+    }
+    BROWS.forEach(function (bw) {
+      var pts = brow(bw[0], bw[1], bw[2], bw[3], bw[4], paint);
+      var wdt = 10 * f * browThick;
+      if (lift > 0) strokePts(pts.map(function (p) { return [p[0] + lift * .5, p[1] + lift]; }), 'rgba(60,30,20,.35)', wdt);
+      strokePts(pts, FIL.m, wdt);
+      if (rise > 0) strokePts(pts.map(function (p) { return [p[0], p[1] - wdt * .22]; }), 'rgba(255,255,255,.35)', wdt * .25);
+    });
+    var tp = tattoo(paint);
+    if (lift > 0) strokePts(tp.map(function (p) { return [p[0] + lift * .4, p[1] + lift * .7]; }), 'rgba(60,30,20,.35)', 5 * f);
+    strokePts(tp, FIL.c, 5 * f);
+    // the brush, then the hand
+    if (paint < 1) { var bp = brow(BROWS[0][0], BROWS[0][1], BROWS[0][2], BROWS[0][3], BROWS[0][4], paint).slice(-1)[0] || I(250, 300); cursor(bp[0], bp[1], true); }
+    else if (k > .74 && k < .94) { var hp = I(tx + 8, ty - 4); cursor(hp[0], hp[1], drag > 0 && drag < 1); }
+    // profile: the brow ridge grows out as volume
+    var px = W * .76, py = H * .44, ph = R * 1.05;
+    glass(px - R * .75, py - ph - U * 3, R * 1.5, ph * 2 + U * 6);
+    ctx.save();
+    ctx.font = '500 ' + U * 1.6 + 'px ' + MONO; ctx.fillStyle = P.faint; ctx.textAlign = 'left';
+    ctx.fillText('PROFILE // SECTION', px - R * .6, py - ph);
+    // a face profile looking right, from key points (u = 0 top .. 1 bottom, x as a fraction of R) and a smooth curve
+    var PROF = [[0, -.32], [.06, -.06], [.14, .08], [.22, .13], [.27, .155], [.31, .12], [.35, .105], [.42, .17],
+                [.49, .27], [.52, .25], [.555, .15], [.6, .16], [.635, .19], [.66, .15], [.685, .175], [.72, .13],
+                [.76, .11], [.81, .16], [.85, .12], [.88, .0], [.93, -.07], [1, -.08]];
+    function prof(bump) {   // bump = how far the brow sticks out
+      var pts = [], N = 120;
+      for (var i = 0; i <= N; ++i) {
+        var u = i / N, j = 0; while (j < PROF.length - 2 && PROF[j + 1][0] < u) ++j;
+        var p0 = PROF[Math.max(j - 1, 0)], p1 = PROF[j], p2 = PROF[j + 1], p3 = PROF[Math.min(j + 2, PROF.length - 1)];
+        var t = (u - p1[0]) / (p2[0] - p1[0]), t2 = t * t, t3 = t2 * t;
+        var xf = .5 * (2 * p1[1] + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3);
+        var bb = Math.exp(-Math.pow((u - .26) / .035, 2)) * bump;
+        pts.push([px + R * xf + bb, py - ph * .82 + u * ph * 1.64]);
+      }
+      return pts;
+    }
+    var base = prof(0), now = prof(R * (rise * .07 + grow * .1));
+    ctx.beginPath(); ctx.moveTo(px - R * .45, base[0][1]); base.forEach(function (p) { ctx.lineTo(p[0], p[1]); }); ctx.lineTo(px - R * .45, base[base.length - 1][1]); ctx.closePath();
+    ctx.fillStyle = SKIN_D; ctx.fill();
+    if (rise > 0) {
+      ctx.beginPath(); base.forEach(function (p, i) { if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); });
+      for (var i = now.length - 1; i >= 0; --i) ctx.lineTo(now[i][0], now[i][1]);
+      ctx.closePath(); ctx.fillStyle = FIL.m; ctx.fill();
+    }
+    ctx.strokeStyle = P.acc; ctx.lineWidth = 1.5; ctx.beginPath(); now.forEach(function (p, i) { if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); }); ctx.stroke();
+    ctx.restore();
+    // what is happening, in one line
+    ctx.save(); ctx.font = '600 ' + U * 2.4 + 'px ' + SANS; ctx.textAlign = 'center';
+    var tag = k < .31 ? 'paint brows and a tattoo' : k < .55 ? 'Clay raises them, a part per colour'
+            : k < .75 ? 'bigger brows: the face changes shape' : 'drag the tattoo, the part follows';
+    var tw = ctx.measureText(tag).width + U * 5;
+    glass(W / 2 - tw / 2, H * .07, tw, U * 6.4);
+    ctx.fillStyle = P.ink; ctx.fillText(tag, W / 2, H * .07 + U * 4.2);
+    ctx.restore();
+    sweep(k, .52, .62);
+  };
+
+  /* ---------------------------------------------------------------- a tiny 3D renderer (flat shaded, sorted) */
+  function M3() { return { tris: [] }; }
+  function addQuad(m, a, b, c, d, col) { m.tris.push([a, b, c, col], [a, c, d, col]); }
+  function addPrism(m, poly2, z0, z1, col, map) {   // extrude a 2D polygon (x,y) between z0 and z1; map(x,y,z) → [x,y,z]
+    map = map || function (x, y, z) { return [x, y, z]; };
+    var n = poly2.length, i;
+    for (i = 0; i < n; ++i) {
+      var a = poly2[i], b = poly2[(i + 1) % n];
+      addQuad(m, map(a[0], a[1], z0), map(b[0], b[1], z0), map(b[0], b[1], z1), map(a[0], a[1], z1), col);
+    }
+    for (i = 1; i + 1 < n; ++i) {    // fan caps (the shapes used here are convex or star shaped from the first point)
+      m.tris.push([map(poly2[0][0], poly2[0][1], z1), map(poly2[i][0], poly2[i][1], z1), map(poly2[i + 1][0], poly2[i + 1][1], z1), col]);
+      m.tris.push([map(poly2[0][0], poly2[0][1], z0), map(poly2[i + 1][0], poly2[i + 1][1], z0), map(poly2[i][0], poly2[i][1], z0), col]);
+    }
+  }
+  function draw3D(m, cx, cy, scale, yaw, pitch) {
+    var cyw = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+    var L = [-.45, .6, .65], ll = Math.hypot(L[0], L[1], L[2]); L = [L[0] / ll, L[1] / ll, L[2] / ll];
+    function xf(v) { var x = v[0] * cyw + v[2] * syw, z = -v[0] * syw + v[2] * cyw, y = v[1]; var y2 = y * cp - z * sp, z2 = y * sp + z * cp; return [x, y2, z2]; }
+    var out = [];
+    m.tris.forEach(function (t) {
+      var a = xf(t[0]), b = xf(t[1]), c = xf(t[2]);
+      var ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+      var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, nl = Math.hypot(nx, ny, nz) || 1;
+      nx /= nl; ny /= nl; nz /= nl;
+      if (nz < 0) return;                                  // back face (camera looks along -z)
+      var f = 1 / (1 + (a[2] + b[2] + c[2]) / 3 * -.004);  // a little perspective
+      var lam = Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]);
+      out.push({ z: (a[2] + b[2] + c[2]) / 3, p: [a, b, c].map(function (q) { return [cx + q[0] * scale * f, cy - q[1] * scale * f]; }),
+                 col: shade(t[3], -.55 + .75 * lam) });
+    });
+    out.sort(function (A, B) { return A.z - B.z; });
+    out.forEach(function (o) {
+      ctx.beginPath(); ctx.moveTo(o.p[0][0], o.p[0][1]); ctx.lineTo(o.p[1][0], o.p[1][1]); ctx.lineTo(o.p[2][0], o.p[2][1]); ctx.closePath();
+      ctx.fillStyle = o.col; ctx.fill(); ctx.strokeStyle = o.col; ctx.lineWidth = .6; ctx.stroke();
+    });
+  }
+
+  /* the sword: blade (white), guard (yellow), grip (magenta), runes (cyan). A drawing, built here in code. */
+  var RUNES = [   // four simple glyphs as polylines in rune space (−1..1)
+    [[[-.6, -1], [-.6, 1]], [[-.6, .2], [.6, 1]], [[-.6, .2], [.6, -.6]]],
+    [[[0, -1], [0, 1]], [[-.7, .5], [.7, -.5]], [[-.7, -.5], [.7, .5]]],
+    [[[-.6, -1], [-.6, 1], [.6, .3], [-.6, -.3]]],
+    [[[-.7, 1], [0, -1], [.7, 1]], [[-.4, .1], [.4, .1]]]
+  ];
+  function swordMesh(rise, paintK) {
+    var m = M3(), t = .9;   // blade half thickness
+    var blade = [[-3, 6], [3, 6], [2.6, 44], [0, 52], [-2.6, 44]];
+    addPrism(m, blade, -t, t, FIL.w);
+    addPrism(m, [[-11, 4], [11, 4], [12.5, 6], [-12.5, 6]], -2, 2, FIL.y);           // guard
+    addPrism(m, [[-1.6, -9], [1.6, -9], [1.6, 4], [-1.6, 4]], -1.6, 1.6, FIL.m);      // grip
+    addPrism(m, [[-3, -12], [3, -12], [3.6, -9], [-3.6, -9]], -2.6, 2.6, FIL.y);      // pommel
+    // runes on the blade's front face, raised by `rise` (mm), painted progressively by paintK
+    var shown = paintK * RUNES.length;
+    RUNES.forEach(function (rn, ri) {
+      if (ri >= shown) return;
+      var cxr = 0, cyr = 13 + ri * 7.5, s = 1.7, w = .42, h = t + .05 + rise;
+      rn.forEach(function (pl) {
+        for (var i = 0; i + 1 < pl.length; ++i) {
+          var ax = cxr + pl[i][0] * s, ay = cyr + pl[i][1] * s, bx = cxr + pl[i + 1][0] * s, by = cyr + pl[i + 1][1] * s;
+          var dx = bx - ax, dy = by - ay, l = Math.hypot(dx, dy) || 1, nx = -dy / l * w, ny = dx / l * w;
+          addPrism(m, [[ax + nx, ay + ny], [bx + nx, by + ny], [bx - nx, by - ny], [ax - nx, ay - ny]], t - .02, h, FIL.c);
+        }
+      });
+    });
+    return m;
+  }
+  DRAW.sword = function (k, ts) {
+    backdrop(ts);
+    // the sword is an illustration (1425 × 808 source); the runes are drawn on its fuller, along the blade
+    var paint = ease(seg(k, .06, .38)), rise = ease(seg(k, .42, .66)) * 1.6, push = ease(seg(k, .66, 1));
+    var sw = Math.min(W * .78, H * 1.25), sh = sw * 808 / 1425, sx = W * .06, sy = H * .2 + Math.sin(ts * 1.2) * U * .6;
+    var f = sw / 1425;
+    function S(x, y) { return [sx + x * f, sy + y * f]; }
+    if (sword.complete && sword.naturalWidth) ctx.drawImage(sword, sx, sy, sw, sh);
+    // the fuller runs from about (215, 660) to (1105, 200) in the source image
+    var A = [215, 660], B = [1105, 200], ang = Math.atan2(B[1] - A[1], B[0] - A[0]);
+    var shown = paint * RUNES.length, lift = rise * 3 * f * 2.2;
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    RUNES.forEach(function (rn, ri) {
+      var pr = clamp(shown - ri, 0, 1); if (pr <= 0) return;
+      var t = .16 + ri * .21, c = S(lerp(A[0], B[0], t), lerp(A[1], B[1], t)), sc = 40 * f * (1 + push * .08);
+      function P(q) { var x = q[1] * sc, y = -q[0] * sc;   // rune up = along the blade
+        return [c[0] + x * Math.cos(ang) - y * Math.sin(ang), c[1] + x * Math.sin(ang) + y * Math.cos(ang)]; }
+      function path(off) {
+        ctx.beginPath();
+        rn.forEach(function (pl) {
+          var n = Math.max(2, Math.round(pl.length * pr));
+          for (var i = 0; i < n && i < pl.length; ++i) { var p = P(pl[i]); if (i) ctx.lineTo(p[0] + off[0], p[1] + off[1]); else ctx.moveTo(p[0] + off[0], p[1] + off[1]); }
+        });
+      }
+      var wdt = 11 * f * 2.2;
+      if (lift > 0) { path([lift * .5, lift]); ctx.strokeStyle = 'rgba(20,30,40,.45)'; ctx.lineWidth = wdt; ctx.stroke(); }
+      path([0, 0]); ctx.strokeStyle = FIL.c; ctx.lineWidth = wdt; ctx.stroke();
+      if (rise > 0) { path([-wdt * .12, -wdt * .2]); ctx.strokeStyle = 'rgba(255,255,255,.45)'; ctx.lineWidth = wdt * .3; ctx.stroke(); }
+    });
+    ctx.restore();
+    // the brush while painting
+    if (paint < 1) { var bt = .16 + Math.min(3, Math.floor(shown)) * .21, bc = S(lerp(A[0], B[0], bt), lerp(A[1], B[1], bt)); cursor(bc[0] + U, bc[1] - U, true); }
+    // side readout: rune height
+    ctx.save();
+    glass(W * .7, H * .58, W * .24, U * 17);
+    ctx.font = '500 ' + U * 1.6 + 'px ' + MONO; ctx.fillStyle = P.faint; ctx.textAlign = 'left';
+    ctx.fillText('CLAY // RUNES', W * .7 + U * 2.5, H * .58 + U * 4);
+    ctx.font = '600 ' + U * 2.6 + 'px ' + SANS; ctx.fillStyle = P.ink;
+    ctx.fillText('Height ' + rise.toFixed(1) + ' mm', W * .7 + U * 2.5, H * .58 + U * 9);
+    ctx.fillStyle = P.rule; ctx.fillRect(W * .7 + U * 2.5, H * .58 + U * 12, W * .24 - U * 5, U * .6);
+    ctx.fillStyle = P.acc; ctx.fillRect(W * .7 + U * 2.5, H * .58 + U * 12, (W * .24 - U * 5) * rise / 1.6, U * .6);
+    ctx.restore();
+    ctx.save(); ctx.font = '600 ' + U * 2.4 + 'px ' + SANS; ctx.textAlign = 'center';
+    var tag = k < .4 ? 'paint the runes on the blade' : k < .68 ? 'Clay gives them volume' : 'real parts, in their own filament';
+    var tw = ctx.measureText(tag).width + U * 5;
+    glass(W / 2 - tw / 2, H * .07, tw, U * 6.4);
+    ctx.fillStyle = P.ink; ctx.fillText(tag, W / 2, H * .07 + U * 4.2);
+    ctx.restore();
+  };
+
+  /* the real one: the Akira skull from the app. Decals (a screenshot), then Clay turning (25 frames of the
+     real capture, Clay-akira-skull.gif, as a 5 × 5 sprite of 480 × 335). */
+  DRAW.crack = function (k, ts) {
+    backdrop(ts);
+    var bx = W * .05, by = H * .12, bw = W * .58, bh = H * .66;
+    function fit(img, sx, sy, sw, sh, a) {      // contain inside the box
+      if (a <= 0 || !img.naturalWidth) return;
+      var sc = Math.min(bw / sw, bh / sh), dw = sw * sc, dh = sh * sc, dx = bx + (bw - dw) / 2, dy = by + (bh - dh) / 2;
+      ctx.save(); ctx.globalAlpha *= a;
+      ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+      ctx.strokeStyle = P.acc; ctx.lineWidth = 2; ctx.strokeRect(dx, dy, dw, dh);
+      ctx.restore();
+    }
+    var aSvg = 1 - ease(seg(k, .17, .22)), aVid = Math.min(ease(seg(k, .17, .22)), 1 - ease(seg(k, .7, .76))), aSl = ease(seg(k, .7, .76));
+    fit(crackSvg, 0, 0, crackSvg.naturalWidth, crackSvg.naturalHeight, aSvg);
+    var fw = 480, fh = 382, n = Math.min(29, Math.floor(seg(k, .19, .72) * 30));
+    fit(crackSprite, (n % 6) * fw, Math.floor(n / 6) * fh, fw, fh, aVid);
+    fit(crackSlice, 0, 0, crackSlice.naturalWidth, crackSlice.naturalHeight, aSl);
+    // the four steps on the right, the current one lit
+    var rx = bx + bw + U * 3, rw = W - rx - U * 4;
+    var STEPS = [['01', 'an SVG crack on the face', .0], ['02', 'Clay raises it, 0.4 s', .22], ['03', 'drag it, the part follows', .45], ['04', 'Engrave, sliced', .72]];
+    ctx.save();
+    STEPS.forEach(function (st, j) {
+      var on = k >= st[2] && (j === 3 || k < STEPS[j + 1][2]), yy = by + j * U * 9.5;
+      ctx.globalAlpha = k >= st[2] ? 1 : .35;
+      glass(rx, yy, rw, U * 7.5);
+      ctx.fillStyle = on ? P.acc : P.firm; ctx.fillRect(rx, yy, U * 6, U * 7.5);
+      ctx.font = '700 ' + U * 2.2 + 'px ' + MONO; ctx.fillStyle = on ? '#0b1214' : P.soft; ctx.textAlign = 'center';
+      ctx.fillText(st[0], rx + U * 3, yy + U * 4.6);
+      ctx.font = '600 ' + U * 2.1 + 'px ' + SANS; ctx.fillStyle = on ? P.ink : P.soft; ctx.textAlign = 'left';
+      ctx.fillText(st[1], rx + U * 8, yy + U * 4.6);
+    });
+    ctx.restore();
+  };
+
+  DRAW.skull = function (k, ts) {
+    backdrop(ts);
+    var fw = 480, fh = 335, bw = Math.min(W * .62, H * .9 * fw / fh), bh = bw * fh / fw, bx = W * .06, by = H * .14;
+    function frame(img, sx, sy, sw, sh, a) {
+      ctx.save(); ctx.globalAlpha *= a;
+      ctx.beginPath(); ctx.rect(bx, by, bw, bh); ctx.clip();
+      ctx.drawImage(img, sx, sy, sw, sh, bx, by, bw, bh);
+      ctx.restore();
+      ctx.save(); ctx.globalAlpha *= a; ctx.strokeStyle = P.acc; ctx.lineWidth = 2; ctx.strokeRect(bx, by, bw, bh); ctx.restore();
+    }
+    var aDec = 1 - ease(seg(k, .28, .36)), aClay = ease(seg(k, .28, .36));
+    if (aDec > 0 && skullDecals.complete && skullDecals.naturalWidth) {
+      var iw = skullDecals.naturalWidth, ih = iw * fh / fw;
+      frame(skullDecals, 0, (skullDecals.naturalHeight - ih) / 2, iw, ih, aDec);
+    }
+    if (aClay > 0 && skullSprite.complete && skullSprite.naturalWidth) {
+      var n = Math.floor(seg(k, .3, 1) * 25 * 1.6) % 25;    // a little over one and a half turns
+      frame(skullSprite, (n % 5) * fw, Math.floor(n / 5) * fh, fw, fh, aClay);
+    }
+    // readouts on the right
+    var rx = bx + bw + U * 3, rw = W - rx - U * 4;
+    ctx.save();
+    glass(rx, by, rw, U * 16);
+    ctx.font = '500 ' + U * 1.6 + 'px ' + MONO; ctx.fillStyle = P.faint; ctx.textAlign = 'left';
+    ctx.fillText('REAL MODEL', rx + U * 2.5, by + U * 4);
+    ctx.font = '600 ' + U * 2.4 + 'px ' + SANS; ctx.fillStyle = P.ink;
+    ctx.fillText(k < .3 ? 'decals painted on' : 'raised with Clay', rx + U * 2.5, by + U * 8.6);
+    ctx.font = '500 ' + U * 1.8 + 'px ' + MONO; ctx.fillStyle = P.soft;
+    ctx.fillText('5.7 M triangles', rx + U * 2.5, by + U * 12.6);
+    ctx.restore();
+    var aDl = ease(seg(k, .55, .7));
+    if (aDl > 0) {
+      ctx.save(); ctx.globalAlpha *= aDl;
+      var dy = by + U * 19;
+      glass(rx, dy, rw, U * 15);
+      ctx.font = '500 ' + U * 1.6 + 'px ' + MONO; ctx.fillStyle = P.faint; ctx.textAlign = 'left';
+      ctx.fillText('DOWNLOAD THE 3MF', rx + U * 2.5, dy + U * 4);
+      ctx.font = '600 ' + U * 2.3 + 'px ' + SANS; ctx.fillStyle = P.ink;
+      ctx.fillText('Bikers Gang Skull', rx + U * 2.5, dy + U * 8.4);
+      ctx.font = '500 ' + U * 1.7 + 'px ' + MONO; ctx.fillStyle = P.acc;
+      ctx.fillText('Snapmaker Space', rx + U * 2.5, dy + U * 12);
+      chevrons(rx + rw - U * 9, dy + U * 7.5, 3, U * 2, P.acc, 1, ts);
+      ctx.restore();
+    }
+  };
+
+  DRAW.prim = function (k, ts) {
+    backdrop(ts, '#0a2a52');
+    var half = k < .5, kk = half ? k / .5 : (k - .5) / .5;
+    if (half) {
+      // a ring on the plate, its sliders moving it
+      plate(ts);
+      var inner = lerp(9, 11, ease(seg(kk, .05, .35))), band = lerp(2.5, 4, ease(seg(kk, .25, .5)));
+      var fil = lerp(0, 1.6, ease(seg(kk, .5, .9))), hgt = 5, outer = inner + band;
+      var m = M3(), sec = [], NA = 64;
+      // the section (r, z) with rounded corners, then revolved
+      [[outer - fil, hgt - fil, 0], [inner + fil, hgt - fil, Math.PI / 2], [inner + fil, fil, Math.PI], [outer - fil, fil, Math.PI * 1.5]].forEach(function (c) {
+        for (var q = 0; q <= 6; ++q) { var an = c[2] + q / 6 * Math.PI / 2; sec.push([c[0] + Math.cos(an) * fil, c[1] + Math.sin(an) * fil]); }
+      });
+      for (var i = 0; i < NA; ++i) {
+        var a0 = i / NA * Math.PI * 2, a1 = (i + 1) / NA * Math.PI * 2;
+        for (var q = 0; q < sec.length; ++q) {
+          var s0 = sec[q], s1 = sec[(q + 1) % sec.length];
+          var RV = function (sv, an) { return [sv[0] * Math.cos(an), sv[1] - hgt / 2, sv[0] * Math.sin(an)]; };
+          addQuad(m, RV(s0, a0), RV(s1, a0), RV(s1, a1), RV(s0, a1), FIL.c);
+        }
+      }
+      draw3D(m, W * .34, H * .5, U * 1.9, ts * .25, .75);
+      // the panel with sliders
+      var px = W * .64, py = H * .16, pw = W * .3, ph = U * 34;
+      glass(px, py, pw, ph, U * 2);
+      ctx.save(); ctx.font = '700 ' + U * 2.6 + 'px '+SANS+''; ctx.fillStyle = P.ink; ctx.textAlign = 'left';
+      ctx.fillText('Ring', px + U * 2.5, py + U * 5);
+      [['Inside Ø', (inner * 1.5).toFixed(1) + ' mm', (inner - 9) / 3], ['Band', (band * .9).toFixed(1) + ' mm', (band - 2) / 2.5],
+       ['Height', '5.0 mm', .5], ['Fillet', fil.toFixed(1) + ' mm', fil / 1.6]].forEach(function (r, j) {
+        var yy = py + U * (11 + j * 6.2);
+        ctx.font = '500 ' + U * 2.1 + 'px '+SANS+''; ctx.fillStyle = P.soft;
+        ctx.fillText(r[0], px + U * 2.5, yy);
+        ctx.textAlign = 'right'; ctx.fillText(r[1], px + pw - U * 2.5, yy); ctx.textAlign = 'left';
+        var bx = px + U * 2.5, bw = pw - U * 5;
+        ctx.fillStyle = P.rule; ctx.fillRect(bx, yy + U * 1.3, bw, U * .6);
+        ctx.fillStyle = P.acc; ctx.fillRect(bx, yy + U * 1.3, bw * clamp(r[2], 0, 1), U * .6);
+        bead(bx + bw * clamp(r[2], 0, 1), yy + U * 1.6, U * 1, FIL.w);
+      });
+      ctx.restore();
+    } else {
+      // a .scad script typing, then a two colour tag built from it
+      var px2 = W * .06, py2 = H * .14, pw2 = W * .42, ph2 = H * .52;
+      glass(px2, py2, pw2, ph2, U * 2);
+      var lines = ['// bottle cap', 'diameter = 28;   // [20:45]', 'height   = 12;   // [6:20]', 'grip     = 30;   // [12:60] ribs',
+                   'thread   = 3;    // [2:4] mm pitch', '', 'difference() {', '  ribbed_cylinder(diameter, height, grip);', '  inner_thread(diameter - 3, thread);', '}'];
+      var shown = Math.floor(ease(seg(kk, 0, .4)) * lines.join('\n').length), n = 0;
+      ctx.save(); ctx.font = U * 2.0 + 'px ' + MONO; ctx.textAlign = 'left';
+      lines.forEach(function (ln, j) {
+        var vis = ln.slice(0, clamp(shown - n, 0, ln.length)); n += ln.length + 1;
+        ctx.fillStyle = ln.indexOf('//') === 0 ? P.faint : P.ink;
+        ctx.fillText(vis, px2 + U * 2.5, py2 + U * (5.2 + j * 3.8));
+      });
+      ctx.restore();
+      // the cap, upside down so the thread shows; the sliders change it live
+      var build = ease(seg(kk, .35, .6));
+      var dia = lerp(28, 38, ease(seg(kk, .62, .8))), ribs = Math.round(lerp(18, 40, ease(seg(kk, .8, .97)))), hh = 12 * build;
+      if (build > 0) {
+        var cm = M3(), ro = dia / 2, ri = ro - 2.2, NA = ribs * 4;
+        var rr = function (q) { return ro + (q % 4 < 2 ? 1.3 : 0); };   // ribs on the outside
+        var y0 = -6, y1 = y0 + hh;
+        for (var q = 0; q < NA; ++q) {
+          var a0 = q / NA * Math.PI * 2, a1 = (q + 1) / NA * Math.PI * 2, r0 = rr(q), r1 = rr(q + 1);
+          var o0 = [r0 * Math.cos(a0), y0, r0 * Math.sin(a0)], o1 = [r1 * Math.cos(a1), y0, r1 * Math.sin(a1)];
+          var t0 = [r0 * Math.cos(a0), y1, r0 * Math.sin(a0)], t1 = [r1 * Math.cos(a1), y1, r1 * Math.sin(a1)];
+          var i0 = [ri * Math.cos(a0), y1, ri * Math.sin(a0)], i1 = [ri * Math.cos(a1), y1, ri * Math.sin(a1)];
+          var b0 = [ri * Math.cos(a0), y0 + 1.5, ri * Math.sin(a0)], b1 = [ri * Math.cos(a1), y0 + 1.5, ri * Math.sin(a1)];
+          addQuad(cm, o0, t0, t1, o1, FIL.c);            // ribbed side
+          addQuad(cm, t0, i0, i1, t1, FIL.c);            // rim
+          addQuad(cm, i0, b0, b1, i1, FIL.c); addQuad(cm, i0, i1, b1, b0, FIL.c); // inside wall
+          cm.tris.push([b0, [0, y0 + 1.5, 0], b1, shade(FIL.c, -.15)]);   // inside of the top
+        }
+        // the thread: a helix of little blocks on the inside wall
+        var turns = 2, SEG = 90;
+        for (var q = 0; q < SEG * build; ++q) {
+          var u = q / SEG, an = u * turns * Math.PI * 2, an2 = (q + 1) / SEG * turns * Math.PI * 2;
+          var yy = y0 + 2.5 + u * (hh - 4.5), yy2 = y0 + 2.5 + (q + 1) / SEG * (hh - 4.5), rt = ri - .3;
+          addQuad(cm, [rt * Math.cos(an), yy, rt * Math.sin(an)], [rt * Math.cos(an), yy + 1.1, rt * Math.sin(an)],
+                      [rt * Math.cos(an2), yy2 + 1.1, rt * Math.sin(an2)], [rt * Math.cos(an2), yy2, rt * Math.sin(an2)], FIL.w);
+          addQuad(cm, [rt * Math.cos(an), yy, rt * Math.sin(an)], [rt * Math.cos(an2), yy2, rt * Math.sin(an2)],
+                      [rt * Math.cos(an2), yy2 + 1.1, rt * Math.sin(an2)], [rt * Math.cos(an), yy + 1.1, rt * Math.sin(an)], FIL.w);
+        }
+        draw3D(cm, W * .72, H * .6, U * 1.25, ts * .2, .9);
+      }
+      ctx.save(); ctx.font = '600 ' + U * 2.3 + 'px '+SANS+''; ctx.fillStyle = P.ink; ctx.textAlign = 'center';
+      ctx.globalAlpha *= build;
+      ctx.fillText('Ø ' + dia.toFixed(0) + ' mm  ·  ' + ribs + ' ribs  ·  the script and its sliders inside the 3mf', W * .72, H * .14);
+      ctx.restore();
+    }
+    sweep(k, .45, .6);
+  };
+
+  DRAW.stick = function (k, ts) {
+    backdrop(ts, '#0b2d58');
+    var BANDS = ['#ff4fa3', '#ff8a3d', '#ffe23a', '#3fd18b', '#2f8ff0', '#a45cd6'];   // the rainbow the SVG asks for
+    var phaseA = k < .62;
+    if (phaseA) {
+      var kk = k / .62;
+      // left: a cutaway of the cloud's top, whole layers stacking from the bottom up
+      var x0 = W * .08, y0 = H * .66, cw = W * .38, lh = U * 1.25;
+      glass(x0 - U * 2, H * .16, cw + U * 4, y0 - H * .16 + U * 4, U * 2);
+      ctx.save(); ctx.font = '600 ' + U * 2.2 + 'px '+SANS+''; ctx.fillStyle = P.soft; ctx.textAlign = 'left';
+      ctx.fillText('side cut · whole layers under the face', x0, H * .21); ctx.restore();
+      // per band, a stack of up to 14 layers of the four filaments (a drawing of the idea, not a solved recipe)
+      var STACK = [
+        'wwwwwwwmmmmmmm', 'wwwwwwmmmmyyyy', 'wwwwwwwwwyyyyy', 'wwwwwwccccyyyy', 'wwwwwwwccccccc', 'wwwwwccccmmmmm'];
+      var bw = cw / BANDS.length, layersUp = Math.floor(ease(seg(kk, .05, .75)) * 14);
+      STACK.forEach(function (st, b) {
+        for (var l = 0; l < layersUp; ++l) {
+          var c = FIL[st[l]], y = y0 - (l + 1) * lh;
+          ctx.fillStyle = c; ctx.fillRect(x0 + b * bw + 1, y, bw - 2, lh - 1);
+          ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(x0 + b * bw + 1, y, bw - 2, 1);
+        }
+      });
+      ctx.fillStyle = 'rgba(160,200,240,.35)'; ctx.fillRect(x0, y0, cw, U * 1.2);   // the infill under it, greyed
+      // right: what you see from above converging to the target colours
+      var cx = W * .72, cy = H * .42, R = Math.min(W * .2, H * .26);
+      var conv = ease(seg(kk, .2, .85));
+      ctx.save();
+      ctx.beginPath();
+      [[-.55, .2, .5], [-.15, -.15, .62], [.35, -.05, .55], [.6, .3, .42], [0, .35, .6], [-.5, .45, .35]].forEach(function (c) {
+        ctx.moveTo(cx + c[0] * R + c[2] * R, cy + c[1] * R); ctx.arc(cx + c[0] * R, cy + c[1] * R, c[2] * R, 0, Math.PI * 2);
+      });
+      ctx.fillStyle = FIL.w; ctx.fill(); ctx.clip();
+      BANDS.forEach(function (col, b) {
+        var r = R * (1.55 - b * .17);
+        ctx.beginPath(); ctx.arc(cx - R * .7, cy + R * 1.05, r, Math.PI, Math.PI * 2);
+        ctx.lineWidth = R * .17;
+        // from the plain white base to the band colour as the layers stack
+        var n = parseInt(col.slice(1), 16), rr = n >> 16, gg = (n >> 8) & 255, bb = n & 255;
+        ctx.strokeStyle = 'rgb(' + Math.round(lerp(242, rr, conv)) + ',' + Math.round(lerp(244, gg, conv)) + ',' + Math.round(lerp(247, bb, conv)) + ')';
+        ctx.stroke();
+      });
+      ctx.restore();
+      ctx.save(); ctx.font = '600 ' + U * 2.2 + 'px '+SANS+''; ctx.fillStyle = P.soft; ctx.textAlign = 'center';
+      ctx.fillText('seen from above', cx, cy + R * 1.05); ctx.restore();
+    } else {
+      // the real print, framed like a broadcast still
+      var kk2 = (k - .62) / .38, a = ease(seg(kk2, 0, .25));
+      if (photo.complete && photo.naturalWidth) {
+        var ph = H * .7, pw = ph * photo.naturalWidth / photo.naturalHeight, px = W / 2 - pw / 2, py = H * .08;
+        var z = 1 + .06 * kk2;
+        ctx.save(); ctx.globalAlpha *= a;
+        ctx.beginPath(); ctx.roundRect(px, py, pw, ph, U * 1.5); ctx.clip();
+        ctx.drawImage(photo, W / 2 - pw * z / 2, py + ph / 2 - ph * z / 2, pw * z, ph * z);
+        ctx.restore();
+        ctx.save(); ctx.globalAlpha *= a; ctx.strokeStyle = P.acc; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(px, py, pw, ph, U * 1.5); ctx.stroke(); ctx.restore();
+        ctx.save(); ctx.globalAlpha *= ease(seg(kk2, .25, .45));
+        glass(W / 2 + pw / 2 + U * 2, H * .3, U * 30, U * 13, U * 1.6);
+        ctx.font = '800 ' + U * 3.2 + 'px '+SANS+''; ctx.fillStyle = P.ink; ctx.textAlign = 'left';
+        ctx.fillText('Printed.', W / 2 + pw / 2 + U * 4.5, H * .3 + U * 5.4);
+        ctx.font = '500 ' + U * 1.9 + 'px '+SANS+''; ctx.fillStyle = P.soft;
+        ctx.fillText('CMY + White, Snapmaker TD', W / 2 + pw / 2 + U * 4.5, H * .3 + U * 9.2);
+        ctx.restore();
+      }
+    }
+    sweep(k, .58, .72);
+  };
+
+  DRAW.end = function (k, ts) {
+    backdrop(ts);
+    var a = ease(seg(k, 0, .3));
+    chromeText('NeotkoCM', W / 2, H * .45, U * 8.5, 'center', a);
+    chevrons(W / 2 - U * 4.5, H * .74, 5, U * 2.4, P.acc, ease(seg(k, .3, .6)), ts);
+    ctx.save(); ctx.globalAlpha *= ease(seg(k, .2, .45));
+    ctx.font = '600 ' + U * 2.8 + 'px '+SANS+''; ctx.textAlign = 'center'; ctx.fillStyle = P.soft;
+    ctx.fillText('2.5.0 · Orca fork for the Snapmaker U1 · free and open', W / 2, H * .55);
+    ctx.restore();
+    ['c', 'm', 'y', 'w'].forEach(function (f, i) { bead(W / 2 + (i - 1.5) * U * 6, H * .63, U * 1.8 * ease(seg(k, .25 + i * .06, .5 + i * .06)), FIL[f]); });
+    sweep(k, .1, .6);
+  };
+
+  /* ---------------------------------------------------------------- loop */
+  var running = false, t0 = 0, raf = 0, LOOP = /[?&]loop\b/.test(location.search);
+  function render(el) {
+    var acc = 0, idx = 0;
+    while (idx < SCENES.length - 1 && el > acc + SCENES[idx].dur) acc += SCENES[idx++].dur;
+    var sc = SCENES[idx], ts = Math.min(el - acc, sc.dur), k = ts / sc.dur, last = idx === SCENES.length - 1;
+    ctx.save();
+    ctx.globalAlpha = 1;
+    SCENE_NO = idx + 1;
+    DRAW[sc.id](k, el);
+    if (sc.label) lowerThird(sc.label, sc.sub, k);
+    ctx.restore();
+    // cross fade through black between scenes (a quick dip, broadcast style)
+    var dip = Math.max(ts < .22 ? 1 - ts / .22 : 0, !last && sc.dur - ts < .18 ? 1 - (sc.dur - ts) / .18 : 0);
+    if (idx === 0) dip = ts < .3 ? 1 - ts / .3 : dip;
+    if (dip > 0) { ctx.fillStyle = 'rgba(2,6,17,' + dip + ')'; ctx.fillRect(0, 0, W, H); }
+    segs.forEach(function (b, i) { b.style.transform = 'scaleX(' + (i < idx ? 1 : i > idx ? 0 : k) + ')'; });
+  }
+  function frame(now) {
+    if (!running) return;
+    var el = (now - t0) / 1000;
+    if (el >= TOTAL) { if (LOOP) { t0 = now; el = 0; } else { render(TOTAL); running = false; return; } }
+    render(el);
+    raf = requestAnimationFrame(frame);
+  }
+  function play() { cancelAnimationFrame(raf); size(); running = true; t0 = performance.now(); raf = requestAnimationFrame(frame); }
+  root.querySelector('[data-replay]').addEventListener('click', play);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'r' || e.key === 'R' || e.key === ' ') { e.preventDefault(); play(); }
+    if (e.key === 'Escape') location.href = 'index.html';
+  });
+  window.addEventListener('resize', function () { size(); if (!running) render(TOTAL); });
+  var calm = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var at = /[?&]t=([\d.]+)/.exec(location.search);               // ?t=12.5 freezes on that second
+  window.reelAt = function (s) { running = false; size(); render(Math.min(s, TOTAL)); };
+  window.reelTotal = TOTAL;
+  window.reelExport = function (w, h, d) {                         // video export, same hooks as reel-painter
+    running = false; cancelAnimationFrame(raf); window.__reelD = d || 1;
+    root.style.right = 'auto'; root.style.bottom = 'auto'; root.style.width = w + 'px'; root.style.height = h + 'px';
+    root.classList.add('clean'); size();
+    return cv;
+  };
+  window.reelFrame = function (t) { render(Math.min(t, TOTAL)); return cv; };
+  function go() { if (!head.complete || !photo.complete || !skullDecals.complete || !skullSprite.complete || !crackSvg.complete || !crackSprite.complete || !crackSlice.complete) return setTimeout(go, 50); if (at) reelAt(+at[1]); else if (calm && !/[?&]play\b/.test(location.search)) { size(); render(TOTAL); } else play(); }
+  if (photo.complete) go(); else { photo.onload = photo.onerror = go; }
+})();
+</script>
+</body>
+</html>

@@ -41,6 +41,7 @@ std::unordered_map<size_t, std::vector<ColorStitch::StickerColorMask>> g_masks; 
 std::unordered_map<size_t, ExPolygons> g_sections;                              // por section_key
 
 inline void hmix(size_t& h, size_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); }
+bool g_depth_show_target = false;   // 11-nov-2026
 
 size_t sticker_key(const ColorStitchSticker& st)
 {
@@ -55,7 +56,11 @@ size_t sticker_key(const ColorStitchSticker& st)
         mix(std::hash<int>{}(c.zone));   // s350
         mix(c.band_profiles.size());     // s350: sin esto, recalcular bandas no refrescaba la vista
         for (const int bp : c.band_profiles) { mix(std::hash<int>{}(bp)); mix(mgr.find(bp) ? 1u : 0u); }
+        mix(std::hash<int>{}(c.depth_rgb));   // 11-nov-2026
     }
+    mix(st.depth_mode ? 11u : 5u);             // 11-nov-2026 — depth y área: sin esto no se recalculaba
+    mix(st.area_tris.size());
+    for (const float f : st.area_tris) mix(std::hash<float>{}(f));
     return h;
 }
 
@@ -123,6 +128,20 @@ void build(const ModelObject& mo, const ColorStitchSticker& st, size_t skey, Cac
         }
     };
     for (ExPolygon& e : sec) { to_local(e.contour); for (Polygon& h : e.holes) to_local(h); }
+    if (st.has_area()) {
+        // 11-nov-2026 — Select area: la zona elegida manda (igual que en el slice), en el frame del sticker.
+        Polygons tris;
+        for (size_t i = 0; i + 8 < st.area_tris.size(); i += 9) {
+            Polygon t;
+            for (int k = 0; k < 3; ++k) {
+                const Vec3d v = inv * Vec3d(st.area_tris[i + 3 * k], st.area_tris[i + 3 * k + 1], st.area_tris[i + 3 * k + 2]);
+                t.points.emplace_back(coord_t(scale_(v.x())), coord_t(scale_(v.y())));
+            }
+            if (t.area() < 0) t.reverse();
+            tris.emplace_back(std::move(t));
+        }
+        sec = offset_ex(union_ex(tris), float(scale_(0.02)));
+    }
 
     for (const ColorStitch::StickerColorMask& cm : local_masks(st, skey)) {
         const ExPolygons clipped = intersection_ex(cm.mask, sec);
@@ -166,6 +185,15 @@ void draw_fills(const Cached& c, const ColorStitchSticker& st, float alpha,
         const int pid = ColorStitch::sticker_profile_for(st, c.color_idx[k]);
         const SurfaceEffectProfile* p = pid ? mgr.find(pid) : nullptr;
         ColorRGBA col = p ? ColorStitchPaintPreview::color_for_profile(*p) : ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
+        {   // 11-nov-2026 — Depth recipe: el color predicho de su receta (o el buscado, el del SVG).
+            const int cidx = c.color_idx[k];
+            const int ci   = cidx >= ColorStitch::kBandStride ? cidx % ColorStitch::kBandStride : cidx;
+            if (st.depth_mode && ci >= 0 && ci < int(st.colors.size())) {
+                const ColorStitchStickerColor& sc = st.colors[ci];
+                const uint32_t rgb = (!g_depth_show_target && sc.depth_rgb >= 0) ? uint32_t(sc.depth_rgb) : sc.rgb;
+                col = ColorRGBA(((rgb >> 16) & 0xFF) / 255.f, ((rgb >> 8) & 0xFF) / 255.f, (rgb & 0xFF) / 255.f, 1.f);
+            }
+        }
         col[3] = alpha;
         if (focus_color >= 0) {   // s350 — resaltar la zona que se edita en el panel
             const int cidx = c.color_idx[k];
@@ -216,6 +244,8 @@ const Flat2D& flat_2d(const ColorStitchSticker& st)
 }
 
 void clear_cache() { g_cache.clear(); g_masks.clear(); g_sections.clear(); g_flat2d.clear(); }
+void set_depth_show_target(bool on) { g_depth_show_target = on; }
+bool depth_show_target() { return g_depth_show_target; }
 
 double sticker_lift_mm(int pile_index) { return 0.03 + 0.02 * double(std::max(0, pile_index)); }
 double sticker_lift_mm(const ColorStitchSticker& st, int pile_index)

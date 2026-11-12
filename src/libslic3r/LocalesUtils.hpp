@@ -43,6 +43,13 @@ std::string float_to_string_decimal_point(double value, int precision = -1);
 //std::string float_to_string_decimal_point(float value,  int precision = -1);
 double string_to_double_decimal_point(const std::string_view str, size_t* pos = nullptr);
 
+// NEOTKO (audit 1-nov-2026) — a number read the same in any UI language. std::stod / atof / strtod follow
+// LC_NUMERIC, which Orca sets to the UI language: with Spanish, German... "6.7845" read as 6, silently.
+// Skips leading spaces and '+'; a ',' is taken as the decimal point when there is no '.', so values an
+// older build wrote with the locale still read. Returns `dflt` when no number is there; `used` gets the
+// characters read from `str` (0 then).
+double neo_to_double(std::string_view str, double dflt = 0., size_t* used = nullptr);
+
 } // namespace Slic3r
 
 #endif // slic3r_LocalesUtils_hpp_

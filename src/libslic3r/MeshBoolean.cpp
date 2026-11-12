@@ -816,6 +816,81 @@ void make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, st
         dst_mesh.push_back(std::move(tri_src));
 }
 
+// NEOTKO_CLAY_TAG: A_NOT_B with CGAL straight from mcut's doubles, for when mcut gives up. Not through
+// TriangleMesh: rounded to float, mcut's output slivers cross each other and CGAL refuses it as
+// self-intersecting (30-oct, Clay engrave of the sticker over the veins' holes).
+McutMeshPtr clone(const McutMesh &mesh) { return McutMeshPtr(new McutMesh(mesh)); }
+
+double volume(const McutMesh &m)
+{
+    const std::vector<double> &v = m.vertexCoordsArray;
+    if (v.size() < 9)
+        return 0.;
+    double lo[3] = { v[0], v[1], v[2] }, hi[3] = { v[0], v[1], v[2] };
+    for (size_t i = 0; i < v.size(); ++i) { lo[i % 3] = std::min(lo[i % 3], v[i]); hi[i % 3] = std::max(hi[i % 3], v[i]); }
+    const double c[3] = { (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2 };
+    double vol = 0.;
+    size_t k   = 0;
+    for (uint32_t n : m.faceSizesArray) {
+        for (uint32_t j = 1; j + 1 < n; ++j) {   // fan over polygons
+            const double *a = &v[3 * size_t(m.faceIndicesArray[k])], *b = &v[3 * size_t(m.faceIndicesArray[k + j])],
+                         *d = &v[3 * size_t(m.faceIndicesArray[k + j + 1])];
+            const double ax = a[0] - c[0], ay = a[1] - c[1], az = a[2] - c[2], bx = b[0] - c[0], by = b[1] - c[1], bz = b[2] - c[2],
+                         dx = d[0] - c[0], dy = d[1] - c[1], dz = d[2] - c[2];
+            vol += ax * (by * dz - bz * dy) - ay * (bx * dz - bz * dx) + az * (bx * dy - by * dx);
+        }
+        k += n;
+    }
+    return vol / 6.;
+}
+
+bool cgal_minus_doubles(McutMesh &srcMesh, const McutMesh &cutMesh)
+{
+    using SM = cgal::_EpicMesh;
+    auto to_sm = [](const McutMesh &m) {
+        SM                           r;
+        std::vector<SM::Vertex_index> vi;
+        vi.reserve(m.vertexCoordsArray.size() / 3);
+        for (size_t i = 0; i + 2 < m.vertexCoordsArray.size(); i += 3)
+            vi.push_back(r.add_vertex(SM::Point(m.vertexCoordsArray[i], m.vertexCoordsArray[i + 1], m.vertexCoordsArray[i + 2])));
+        size_t k = 0;
+        for (uint32_t n : m.faceSizesArray) {
+            if (n == 3)
+                r.add_face(vi[m.faceIndicesArray[k]], vi[m.faceIndicesArray[k + 1]], vi[m.faceIndicesArray[k + 2]]);
+            k += n;
+        }
+        return r;
+    };
+    SM a = to_sm(srcMesh), b = to_sm(cutMesh), out;
+    bool ok = false;
+    try {
+        const auto &p = CGAL::Polygon_mesh_processing::parameters::throw_on_self_intersection(true);
+        ok = CGAL::Polygon_mesh_processing::corefine_and_compute_difference(a, b, out, p, p);
+    } catch (...) {
+        ok = false;
+    }
+    if (!ok || out.number_of_faces() == 0)
+        return false;
+    McutMesh r;
+    std::vector<uint32_t> idx(out.num_vertices() + out.number_of_removed_vertices(), 0);
+    uint32_t              n = 0;
+    for (SM::Vertex_index v : out.vertices()) {
+        const auto &pt = out.point(v);
+        r.vertexCoordsArray.insert(r.vertexCoordsArray.end(), { CGAL::to_double(pt.x()), CGAL::to_double(pt.y()), CGAL::to_double(pt.z()) });
+        idx[size_t(v)] = n++;
+    }
+    for (SM::Face_index f : out.faces()) {
+        uint32_t c = 0;
+        for (SM::Vertex_index v : CGAL::vertices_around_face(out.halfedge(f), out)) {
+            r.faceIndicesArray.push_back(idx[size_t(v)]);
+            ++c;
+        }
+        r.faceSizesArray.push_back(c);
+    }
+    srcMesh = std::move(r);
+    return true;
+}
+
 } // namespace mcut
 
 

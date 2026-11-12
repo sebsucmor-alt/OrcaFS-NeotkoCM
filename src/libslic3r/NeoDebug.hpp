@@ -78,7 +78,10 @@ namespace NeoDebug {
                           // depuración del generador: ver la nota de arriba.
         PRINTORDER  = 23, // NEOTKO_PRINTORDER_TAG 2_49 — manual print order: plate order and,
                           // per layer and tool pass, the order actually emitted.
-        CH_COUNT    = 24
+        FRAMEPROBE  = 24, // NEOTKO_FRAMEPROBE_TAG 4-nov — tiempo de cada fotograma del 3D (una línea por
+                          // fotograma) + contador amarillo en pantalla. Como GRAVITY: arranca APAGADO
+                          // incluso con ORCA_DEBUG_ALL; se enciende con su casilla o ORCA_DEBUG_FRAMEPROBE.
+        CH_COUNT    = 25
     };
     // NEOTKO_SMOOTHNORMALS_TAG s229 — gate for the on-screen render tuning panels (RealColor and
     // Shading), as opposed to log channels. Deliberately NOT covered by ORCA_DEBUG_ALL: that var

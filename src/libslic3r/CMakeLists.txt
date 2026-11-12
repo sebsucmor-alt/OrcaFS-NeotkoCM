@@ -307,6 +307,8 @@ set(lisbslic3r_sources
     GCode/Thumbnails.cpp
     GCode/Thumbnails.hpp
     GCode/NeotkoPrintOrder.cpp
+    NeotkoPrimitives.cpp
+    NeotkoPrimitives.hpp
     GCode/NeotkoPrintOrder.hpp
     GCode/ToolOrdering.cpp
     GCode/ToolOrdering.hpp
@@ -419,6 +421,8 @@ set(lisbslic3r_sources
     ColorSci/StackFlatten.hpp
     ColorSci/WeaveLibrary.cpp
     ColorSci/WeaveLibrary.hpp
+    ColorSci/DepthStack.cpp
+    ColorSci/DepthStack.hpp
     ColorStitch.cpp
     ColorStitch.hpp
     ColorStitchLegacyMigration.cpp   # NEOTKO s316 fase B — aparte para no arrastrar nanosvg al validador
@@ -430,6 +434,8 @@ set(lisbslic3r_sources
     NeotkoSurfaceExtrude.hpp
     PaintTransfer.cpp                # NEOTKO_PAINTCARRY_TAG s366 — booleans keep the painting
     PaintTransfer.hpp
+    PaintClay.cpp                    # NEOTKO_CLAY_TAG 2_50 — Clay Tool
+    PaintClay.hpp
     # NEOTKO_SANDWICH_TAG_END
     NormalUtils.cpp
     NormalUtils.hpp
@@ -479,6 +485,7 @@ set(lisbslic3r_sources
     Print.cpp
     Print.hpp
     PrintObject.cpp
+    StickerDepth.cpp
     PrintObjectSlice.cpp
     PrintRegion.cpp
     ProjectSchemaVersion.cpp

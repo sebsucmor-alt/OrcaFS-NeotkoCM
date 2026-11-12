@@ -274,8 +274,16 @@ std::string GLGizmoCut3D::get_tooltip() const
     return tooltip;
 }
 
+// NEOTKO_PAINTCARRY_TAG — probe (8-nov-2026): a painted cut crashed once at Perform cut, not
+// reproducible. Suspect: wxSafeYield in perform_cut lets events reach the half-cut scene. Each step
+// goes to gravity.log at once (the file is reopened per line, so it survives a crash) and any entry
+// into the gizmo while the cut runs is logged as CUT_REENTRY.
+static bool s_cut_running = false;
+static void cut_trace(const std::string& msg) { NeoDebug::write(NeoDebug::GRAVITY, "CUT_TRACE " + msg); }
+
 bool GLGizmoCut3D::on_mouse(const wxMouseEvent &mouse_event)
 {
+    if (s_cut_running) cut_trace("CUT_REENTRY in=on_mouse");
     Vec2i32 mouse_coord(mouse_event.GetX(), mouse_event.GetY());
     Vec2d mouse_pos = mouse_coord.cast<double>();
 
@@ -2157,6 +2165,7 @@ void GLGizmoCut3D::PartSelection::turn_over_selection()
 
 void GLGizmoCut3D::on_render()
 {
+    if (s_cut_running) cut_trace("CUT_REENTRY in=on_render");
     if (m_state == On) {
         // This gizmo is showing the object elevated. Tell the common
         // SelectionInfo object to lie about the actual shift.
@@ -2692,7 +2701,8 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
         if (mode == CutMode::cutPlanar) {
             add_vertical_scaled_interval(0.75f);
 
-            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object()));
+            // NEOTKO 12-nov-2026 — conectores también con Cut to parts: cada trozo sale como su propio objeto con su conector.
+            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || (m_part_selection.valid() && m_part_selection.is_one_object()));
                 if (m_imgui->button(has_connectors ? _L("Edit connectors") : _L("Add connectors")))
                     set_connectors_editing(true);
             m_imgui->disabled_end();
@@ -2763,7 +2773,9 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
         render_part_action_line(_L("Upper part"), "##upper", m_keep_upper, m_place_on_cut_upper, m_rotate_upper);
         render_part_action_line(_L("Lower part"), "##lower", m_keep_lower, m_place_on_cut_lower, m_rotate_lower);
 
-        m_imgui->disabled_begin(has_connectors || m_part_selection.valid() || mode == CutMode::cutTongueAndGroove);
+        // NEOTKO 12-nov-2026 — Cut to parts ya no se apaga con conectores (ver perform_cut: con conectores, un objeto por
+        // trozo, en su sitio; sin conectores, como Orca: un objeto con las dos piezas).
+        m_imgui->disabled_begin(m_part_selection.valid() || mode == CutMode::cutTongueAndGroove);
 
             if (m_part_selection.valid())
                 m_keep_as_parts = false;
@@ -2917,6 +2929,7 @@ void GLGizmoCut3D::render_input_window_warning() const
 
 void GLGizmoCut3D::on_render_input_window(float x, float y, float bottom_limit)
 {
+    if (s_cut_running) cut_trace("CUT_REENTRY in=on_render_input_window");
     GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
     GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
@@ -3330,6 +3343,7 @@ void synchronize_model_after_cut(Model& model, const CutObjectBase& cut_id)
 
 void GLGizmoCut3D::perform_cut(const Selection& selection)
 {
+    if (s_cut_running) cut_trace("CUT_REENTRY in=perform_cut");
     if (!can_perform_cut())
         return;
     const int instance_idx = selection.get_instance_idx();
@@ -3342,8 +3356,13 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
     if (!mo)
         return;
 
+    cut_trace("start obj=" + std::to_string(object_idx) + " volumes=" + std::to_string(mo->volumes.size()) +
+              " connectors=" + std::to_string(mo->cut_connectors.size()));
+    s_cut_running = true;
+    ScopeGuard cut_running_off([]() { s_cut_running = false; cut_trace("end"); });
     // deactivate CutGizmo and than perform a cut
     m_parent.reset_all_gizmos();
+    cut_trace("gizmos reset");
 
     // perform cut
     {
@@ -3372,7 +3391,9 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         if (std::any_of(cut_mo->volumes.begin(), cut_mo->volumes.end(),
                         [](const ModelVolume *v) { return PaintTransfer::has_painting(*v); })) {
             paint_busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), plater->get_current_canvas3D()->get_wxglcanvas());
+            cut_trace("yield in");
             wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
+            cut_trace("yield out");
         }
 
         ModelObjectCutAttributes attributes = only_if(has_connectors ? true : m_keep_upper, ModelObjectCutAttribute::KeepUpper) |
@@ -3392,6 +3413,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(m_part_selection.get_cut_parts(), dowels_count):
                                              cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m) :
                                                                  cut.perform_with_plane();
+        cut_trace("cut done objects=" + std::to_string(new_objects.size()));
         paint_busy.reset();
 
         // fix_non_manifold_edges
@@ -3443,7 +3465,9 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         const CutObjectBase cut_id = cut_mo->cut_id;
 
         // update cut results on plater and in the model 
+        cut_trace("apply to model");
         plater->apply_cut_object_to_model(object_idx, new_objects);
+        cut_trace("applied");
 
         synchronize_model_after_cut(plater->model(), cut_id);
     }

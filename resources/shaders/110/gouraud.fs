@@ -34,6 +34,35 @@ uniform vec4 uniform_color_clip_plane_1;
 uniform vec4 uniform_color_clip_plane_2;
 uniform SlopeDetection slope;
 
+// NEOTKO_SHAREDVERTS_TAG 4-nov — modo simple con vértices compartidos: no hay normal por
+// vértice, así que la normal plana sale de las derivadas de la posición (es exactamente la
+// normal de la cara) y la luz se calcula aquí con las MISMAS constantes que gouraud.vs.
+uniform bool u_derived_normal;
+uniform bool  shading_override;
+uniform vec3  shading_light_top_dir;
+uniform float shading_top_diffuse;
+uniform float shading_top_specular;
+uniform float shading_top_shininess;
+uniform vec3  shading_light_front_dir;
+uniform float shading_front_diffuse;
+uniform float shading_ambient;
+
+vec2 derived_intensity(vec3 n, vec3 pos)
+{
+    vec3  light_top_dir   = shading_override ? normalize(shading_light_top_dir)   : vec3(-0.4574957, 0.4574957, 0.7624929);
+    vec3  light_front_dir = shading_override ? normalize(shading_light_front_dir) : vec3(0.6985074, 0.1397015, 0.6985074);
+    float top_diffuse     = shading_override ? shading_top_diffuse    : 0.8 * 0.6;
+    float top_specular    = shading_override ? shading_top_specular   : 0.125 * 0.6;
+    float top_shininess   = shading_override ? shading_top_shininess  : 20.0;
+    float front_diffuse   = shading_override ? shading_front_diffuse  : 0.3 * 0.6;
+    float ambient         = shading_override ? shading_ambient        : 0.3;
+    vec2 i;
+    i.x = ambient + max(dot(n, light_top_dir), 0.0) * top_diffuse;
+    i.y = top_specular * pow(max(dot(-normalize(pos), reflect(-light_top_dir, n)), 0.0), top_shininess);
+    i.x += max(dot(n, light_front_dir), 0.0) * front_diffuse;
+    return i;
+}
+
 //BBS: add outline_color
 uniform bool is_outline;
 uniform sampler2D depth_tex;
@@ -215,6 +244,20 @@ float DetectSilho(vec2 fragCoord)
 
 void main()
 {
+    // NEOTKO_SHAREDVERTS_TAG 4-nov — valores por fragmento (iguales a los del vértice si no hay malla compartida).
+    vec2  nk_intensity      = intensity;
+    float nk_world_normal_z = world_normal_z;
+    vec3  nk_eye_normal     = normalize(eye_normal);
+    if (u_derived_normal) {
+        vec3 g  = cross(dFdx(eye_pos), dFdy(eye_pos));
+        vec3 gw = cross(dFdx(world_pos.xyz), dFdy(world_pos.xyz));
+        // Orientada hacia la cámara (las caras traseras ya se descartan con el culling).
+        if (dot(g, -eye_pos) < 0.0) { g = -g; gw = -gw; }
+        nk_eye_normal     = normalize(g);
+        nk_world_normal_z = normalize(gw).z;
+        nk_intensity      = derived_intensity(nk_eye_normal, eye_pos);
+    }
+
     if (any(lessThan(clipping_planes_dots, ZERO)))
         discard;
 
@@ -239,7 +282,7 @@ void main()
                 color.rgb = LightBlue;
                 color.a = 0.8;
          }
-         else if( world_normal_z < slope.normal_z - EPSILON)
+         else if( nk_world_normal_z < slope.normal_z - EPSILON)
          {
                 color.rgb = color.rgb * 0.5 + LightRed * 0.5;
                 color.a = 0.8;
@@ -263,7 +306,7 @@ void main()
 
     //BBS: add outline_color
     if (is_outline) {
-        color = vec4(vec3(intensity.y) + color.rgb * intensity.x, color.a);
+        color = vec4(vec3(nk_intensity.y) + color.rgb * nk_intensity.x, color.a);
         vec2 fragCoord = gl_FragCoord.xy;
         float s = DetectSilho(fragCoord);
         // Makes silhouettes thicker.
@@ -276,14 +319,14 @@ void main()
     }
 #ifdef ENABLE_ENVIRONMENT_MAP
     else if (use_environment_tex)
-        gl_FragColor = vec4(0.45 * texture(environment_tex, normalize(eye_normal).xy * 0.5 + 0.5).xyz + 0.8 * color.rgb * intensity.x, color.a);
+        gl_FragColor = vec4(0.45 * texture(environment_tex, nk_eye_normal.xy * 0.5 + 0.5).xyz + 0.8 * color.rgb * nk_intensity.x, color.a);
 #endif
     else
-        gl_FragColor = vec4(vec3(intensity.y) + color.rgb * intensity.x, color.a);
+        gl_FragColor = vec4(vec3(nk_intensity.y) + color.rgb * nk_intensity.x, color.a);
 
     // NEOTKO_SMOOTHNORMALS_TAG s229: diagnostic overrides, last word on the colour.
     if (shading_debug_view != 0) {
-        vec3 n = normalize(eye_normal);
+        vec3 n = nk_eye_normal;
         if (shading_debug_view == 1)
             gl_FragColor = vec4(n * 0.5 + 0.5, 1.0);
         else {

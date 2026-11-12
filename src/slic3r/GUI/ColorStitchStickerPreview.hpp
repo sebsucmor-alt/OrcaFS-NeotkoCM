@@ -45,6 +45,10 @@ const Flat2D& flat_2d(const ColorStitchSticker& st);
 
 // Vacía la caché de geometría (al cerrar proyecto, etc.). Se poda sola si crece.
 void clear_cache();
+// 11-nov-2026 — stickers con Depth recipe: la vista enseña el color que SALDRÁ (predicho) o el que
+// se BUSCA (el del SVG). Global para toda la vista.
+void set_depth_show_target(bool on);
+bool depth_show_target();
 
 // Alzado (mm, Z mundo) del sticker n.º `pile_index` de su pila: crece hacia arriba para que dos
 // stickers solapados no peleen en profundidad. El overlay de edición usa el mismo.

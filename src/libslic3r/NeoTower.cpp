@@ -2,6 +2,7 @@
 // NEOTKO_NEOTOWER_TAG_START
 
 #include "NeoTower.hpp"
+#include "LocalesUtils.hpp" // NEOTKO audit 1-nov: numbers in any UI language
 #include "NeoTowerZ.hpp"  // NEOTKO_NEOTOWER_TAG — hardening P2
 #include "NeoTowerPure.hpp"  // NEOTKO_NEOTOWER_TAG s205 (Fase 2) — pure helpers (testable scope)
 
@@ -77,13 +78,13 @@ static NtTcrFootprint nt_tcr_footprint(const std::string& gcode)
     std::string line;
     while (std::getline(in, line)) {
         if (!fp.has_h && line.rfind(";HEIGHT:", 0) == 0) {
-            fp.height = float(std::atof(line.c_str() + 8));
+            fp.height = float(Slic3r::neo_to_double(std::string_view(line).substr(8)));
             fp.has_h  = true;
             continue;
         }
         if (line.rfind("G1", 0) != 0) continue;
         if (const char* py = std::strstr(line.c_str(), " Y")) {
-            cur_y     = float(std::atof(py + 2));
+            cur_y     = float(Slic3r::neo_to_double(py + 2));
             cur_y_set = true;
         }
         // Sólo cuentan los movimientos que EXTRUYEN: un viaje no ocupa sitio.

@@ -60,6 +60,31 @@ double string_to_double_decimal_point(const std::string_view str, size_t* pos /*
     return out;
 }
 
+double neo_to_double(std::string_view str, double dflt, size_t* used)
+{
+    if (used)
+        *used = 0;
+    size_t b = 0;
+    while (b < str.size() && (str[b] == ' ' || str[b] == '\t'))
+        ++b;
+    if (b < str.size() && str[b] == '+')
+        ++b;
+    std::string_view s = str.substr(b);
+    std::string      tmp;
+    if (s.find('.') == std::string_view::npos && s.find(',') != std::string_view::npos) {
+        tmp.assign(s.data(), s.size());
+        tmp[tmp.find(',')] = '.';
+        s = tmp;
+    }
+    double out = dflt;
+    const auto r = fast_float::from_chars(s.data(), s.data() + s.size(), out);
+    if (r.ec != std::errc() || r.ptr == s.data())
+        return dflt;
+    if (used)
+        *used = b + size_t(r.ptr - s.data());
+    return out;
+}
+
 std::string float_to_string_decimal_point(double value, int precision/* = -1*/)
 {
     // Our Windows build server fully supports C++17 std::to_chars. Let's use it.

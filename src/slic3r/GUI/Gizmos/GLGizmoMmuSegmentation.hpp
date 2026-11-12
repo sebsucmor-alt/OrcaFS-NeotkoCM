@@ -3,6 +3,12 @@
 
 #include "GLGizmoPainterBase.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/ObjectID.hpp"
+#include "libslic3r/PaintClay.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <memory>
 
 namespace Slic3r::GUI {
 
@@ -138,6 +144,7 @@ protected:
     // NEOTKO_PAINTERPRO_TAG — when true, "Extra walls" / "Surface depth" edit the per-color
     // override of the currently selected paint color instead of the global value.
     bool                              m_per_color_values      = false;
+    const ModelObject                *m_per_color_mo          = nullptr; // object the checkbox was last derived for
 
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 
@@ -171,20 +178,80 @@ private:
     void render_pro_mode_section(float sliders_left_width, float sliders_width, float slider_icon_width);
     // NEOTKO_SVGDECAL_TAG — the panel has two modes. Brush: Orca's tools (brushes, fill, height
     // range) and the rectangle mask. Vector: shapes drawn on screen and SVG decals. Keys B / V.
-    enum class PaintMode { Brush, Vector };
+    // NEOTKO_CLAY_TAG — 2_50: third mode, Clay. Decals raised over the surface as parts of their own.
+    // NEOTKO_VECTORBRUSH_TAG — 2_50: VectorBrush, free-hand strokes saved as decals (edited in Vector).
+    enum class PaintMode { Brush, Vector, Clay, VectorBrush };
     PaintMode m_paint_mode     = PaintMode::Brush;
-    bool shape_draw_needs_arming() const override { return m_paint_mode == PaintMode::Vector; }
+    bool shape_draw_needs_arming() const override { return m_paint_mode == PaintMode::Vector || m_paint_mode == PaintMode::Clay; }
     bool m_show_decals_in_brush = false;
+    bool vector_brush_on() const override { return m_paint_mode == PaintMode::VectorBrush; }
+    void render_vector_brush_panel();
+    void render_surface_controls();   // NEOTKO_SURFACE_TAG — Draw on surface / Wrap: width, status, Finish / Cancel
+    std::string m_vb_wrap_msg;        // why Wrap could not be picked
     int  selected_decal_index() const override { return m_selected_decal; }
     PaintDecal m_decal_ts_start;          // F4b: the decal when a Turn / Size slider was grabbed
     float      m_decal_turn_ui = 0.f;     // relative to that start, reset on release
     float      m_decal_size_ui = 100.f;
-    bool show_decal_cards_while_brushing() const override { return m_paint_mode == PaintMode::Brush && m_show_decals_in_brush; }
+    bool show_decal_cards_while_brushing() const override { return (m_paint_mode == PaintMode::Brush && m_show_decals_in_brush) || m_paint_mode == PaintMode::VectorBrush; }
     int       m_selected_decal = -1;   // decal row picked in the Vector panel's layer list
+    // 2b (3-nov): Shift + click picks more rows; Merge joins them into the topmost one.
+    std::vector<int> m_decal_multi;
+    std::string      m_decal_merge_msg;
+    void decal_merge();
     float     m_colour_row_w   = 0.f;  // measured width of one SVG colour row (0 until drawn once)
     void set_paint_mode(PaintMode mode);
     void render_rectangle_mask_option();
     void render_vector_panel();
+    // NEOTKO_CLAY_TAG — Clay panel: the decals with their Clay settings, Build / Remove.
+    void render_clay_panel();
+    void render_decal_layers(bool clay);   // NEOTKO_PAINTERUX_TAG
+    void render_decal_overlay();           // NEOTKO_PAINTERUX_TAG
+    // Builds (or rebuilds) the Clay parts of decal idx: removes its old ones, bakes, adds the new
+    // ones as normal parts, and paints the decal under them when paint_under. Returns the parts added.
+    // Build runs on a worker thread (clay_build starts it, clay_poll finishes it on the GUI thread):
+    // the panel shows progress and Cancel instead of freezing for seconds.
+    struct ClayJob {
+        std::atomic<bool>           cancel { false };
+        std::atomic<bool>           finished { false };
+        std::atomic<int>            done { 0 }, total { 0 };
+        std::vector<PaintClayPiece> pieces;   // written by the worker, read after `finished`
+    };
+    std::shared_ptr<ClayJob> m_clay_job;
+    size_t                   m_clay_job_decal = 0;
+    std::string              m_clay_job_name;   // decal name when started: the decal must still be there
+    ObjectID                 m_clay_job_object;
+    std::chrono::steady_clock::time_point m_clay_job_start;
+    bool                     m_clay_job_rebuild = false;
+    bool                     m_clay_show_decal    = false;   // Clay's own "Show decal"
+    bool                     m_clay_saved_preview = true;    // Vector's "Preview colours" while in Clay
+    // Decals with Clay parts are watched: moved or edited (in Vector, by undo...) = rebuilt once the
+    // mouse is let go. Key = the decal without its Clay settings (those rebuild from the panel).
+    std::map<std::string, PaintDecal> m_clay_watch;
+    std::vector<std::string>          m_clay_queue;   // Rebuild all: decal names still to build, one job at a time
+    // X-ray of the engrave parts (negative Clay volumes): red, see-through, drawn over the object so the
+    // hole they will cut is seen inside it. The painter draws none of the object's other volumes.
+    // The model behind a pointer: a moved-from GLModel frees the GPU buffers the moved-to one still
+    // draws from (30-oct: crash in glDrawElements the frame after opening the painter).
+    struct ClayXray { ObjectID volume; size_t tris = 0; std::unique_ptr<GLModel> model; };
+    std::vector<ClayXray> m_clay_xray;
+    bool                  m_clay_xray_on = true;
+    bool                  m_clay_arrow_on = true;   // NEOTKO_PAINTERUX_TAG
+    bool                  m_clay_repair   = false;  // option (off): voxel-rebuild each part after Build: no self-crossings left for the slicer
+    void                  render_clay_xray();
+    ObjectID                          m_clay_watch_object;
+    void clay_watch_decals();
+    void clay_build(size_t idx);
+    void clay_cancel();
+    void clay_poll();
+    int  clay_finish(size_t idx, const std::vector<PaintClayPiece> &pieces);
+    int  clay_remove_parts(size_t idx);   // removes the Clay parts of decal idx; returns how many
+    int  clay_detach_parts(size_t idx);   // they become normal parts: Rebuild / Remove leave them alone
+    bool clay_apply_engrave(size_t idx);  // cuts the engrave part out of the object (keeps the painting) and deletes it
+    std::string m_clay_status;
+    std::string m_clay_warning;   // folded faces of the last build
+    // Groups of the decal shown in Clay, kept while its SVG / zones / parts do not change (parsing every frame is slow).
+    std::string      m_clay_groups_key;
+    PaintDecalGroups m_clay_groups;
     // One SVG colour row: its colour, the filament it paints with (combo) and its eye.
     // Returns true when the filament or the eye changed.
     bool render_svg_colour_row(int id, uint32_t rgb, bool grad, int &state, bool &hidden);

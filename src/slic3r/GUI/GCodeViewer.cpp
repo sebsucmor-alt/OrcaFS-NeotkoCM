@@ -1,3 +1,4 @@
+#include "libslic3r/ColorSci/DepthStack.hpp"   // 10-nov-2026: km_medium, el material único
 #include "libslic3r/libslic3r.h"
 #include "GCodeViewer.hpp"
 
@@ -5090,6 +5091,23 @@ void GCodeViewer::realcolor_light_dirs(Vec3f& key_dir_world, Vec3f& fill_dir_wor
         return;
     }
 
+    // 7-nov-2026 (REALCOLOR_MODEL_REVIEW_7NOV §4) — luz «impresora» (las dos barras LED de la U1, pared derecha),
+    // la misma que usa la Lupa y RealView: así visor, Lupa y pieza se comparan con la misma luz.
+#if NEOTKO_PRIVATE_GUI
+    if (m_realcolor_u1_light > 0) {
+        // derecha = las barras LED de la U1 (pared +X); izquierda = espejo en X; dos lados = principal a la derecha
+        // y relleno en el espejo izquierdo (RealColor solo tiene dos luces).
+        const Vec3f L1(0.775f, -0.383f, 0.502f), L2(0.824f, 0.194f, 0.533f);
+        auto mx = [](const Vec3f& v) { return Vec3f(-v.x(), v.y(), v.z()); };
+        switch (m_realcolor_u1_light) {
+        case 2:  key_dir_world = mx(L1).normalized(); fill_dir_world = mx(L2).normalized(); break;
+        case 3:  key_dir_world = L1.normalized();     fill_dir_world = mx(L1).normalized(); break;
+        default: key_dir_world = L1.normalized();     fill_dir_world = L2.normalized();     break;
+        }
+        return;
+    }
+#endif
+
     const auto& k = m_realcolor_tuning.light_key_dir;
     const auto& f = m_realcolor_tuning.light_fill_dir;
     key_dir_world  = Vec3f(k[0], k[1], k[2]);
@@ -5490,6 +5508,10 @@ void GCodeViewer::destroy_realcolor_env_textures()
 // schedule_background_process(). Copiar aquí ese patrón sería relanzar el proceso de fondo por
 // mover un slider de brillo. Lo que sí hay que invalidar es el composite de peel — de eso se
 // encarga el fingerprint (RealColorFingerprint::finish), no un reslice.
+#if NEOTKO_PRIVATE_GUI   // 11-nov-2026 — Lupa y extras de RealColor: carpeta privada
+#include "neotko_private/GCodeViewerLupa.inc"
+#endif
+
 void GCodeViewer::render_realcolor_materials_panel()
 {
     if (!m_realcolor_materials_panel_open)
@@ -5991,6 +6013,8 @@ void GCodeViewer::render_realcolor_debug_panel()
     ImGuiWrapper& imgui = *wxGetApp().imgui();
     ImGui::Begin("RealColor Tuning");
     bool changed = false;
+    changed |= ImGui::Checkbox("medio KM por canal (7-nov)", &m_realcolor_tuning.km_medium);
+    changed |= imgui.slider_float("KM fuerza", &m_realcolor_tuning.km_force, 0.2f, 6.0f, "%.2f");
     changed |= imgui.slider_float("accum seed gray", &m_realcolor_tuning.accum_seed_gray, 0.0f, 1.0f);
     // NEOTKO_REALCOLOR_TAG s251c: LA LUZ DIRECTA. Hasta hoy vivía en #define y no se podía tocar —
     // ver el diagnóstico en 140/realcolor_peel.vs. Va LO PRIMERO del panel a propósito: es el
@@ -7050,7 +7074,19 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
         // NEOTKO_PHOTOMODE_TAG s253: al lado de la ventana de materiales y por el mismo motivo — se
         // dibuja dentro del render de RealColor para que desaparezca sola al cambiar de vista.
         render_photo_panel_realcolor();
+#if NEOTKO_PRIVATE_GUI
+        // NEOTKO_REALCOLOR_TAG 7-nov-2026 — Lupa: mismo sitio, desaparece sola fuera de RealColor.
+        render_realcolor_lupa();
+#endif
     }
+    // 7-nov-2026 — PAUSA (barra de la Lupa): RealColor se para del todo; se dibuja la vista normal, rápida, también
+    // al mover la cámara. La barra y la Lupa siguen. Al quitar la pausa vuelve RealColor (se rehace).
+#if NEOTKO_PRIVATE_GUI
+    if (m_realcolor_paused && !m_realcolor_export) {
+        render_toolpaths();
+        return;
+    }
+#endif
 
     GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D();
 
@@ -7100,7 +7136,19 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
     ensure_realcolor_env_textures(!m_realcolor_env.valid);
 
     const RealColorFingerprint fp = compute_realcolor_fingerprint(canvas_width, canvas_height);
-    const bool need_recompute = !m_realcolor_cache.valid || fp != m_realcolor_cache.fingerprint;
+    bool need_recompute = !m_realcolor_cache.valid || fp != m_realcolor_cache.fingerprint;
+    // 7-nov-2026 — Pausa (barra de la Lupa): si la cámara, el tamaño y el rango de capas son los mismos, se
+    // reutiliza la imagen aunque haya cambiado un TD o un color. Al quitar la pausa se marca inválida y se rehace.
+#if NEOTKO_PRIVATE_GUI
+    if (false && need_recompute && m_realcolor_paused && m_realcolor_cache.fingerprint.canvas_w == fp.canvas_w &&
+        m_realcolor_cache.fingerprint.canvas_h == fp.canvas_h && m_realcolor_cache.fingerprint.view == fp.view &&
+        m_realcolor_cache.fingerprint.proj == fp.proj &&
+        m_realcolor_cache.fingerprint.layers_z_range[0] == fp.layers_z_range[0] &&
+        m_realcolor_cache.fingerprint.layers_z_range[1] == fp.layers_z_range[1] &&
+        m_realcolor_cache.fingerprint.moves_first == fp.moves_first && m_realcolor_cache.fingerprint.moves_last == fp.moves_last &&
+        m_realcolor_cache.fingerprint.role_flags == fp.role_flags)
+        need_recompute = false;   // la cámara y las capas mandan; el material espera a quitar la pausa
+#endif
 
     if (need_recompute) {
         // NEOTKO_REALCOLOR_TAG: peel+accum passes render at supersampled resolution (matches
@@ -7477,6 +7525,23 @@ void GCodeViewer::render_toolpaths_realcolor(int canvas_width, int canvas_height
             // approximate TD correction for that specific filament (no real TD meter needed).
             for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t)
                 accum_shader->set_uniform(("u_material_td[" + std::to_string(t) + "]").c_str(), m_realcolor_materials.td[t] * m_realcolor_tuning.td_scale);
+            // 7-nov-2026 — medio Kubelka-Munk por canal (REALCOLOR_MODEL_REVIEW_7NOV §1). Por filamento: K/S por
+            // canal desde el color de un bloque grueso (×km_force) y S tal que el canal más claro deje pasar el
+            // 10 % a través del TD (bisección, como DepthStack::predict_lupa). El shader hace R y T de cada capa.
+            accum_shader->set_uniform("u_km_on", m_realcolor_tuning.km_medium);
+            for (int t = 0; t < REALCOLOR_MAX_TOOLS; ++t) {
+                const ColorRGB& c = m_realcolor_materials.rgb[t];
+                const float td = m_realcolor_materials.td[t] * m_realcolor_tuning.td_scale;
+                // 10-nov-2026 — la cuenta vive en DepthStack::km_medium (una sola para RealColor y la Depth recipe):
+                // S al canal más claro, no a la media.
+                const Slic3r::DepthStack::KMMedium kmm = Slic3r::DepthStack::km_medium({ c.r(), c.g(), c.b() }, td, m_realcolor_tuning.km_force);
+                const std::array<float, 3> ks = kmm.ks, rinf = kmm.rinf;
+                const float S = kmm.S;
+                const std::string ix = "[" + std::to_string(t) + "]";
+                accum_shader->set_uniform(("u_km_ks" + ix).c_str(), ks);
+                accum_shader->set_uniform(("u_km_rinf" + ix).c_str(), rinf);
+                accum_shader->set_uniform(("u_km_s" + ix).c_str(), S);
+            }
 
             glsafe(::glActiveTexture(GL_TEXTURE0));
             glsafe(::glBindTexture(GL_TEXTURE_2D, m_realcolor_cache.peel_color_tex[cur]));
@@ -7988,6 +8053,40 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     // from the object (peter-panning). Exactly the kind of thing that survives a review.
     m_shadow_texel_world_mm = (float)(std::max(r - l, t - b) / (double)std::max(m_shadow_map_cache.res, 1));
 
+    // NEOTKO_SHADOWCACHE_TAG 4-nov — ¿cambió algo que afecte a la sombra desde el último dibujo?
+    // Entra todo lo que el pase de profundidad usa: la matriz de la luz (ya incluye dirección y
+    // encuadre), el FBO/textura y su tamaño, la colección, y por cada pieza que pasa el filtro su
+    // puntero, matriz, si está activa y el tamaño de su malla; más z_range y plano de corte.
+    // La cámara NO entra. ORCA_NO_SHADOW_CACHE=1 lo desactiva.
+    {
+        static const bool no_cache = std::getenv("ORCA_NO_SHADOW_CACHE") != nullptr;
+        size_t key = 1469598103934665603ull;
+        auto mix_bytes = [&key](const void* p, size_t n) {
+            const unsigned char* b = static_cast<const unsigned char*>(p);
+            for (size_t i = 0; i < n; ++i) { key ^= b[i]; key *= 1099511628211ull; }
+        };
+        auto mix = [&mix_bytes](const auto& v) { mix_bytes(&v, sizeof(v)); };
+        mix_bytes(m_shadow_light_proj_view.data(), sizeof(double) * 16);
+        mix(m_shadow_map_cache.fbo); mix(m_shadow_map_cache.depth_tex); mix(m_shadow_map_cache.res);
+        const GLVolumeCollection* coll = &volumes; mix(coll);
+        mix(partly_inside_enable);
+        mix_bytes(volumes.get_z_range().data(), sizeof(float) * 2);
+        mix_bytes(volumes.get_clipping_plane().data(), sizeof(double) * 4);
+        for (const GLVolume* v : volumes.volumes) {
+            if (v == nullptr || (filter && !filter(*v)))
+                continue;
+            mix(v); mix(v->is_active); mix(v->is_modifier);
+            const size_t ic = v->model.indices_count(); mix(ic);
+            mix_bytes(v->world_matrix().matrix().data(), sizeof(double) * 16);
+        }
+        if (!no_cache && key == m_shadow_cache_key && m_shadow_map_cache.gl_objects_created()) {
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, caller_fbo));
+            glsafe(::glViewport(caller_viewport[0], caller_viewport[1], caller_viewport[2], caller_viewport[3]));
+            return true;
+        }
+        m_shadow_cache_key = key;
+    }
+
     // --- depth-only draw from the light.
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map_cache.fbo));
     glsafe(::glViewport(0, 0, m_shadow_map_cache.res, m_shadow_map_cache.res));
@@ -8028,8 +8127,11 @@ bool GCodeViewer::render_shadow_map(GLVolumeCollection& volumes,
     // handing it the light's matrices makes every volume land in light clip space. ERenderType::All
     // for the same superset reasoning as the bbox above — a caster must never be missing from the map
     // just because it happens to be transparent in the camera pass.
+    static const bool nk_no_shared = std::getenv("ORCA_NO_SHAREDVERTS") != nullptr; // NEOTKO_SHAREDVERTS_TAG 4-nov
+    GLModel::s_prefer_shared = !nk_no_shared;
     volumes.render(GLVolumeCollection::ERenderType::All, false, light_view, light_proj,
                    { m_shadow_map_cache.res, m_shadow_map_cache.res }, filter, partly_inside_enable);
+    GLModel::s_prefer_shared = false; // NEOTKO_SHAREDVERTS_TAG 4-nov
     depth_shader->stop_using();
 
     volumes.set_show_sinking_contours(saved_sinking_contours);
@@ -8060,7 +8162,7 @@ void GCodeViewer::render_shells(int canvas_width, int canvas_height)
     // visually first. Gated on app_config "neotko_libre_mode" (real user feature, not a NeoDebug
     // channel — see docs/LIBREMODE.md §5). Falls through to the original plain gouraud_light path
     // below on any missing shader/FBO.
-    if (wxGetApp().app_config->get_bool("neotko_libre_mode") && render_shells_lit(canvas_width, canvas_height, camera))
+    if (lit_render_on() && render_shells_lit(canvas_width, canvas_height, camera))   // NEOTKO_LITRENDER_TAG
         return;
 
     GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
@@ -8157,7 +8259,12 @@ bool GCodeViewer::render_volumes_lit(GLVolumeCollection& volumes, GLVolumeCollec
     glsafe(::glDisable(GL_BLEND));
 
     gbuf_shader->start_using();
+    static const bool nk_no_shared = std::getenv("ORCA_NO_SHAREDVERTS") != nullptr; // NEOTKO_SHAREDVERTS_TAG 4-nov
+    GLModel::s_prefer_shared = !nk_no_shared;
+    gbuf_shader->set_uniform("u_derived_normal", !nk_no_shared);
     volumes.render(GLVolumeCollection::ERenderType::All, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height}, filter, partly_inside_enable);
+    gbuf_shader->set_uniform("u_derived_normal", false);
+    GLModel::s_prefer_shared = false; // NEOTKO_SHAREDVERTS_TAG 4-nov
     gbuf_shader->stop_using();
 
     // --- pass 2: lit draw into the real framebuffer, same ERenderType/filter/params the caller's
@@ -8338,7 +8445,10 @@ void GCodeViewer::render_volumes_shadow(GLVolumeCollection& volumes, GLVolumeCol
     // call ambiguous. Forcing the concrete type picks the Vec3f overload.
     shadow_shader->set_uniform("u_light_key_dir_world", Vec3f(photo_key_dir_world().cast<float>()));
     // Same set of volumes as the lit pass, so the shadow matches exactly what's actually visible.
+    static const bool nk_no_shared = std::getenv("ORCA_NO_SHAREDVERTS") != nullptr; // NEOTKO_SHAREDVERTS_TAG 4-nov
+    GLModel::s_prefer_shared = !nk_no_shared;
     volumes.render(type, false, camera.get_view_matrix(), camera.get_projection_matrix(), {canvas_width, canvas_height}, filter, partly_inside_enable);
+    GLModel::s_prefer_shared = false; // NEOTKO_SHAREDVERTS_TAG 4-nov
     shadow_shader->stop_using();
 
     glsafe(::glDisable(GL_BLEND));

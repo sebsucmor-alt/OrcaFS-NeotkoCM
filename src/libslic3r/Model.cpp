@@ -2374,7 +2374,7 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                     frame_shift.translation() = -new_vol->get_offset();
                     for (size_t si : it_stk->second) {
                         ColorStitchSticker new_sticker = this->colorstitch_stickers[si];
-                        new_sticker.transform = frame_shift * new_sticker.transform;
+                        new_sticker.transform_frame(frame_shift);   // 11-nov: con su área
                         new_object->colorstitch_stickers.emplace_back(std::move(new_sticker));
                     }
                 }

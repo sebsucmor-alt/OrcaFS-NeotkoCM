@@ -633,7 +633,7 @@ void PartPlate::calc_vertex_for_icons(int index, PickingModel &model)
     // which is exactly the kind of thing that silently drifts.
     // NEOTKO_SNAPDRAG_TAG s249: 7 -> 8, the magnet.
     if (m_plater && m_plater->get_build_volume_type() == BuildVolume_Type::Circle)
-        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 8 /* bed_icon_count */) / 2);
+        p[1] -= std::max(0.0, (bed_ext.size()(1) - (size + gap_y) * 9 /* bed_icon_count */) / 2);
 
     poly.contour.append({ scale_(p(0))       , scale_(p(1) - size) });
     poly.contour.append({ scale_(p(0) + size), scale_(p(1) - size) });
@@ -1049,6 +1049,16 @@ void PartPlate::render_icons(bool bottom, bool only_name, int hover_id)
             if (hovered)
                 show_tooltip(_u8L("Snap & Drag options"));
         }
+        // NEOTKO_LITRENDER_TAG — lighting & shadows switch, under the magnet. One click flips it.
+        if (photo_mode_available() && !only_name && !photo_active && !photo_hide_ui) {
+            const bool hovered = (hover_id == (int)LIT_RENDER_HOVER_ID);
+            const bool on      = lit_render_switch();
+            render_icon_texture(m_lit_icon.model, on ? (hovered ? m_partplate_list->m_lit_hovered_texture : m_partplate_list->m_lit_texture)
+                                                     : (hovered ? m_partplate_list->m_lit_off_hovered_texture : m_partplate_list->m_lit_off_texture));
+            if (hovered)
+                show_tooltip(on ? _u8L("Lighting & shadows: on (click for the plain, lighter view)")
+                                : _u8L("Lighting & shadows: off (click to turn them on)"));
+        }
         if (photo_active) {
             // Same teardown as the normal exit at the bottom of this function — in particular the
             // depth mask, which was disabled on entry. Returning without restoring it leaks a
@@ -1425,6 +1435,8 @@ void PartPlate::register_raycasters_for_picking(GLCanvas3D &canvas)
     // GravitySnap::plate_icon_available() for why the gate is LibreMode and not True Objects.
     if (GravitySnap::plate_icon_available())
         register_model_for_picking(canvas, m_snapdrag_icon, picking_id_component(SNAP_DRAG_HOVER_ID));
+    if (photo_mode_available())   // NEOTKO_LITRENDER_TAG — only LibreMode has the lit look to switch
+        register_model_for_picking(canvas, m_lit_icon, picking_id_component(LIT_RENDER_HOVER_ID));
 }
 
 int PartPlate::picking_id_component(int idx) const
@@ -2818,6 +2830,7 @@ bool PartPlate::set_shape(const Pointfs& shape, const Pointfs& exclude_areas, Ve
         // the same reason as the camera above — the column's slot count must not depend on a
         // runtime toggle, or every other icon shifts when the user flips it.
         calc_vertex_for_icons(7, m_snapdrag_icon);
+        calc_vertex_for_icons(8, m_lit_icon);   // NEOTKO_LITRENDER_TAG — slot 8 (sub-id 10), always laid out
         // ORCA also change bed_icon_count number in calc_vertex_for_icons() after adding or removing icons for circular shaped beds that uses vertical alingment for icons
 
 		//calc_vertex_for_number(0, (m_plate_index < 9), m_plate_idx_icon);
@@ -3539,6 +3552,14 @@ void PartPlateList::generate_icon_textures()
         }
     }
 
+    // NEOTKO_LITRENDER_TAG — the lighting switch, unconditional like the camera
+    for (auto [tex, name] : { std::pair<GLTexture *, const char *>{ &m_lit_texture, "plate_lit" }, { &m_lit_hovered_texture, "plate_lit_hover" },
+                              { &m_lit_off_texture, "plate_lit_off" }, { &m_lit_off_hovered_texture, "plate_lit_off_hover" } }) {
+        file_name = path + name + (m_is_dark ? "_dark.svg" : ".svg");
+        if (!tex->load_from_svg_file(file_name, true, false, false, icon_size))
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(":load file %1% failed") % file_name;
+    }
+
 	//if (m_arrange_texture.get_id() == 0)
 	{
 		file_name = path + (m_is_dark ? "plate_arrange_dark.svg" : "plate_arrange.svg");
@@ -3684,6 +3705,7 @@ void PartPlateList::release_icon_textures()
     m_photo_texture.reset();
     // NEOTKO_SNAPDRAG_TAG s249
     m_snapdrag_hovered_texture.reset();
+    m_lit_texture.reset(); m_lit_hovered_texture.reset(); m_lit_off_texture.reset(); m_lit_off_hovered_texture.reset();   // NEOTKO_LITRENDER_TAG
     m_snapdrag_texture.reset();
 	m_arrange_texture.reset();
 	m_arrange_hovered_texture.reset();

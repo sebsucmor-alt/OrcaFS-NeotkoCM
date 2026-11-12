@@ -68,7 +68,7 @@
     <ul class="badges">
       <li class="badge badge--free">no gate</li>
       <li class="badge badge--risk">experimental</li>
-      <li class="badge badge--ver badge--plain">2.3.8, own tab and multicolour 2.4.8</li>
+      <li class="badge badge--ver badge--plain">2.3.8, own tab and multicolour 2.4.8, Depth recipe and Select area 2.5.0</li>
     </ul>
 
     <p class="where">
@@ -232,6 +232,78 @@
     </p>
 
     <!-- ================================================================= -->
+    <h2 id="depth" data-short="★ Depth recipe">Depth recipe: colour from the layers below <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.5.0</span></h2>
+
+    <p>
+      Two thin passes on top only take a colour so far from the part. <b>Depth recipe</b> goes the other
+      way, the way HueForge does: each colour of the sticker is built from <b>whole layers</b> of your
+      filaments under the face, stacked from the bottom up, as deep as it needs to reach the colour of the
+      SVG. The infill under the sticker turns solid down to that depth, so what you see through the top is
+      the stack and not the infill.
+    </p>
+
+    <figure>
+      <img src="../images/Sticker-250-cloud-realprint.webp" width="900" height="1200" loading="lazy"
+           alt="Fifteen rainbow cloud keychains printed in one go on a Snapmaker U1, each with pink, orange, yellow, green, blue and purple bands inside a white cloud">
+      <figcaption>A real print: fifteen clouds in one plate, with the Snapmaker CMY + White pack and the TD
+        values Snapmaker gives for those filaments, used as they are. No calibration on top.</figcaption>
+    </figure>
+
+    <ul>
+      <li><b>Where:</b> the sticker's <b>Colours</b> tab, check box <b>Depth recipe</b>, with how deep it may
+        go (5 mm by default, 0.2 to 10 mm). The recipes are searched with the same TD per channel model as
+        RealView, so what RealView shows is what the recipe aims at.</li>
+      <li><b>Deeper means more tool changes.</b> More layers of colour under the face is a closer colour and
+        more swaps on those layers. For one piece the extra time shows. For production, many copies of the same
+        part on the plate, it spreads over all of them and the difference is small.</li>
+      <li><b>The preview follows the recipe.</b> With Depth recipe on, the sticker in the 3D view shows the
+        colours the recipe will print (<b>Show: Result</b>) or the ones in the SVG (<b>Target</b>), and it
+        updates when you change the depth or the filaments.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/Sticker-250-depth-recipe-panel.webp" width="1604" height="924" loading="lazy"
+           alt="The Colours tab of the rainbow sticker: six colour squares, the recipe of the red one, and the Depth recipe check box ticked with 5.0 mm">
+      <figcaption>The Colours tab of the rainbow cloud, with Depth recipe on at 5 mm.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="twoup">
+        <img src="../images/Sticker-250-cloud-result.webp" width="1092" height="1092" loading="lazy"
+             alt="The rainbow cloud in the 3D view with Show Result: the bands in the colours the recipe will print">
+        <img src="../images/Sticker-250-cloud-target.webp" width="1334" height="1128" loading="lazy"
+             alt="The same cloud with Show Target: the bands in the colours of the SVG">
+      </div>
+      <figcaption>Left, Show: <b>Result</b>, what the recipe prints. Right, Show: <b>Target</b>, the colours of the SVG.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="area" data-short="Select area">Only on the face you pick <span class="badge badge--ver badge--plain" style="font-size:.62rem;vertical-align:middle">2.5.0</span></h2>
+
+    <p>
+      A sticker used to print its outline straight down the part. Where the drawing went past the face it
+      was meant for, it also coloured the tops around it, and with Depth recipe it could colour the edge of
+      the part below. On the cloud, that was the ring. Now the slicer keeps the sticker on its face, and
+      you can say which face that is.
+    </p>
+
+    <ul>
+      <li><b>Select area</b>, in the <b>Place</b> tab: click the face like with the paint bucket. It
+        spreads to the faces next to it while the angle between them stays under <b>Angle</b> (lower stops
+        sooner). Shift and click adds another face. The picked area shows in orange, and the sticker only
+        prints inside it.</li>
+      <li><b>Auto</b> forgets the picked area. Then the slicer guesses the face from the layers, which
+        works on flat faces and can miss on rounded ones.</li>
+      <li>The picked area is saved in the 3mf and follows the object when you move, merge or Remesh it.</li>
+    </ul>
+
+    <figure>
+      <img src="../images/Sticker-250-select-area.webp" width="2000" height="1163" loading="lazy"
+           alt="The Place tab of the rainbow sticker with Select area on, 616 triangles picked at 30 degrees, and the cloud face shown in orange in the 3D view">
+      <figcaption>Select area on the cloud: 616 triangles of the inner face, picked with one click.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
     <h2 id="costs" data-short="The catch">The catch</h2>
 
     <ul>
@@ -239,7 +311,12 @@
         both: it is applied last.</li>
       <li><strong>The 3D view draws each colour as a flat swatch.</strong> A weave or a smooth
         gradient shows in the recipe and in the slice, not yet on the model. RealColor in the
-        preview is the place to judge it.</li>
+        preview is the place to judge it. With Depth recipe the swatch is the colour the recipe
+        predicts.</li>
+      <li><strong>While you pick an area, the sticker is still drawn over the face.</strong> Move it
+        aside to see the face you pick. A later build hides it while picking.</li>
+      <li><strong>Depth recipe is the experimental part of the experimental tool.</strong> The cloud
+        above printed well; other drawings and other filament packs are not proven yet.</li>
       <li><strong>Gradients:</strong> linear ones are read. Radial gradients, which many emoji
         sets use, are not a promise; try the SVG first.</li>
       <li><strong>Wall recolouring recipes don't recolour walls on a sticker.</strong> The Place

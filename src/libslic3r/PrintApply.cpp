@@ -1,8 +1,13 @@
+#include <set>
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
 #include "SurfaceEffectProfile.hpp"      // NEOTKO_MIXEDFIL_SANDWICH_TAG
 #include "ColorSci/ColorPredict.hpp"     // NEOTKO_MIXEDFIL_SANDWICH_TAG
+#include "ColorSci/DepthStack.hpp"       // 4-nov-2026 — MixedFilament depth recipe
+#include "ColorSci/ColorSci.hpp"
+#include <sstream>
+#include <tuple>
 #include "ColorStitch.hpp"           // NEOTKO_TD_RECALC_DEBUG_TAG — NeoDebug + NEOTKO_LOG reuse (bug #3 instrumentation)
 #include "Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 — Gravity::active() for support invalidation
 
@@ -754,6 +759,15 @@ void print_region_ref_inc(PrintRegion &r) { ++ r.m_ref_cnt; }
 void print_region_ref_reset(PrintRegion &r) { r.m_ref_cnt = 0; }
 int  print_region_ref_cnt(const PrintRegion &r) { return r.m_ref_cnt; }
 
+// NEOTKO 12-nov-2026 — Walls per colour on a MixedFilament state (Pro Mode › Per color). A mix has no painted
+// region of its own (it is dropped onto its physical filaments layer by layer), so its walls need regions of their
+// own: one per physical filament the mix can print with, carrying the mix's extra walls. See PaintedRegion::mix_state.
+struct NeotkoMixWalls {
+    unsigned int              state { 0 };   // 1-based MixedFilament state id (> number of physical filaments)
+    int                       walls { 0 };   // extra walls, 1..8
+    std::vector<unsigned int> physical;      // the physical filaments the mix can resolve to
+};
+
 // Verify whether the PrintRegions of a PrintObject are still valid, possibly after updating the region configs.
 // Before region configs are updated, callback_invalidate() is called to possibly stop background processing.
 // Returns false if this object needs to be resliced because regions were merged or split.
@@ -844,6 +858,10 @@ bool verify_update_print_object_regions(
             cfg.wall_filament.value    = region.extruder_id;
             cfg.solid_infill_filament.value = region.extruder_id;
             cfg.sparse_infill_filament.value       = region.extruder_id;
+            // NEOTKO 12-nov-2026: the painted region carries its extra walls (Pro Mode); without this the check
+            // rebuilt the config WITHOUT them and either dropped them or forced a needless reslice.
+            if (region.extra_walls > 0)
+                cfg.wall_loops.value = std::max(0, cfg.wall_loops.value) + region.extra_walls;
             if (cfg != region.region->config()) {
                 // Region configuration changed.
                 if (print_region_ref_cnt(*region.region) == 0) {
@@ -992,7 +1010,8 @@ static PrintObjectRegions* generate_print_object_regions(
     // added on top of a painted region's own wall_loops, see the painting-regions loop below.
     // Per-color overrides (indexed by 1-based paint slot id, 0/absent = use the scalar).
     const int                                    mmu_segmented_region_extra_walls,
-    const std::vector<int>                      &mmu_segmented_region_extra_walls_per_color)
+    const std::vector<int>                      &mmu_segmented_region_extra_walls_per_color,
+    const std::vector<NeotkoMixWalls>           &mix_walls)
 {
     // Reuse the old object or generate a new one.
     auto out = print_object_regions_old ? std::unique_ptr<PrintObjectRegions>(print_object_regions_old) : std::make_unique<PrintObjectRegions>();
@@ -1116,8 +1135,20 @@ static PrintObjectRegions* generate_print_object_regions(
                          && mmu_segmented_region_extra_walls_per_color[painted_extruder_id] > 0)
                             ? std::min(mmu_segmented_region_extra_walls_per_color[painted_extruder_id], 8)
                             : mmu_segmented_region_extra_walls;
-                    if (painted_extra_walls > 0
-                     && painted_extruder_id != unsigned(parent_region.region->config().wall_filament.value))
+                    {   // sonda SIEMPRE activa (gravity.log), 12-nov-2026: qué muros extra lleva cada región pintada
+                        std::ostringstream os;
+                        os << "EXTRA_WALLS_REGION F" << painted_extruder_id << " extra=" << painted_extra_walls
+                           << " parent_wall_F" << parent_region.region->config().wall_filament.value
+                           << (painted_extruder_id == unsigned(parent_region.region->config().wall_filament.value) ? " (same filament as the object)" : "")
+                           << " base_loops=" << cfg.wall_loops.value;
+                        NeoDebug::write(NeoDebug::GRAVITY, os.str());
+                    }
+                    // NEOTKO 12-nov-2026: the s201 skip (same filament as the parent) is gone. It hid duplicate
+                    // walls, but it also dropped the walls of a MIX on the layers where the mix prints with the
+                    // object's own filament (Dr Who skin: F3+F4 mix on an F4 object got 8 walls on F3 layers, 2 on
+                    // F4 layers). The duplicate is now fixed at its root in PrintObjectSlice.cpp (the parent gives up
+                    // every painted target that is a different region, whatever its filament).
+                    if (painted_extra_walls > 0)
                         cfg.wall_loops.value = std::max(0, cfg.wall_loops.value) + painted_extra_walls;
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
@@ -1134,13 +1165,36 @@ static PrintObjectRegions* generate_print_object_regions(
                                                    << " parent_print_region_id=" << parent_region.region->print_object_region_id()
                                                    << " painted_print_region_id=" << painted_region->print_object_region_id();
                     }
-                    layer_range.painted_regions.push_back({ painted_extruder_id, parent_region_id, painted_region });
+                    layer_range.painted_regions.push_back({ painted_extruder_id, parent_region_id, painted_region, 0u,
+                                                            painted_extra_walls > 0 ? painted_extra_walls : 0 });
                 }
+        // NEOTKO 12-nov-2026 — a region per (mix with walls, physical filament, parent): same filaments as the
+        // plain painted region of that filament, plus the MIX's own extra walls. PrintObjectSlice routes the mix's
+        // area here instead of to the plain painted region, so other colours keep their own walls.
+        for (const NeotkoMixWalls &mw : mix_walls)
+            for (unsigned int phys : mw.physical)
+                for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++ parent_region_id)
+                    if (const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
+                        (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
+                        mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+                        PrintRegionConfig cfg = parent_region.region->config();
+                        cfg.wall_filament.value          = phys;
+                        cfg.solid_infill_filament.value  = phys;
+                        cfg.sparse_infill_filament.value = phys;
+                        cfg.wall_loops.value = std::max(0, cfg.wall_loops.value) + mw.walls;
+                        PrintRegion *painted_region = get_create_region(std::move(cfg));
+                        layer_range.painted_regions.push_back({ phys, parent_region_id, painted_region, mw.state, mw.walls });
+                        std::ostringstream os;   // sonda SIEMPRE activa (gravity.log)
+                        os << "MIX_WALLS_REGION state=" << mw.state << " F" << phys << " extra=" << mw.walls
+                           << " parent=" << parent_region_id << " region=" << painted_region->print_object_region_id()
+                           << " wall_loops=" << painted_region->config().wall_loops.value;
+                        NeoDebug::write(NeoDebug::GRAVITY, os.str());
+                    }
         // Sort the regions by parent region::print_object_region_id() and extruder_id to help the slicing algorithm when applying MM segmentation.
         std::sort(layer_range.painted_regions.begin(), layer_range.painted_regions.end(), [&layer_range](auto &l, auto &r) {
             int lid = layer_range.volume_regions[l.parent].region->print_object_region_id();
             int rid = layer_range.volume_regions[r.parent].region->print_object_region_id();
-            return lid < rid || (lid == rid && l.extruder_id < r.extruder_id); });
+            return lid < rid || (lid == rid && (l.extruder_id < r.extruder_id || (l.extruder_id == r.extruder_id && l.mix_state < r.mix_state))); });
     }
 
     if (has_painted_fuzzy_skin) {
@@ -1225,14 +1279,15 @@ static void append_mixed_component_extruders(const MixedFilamentManager &mixed_m
 }
 
 static bool painted_region_targets_match(const PrintObjectRegions           &print_object_regions,
-                                         const std::vector<unsigned int>    &painting_extruders)
+                                         const std::vector<unsigned int>    &painting_extruders,
+                                         const std::vector<NeotkoMixWalls>  &mix_walls)
 {
     std::vector<unsigned int> expected_extruders = painting_extruders;
     std::sort(expected_extruders.begin(), expected_extruders.end());
     expected_extruders.erase(std::unique(expected_extruders.begin(), expected_extruders.end()), expected_extruders.end());
 
     for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges) {
-        std::vector<std::pair<int, unsigned int>> expected_targets;
+        std::vector<std::tuple<int, unsigned int, unsigned int, int>> expected_targets;
         expected_targets.reserve(layer_range.volume_regions.size() * expected_extruders.size());
 
         for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++parent_region_id) {
@@ -1241,14 +1296,18 @@ static bool painted_region_targets_match(const PrintObjectRegions           &pri
                 (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
                 mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
                 for (unsigned int extruder_id : expected_extruders)
-                    expected_targets.emplace_back(parent_region_id, extruder_id);
+                    expected_targets.emplace_back(parent_region_id, extruder_id, 0u, 0);
+                for (const NeotkoMixWalls &mw : mix_walls)
+                    for (unsigned int phys : mw.physical)
+                        expected_targets.emplace_back(parent_region_id, phys, mw.state, mw.walls);
             }
         }
 
-        std::vector<std::pair<int, unsigned int>> actual_targets;
+        std::vector<std::tuple<int, unsigned int, unsigned int, int>> actual_targets;
         actual_targets.reserve(layer_range.painted_regions.size());
         for (const PrintObjectRegions::PaintedRegion &painted_region : layer_range.painted_regions)
-            actual_targets.emplace_back(painted_region.parent, painted_region.extruder_id);
+            actual_targets.emplace_back(painted_region.parent, painted_region.extruder_id, painted_region.mix_state,
+                                        painted_region.mix_state ? painted_region.extra_walls : 0);
 
         std::sort(expected_targets.begin(), expected_targets.end());
         std::sort(actual_targets.begin(), actual_targets.end());
@@ -1999,6 +2058,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             print_object_regions->ref_cnt_inc();
         }
         std::vector<unsigned int> painting_extruders;
+        std::vector<NeotkoMixWalls> mix_walls;   // NEOTKO 12-nov-2026 — mixes with their own walls (Pro Mode › Per color)
         const bool same_layer_mode_active = same_layer_pointillism_enabled(m_mixed_filament_mgr);
         if (const auto &volumes = print_object.model_object()->volumes;
             num_extruders > 1 &&
@@ -2034,6 +2094,20 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                                                      static_cast<unsigned int>(state_idx),
                                                      num_extruders,
                                                      painting_extruders);
+                    if (const std::vector<int> &pc = print_object.config().mmu_segmented_region_extra_walls_per_color.values;
+                        state_idx > num_extruders && state_idx < pc.size() && pc[state_idx] > 0) {
+                        NeotkoMixWalls mw;
+                        mw.state = unsigned(state_idx);
+                        mw.walls = std::min(pc[state_idx], 8);
+                        append_mixed_component_extruders(m_mixed_filament_mgr, mw.state, num_extruders, mw.physical);
+                        std::sort(mw.physical.begin(), mw.physical.end());
+                        std::ostringstream os;   // sonda SIEMPRE activa (gravity.log)
+                        os << "MIX_WALLS state=" << mw.state << " walls=" << mw.walls << " ->";
+                        for (unsigned int c : mw.physical) os << " F" << c;
+                        NeoDebug::write(NeoDebug::GRAVITY, os.str());
+                        if (!mw.physical.empty())
+                            mix_walls.emplace_back(std::move(mw));
+                    }
                 } else
                     ++dropped_painted_states;
             }
@@ -2106,7 +2180,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 print_object_regions->clear();
                 model_object_status.print_object_regions_status = ModelObjectStatus::PrintObjectRegionsStatus::Invalid;
                 print_regions_reshuffled = true;
-            } else if (print_object_regions && !painted_region_targets_match(*print_object_regions, painting_extruders)) {
+            } else if (print_object_regions && !painted_region_targets_match(*print_object_regions, painting_extruders, mix_walls)) {
                 invalidate();
                 model_object_status.print_object_regions_status = ModelObjectStatus::PrintObjectRegionsStatus::PartiallyValid;
                 print_regions_reshuffled = true;
@@ -2144,7 +2218,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 painting_extruders,
                 print_object.is_fuzzy_skin_painted(),
                 print_object.config().mmu_segmented_region_extra_walls.value,
-                print_object.config().mmu_segmented_region_extra_walls_per_color.values);
+                print_object.config().mmu_segmented_region_extra_walls_per_color.values,
+                mix_walls);
         }
         for (auto it = it_print_object; it != it_print_object_end; ++it)
             if ((*it)->m_shared_regions) {
@@ -2262,6 +2337,9 @@ void Print::resolve_mixed_filament_sandwich_profiles()
     namespace CS = Slic3r::ColorSci;
 
     m_mixed_filament_sandwich_profile_id.clear();
+    m_mixed_filament_depth_blocks.clear();
+    m_mixed_filament_depth_painted.clear();
+    m_mixed_filament_depth_summary.clear();
 
     const size_t num_physical = m_config.filament_colour.values.size();
     if (num_physical == 0)
@@ -2357,6 +2435,211 @@ void Print::resolve_mixed_filament_sandwich_profiles()
             m_mixed_filament_sandwich_profile_cache[cache_key] = pid;
         }
         m_mixed_filament_sandwich_profile_id[object] = pid;
+
+        // 5-nov-2026 — receta por PROFUNDIDAD, como el sticker (apagada por defecto).
+        //  · Objetivo = la PARED vista de lado: franjas de A y de B macizas mezcladas en
+        //    lineal por mix_b, que es lo que promedia el ojo.
+        //  · Base = lo que hay DE VERDAD bajo la profundidad: relleno disperso (por área: % de relleno de mezcla
+        //    maciza, el resto hueco oscuro). NO un macizo A/B: con eso la base ya «era» la pared y salía vacía.
+        //  · El modelo de color lleva la difusión de RealView (DepthStack::predict).
+        //  · El calculador elige capas con cualquier filamento, orden libre, hasta el máximo; para en ΔE ≤ 2.
+        //    Toda la profundidad de la receta pasa a sólido (mixed_depth_prepare, StickerDepth.cpp).
+        if (object->config().mixed_filament_depth_mode.value) {
+            // 5/6-nov-2026 — receta por PROFUNDIDAD, como el sticker (apagada por defecto).
+            //  · Base = lo que hay DE VERDAD bajo la profundidad: relleno disperso (% de relleno de la mezcla del
+            //    objeto maciza, el resto hueco oscuro).
+            //  · Objetivo = el color de la pared del MF, según el «Colour model» del objeto:
+            //      0 Light mix   — franjas A/B macizas promediadas en lineal (lo que promedia el ojo; sale claro);
+            //      1 Panel swatch — el color de la muestra del panel (display_color; mezcla tipo pintura, oscura);
+            //      2 RealView    — franjas A/B con el Nozzle smear de RealView (cada franja se tiñe de la vecina
+            //                      en `smear` mm, gana el pigmento: peso 1/TD, oscurece como mezcla de pintura).
+            //  · Calculador libre hasta el máx. (por MF si se fija en la lista), para en ΔE ≤ 2 (con freno).
+            //  · Lo PINTADO también: físico = el mismo filamento más grueso; otro MF = su propio objetivo.
+            namespace DS = Slic3r::DepthStack;
+            const auto& ocfg = object->config();
+            const float lh = float(ocfg.layer_height.value > 0.001 ? ocfg.layer_height.value : 0.2);
+            const float obj_max = std::clamp(float(ocfg.mixed_filament_depth_max.value), 0.2f, 10.f);
+            const float dens = std::clamp(float(m_default_region_config.sparse_infill_density.value) / 100.f, 0.f, 1.f);
+            // 12-nov-2026 — 2_50: modelo FIJO RealView (el selector salió del panel; la clave sigue en el 3mf).
+            const int model = 2;
+            (void) ocfg.mixed_filament_depth_model.value;
+            const float smear = std::clamp(float(ocfg.mixed_filament_depth_smear.value), 0.f, 0.3f);
+            // Máx. por MF: "id:mm,id:mm" (vacío o ausente = el del objeto).
+            std::map<unsigned int, float> max_by_id;
+            {
+                std::istringstream is(ocfg.mixed_filament_depth_max_per_mf.value);
+                std::string tok;
+                while (std::getline(is, tok, ',')) {
+                    const size_t c = tok.find(':');
+                    if (c == std::string::npos) continue;
+                    try {
+                        const unsigned int id = unsigned(std::stoul(tok.substr(0, c)));
+                        const float mm = std::stof(tok.substr(c + 1));
+                        if (mm > 0.f) max_by_id[id] = std::clamp(mm, 0.2f, 10.f);
+                    } catch (...) {}
+                }
+            }
+            auto max_for = [&](unsigned int id) { auto it = max_by_id.find(id); return it == max_by_id.end() ? obj_max : it->second; };
+
+            auto fil = [&](int k) { return DS::Filament{ k, mats[k].rgb, mats[k].td[0] }; };
+            const DS::Filament black{ -1, { 0.f, 0.f, 0.f }, 0.f };
+            auto lin  = [](float v) { return CS::srgb_to_linear(v); };
+            auto slin = [](float v) { return CS::linear_to_srgb(v); };
+            // Cada filamento visto de lado, macizo (5 mm: ya opaco).
+            auto solid_seen = [&](int k) {
+                return model == 3 ? DS::predict_lupa({ { k, 25 } }, { fil(k) }, black, lh)
+                                  : DS::predict({ { k, 25 } }, { fil(k) }, black, lh);
+            };
+
+            // Objetivo de un MF (componentes 0-based, mix_b en 0..1, muestra del panel).
+            auto wall_target = [&](int a, int b, double p, const std::string& swatch) {
+                std::array<float, 3> t{};
+                if (model == 1 && !swatch.empty())
+                    return CS::material_from_hex(swatch, 1.f).rgb;
+                const std::array<float, 3> A = solid_seen(a), B = solid_seen(b);
+                if (model == 2 && smear > 0.f) {
+                    // Una franja de `x` con la otra (`o`) arriba y abajo, como en RealView (colorTramo + hacia).
+                    const float tda = std::max(mats[a].td[0], 0.3f), tdb = std::max(mats[b].td[0], 0.3f);
+                    const float fl = [&] { const float m = 0.5f * (tda + tdb); const float u = std::clamp((m - 1.f) / 5.f, 0.f, 1.f); return u * u * (3.f - 2.f * u); }();
+                    const float d = smear * (0.6f + 0.8f * fl);
+                    auto stripe = [&](const std::array<float, 3>& X, const std::array<float, 3>& O, float tdx, float tdo) {
+                        const float w = (1.f / tdo) / (1.f / tdx + 1.f / tdo);   // gana el pigmento
+                        std::array<double, 3> acc{ 0., 0., 0. };
+                        const int N = 32;
+                        for (int s = 0; s < N; ++s) {
+                            const float prof = (s + 0.5f) / N * lh;   // 0 arriba … lh abajo
+                            auto ss = [](float e0, float e1, float x) { const float u = std::clamp((x - e0) / std::max(e1 - e0, 1e-6f), 0.f, 1.f); return u * u * (3.f - 2.f * u); };
+                            const float m = std::min(1.f, w * (1.f - ss(0.f, d, prof)) + w * (1.f - ss(0.f, d, lh - prof)));
+                            for (int c = 0; c < 3; ++c) {
+                                const float x = std::max(lin(X[c]), 1e-3f), o = std::max(lin(O[c]), 1e-3f);
+                                const float paint = std::exp((1.f - m) * std::log(x) + m * std::log(o));
+                                const float mixv  = (1.f - m) * x + m * o;
+                                const float dark  = std::clamp(paint / std::max(mixv, 1e-3f), 0.f, 1.f);
+                                acc[c] += mixv * dark;
+                            }
+                        }
+                        std::array<float, 3> r;
+                        for (int c = 0; c < 3; ++c) r[c] = float(acc[c] / N);   // lineal
+                        return r;
+                    };
+                    const std::array<float, 3> sa = stripe(A, B, tda, tdb), sb = stripe(B, A, tdb, tda);
+                    for (int c = 0; c < 3; ++c) t[c] = slin(float(1. - p) * sa[c] + float(p) * sb[c]);
+                    return t;
+                }
+                for (int c = 0; c < 3; ++c) t[c] = slin(float(1. - p) * lin(A[c]) + float(p) * lin(B[c]));
+                return t;
+            };
+
+            // Base: el relleno disperso visto desde arriba (por área: línea = mezcla A/B maciza del objeto,
+            // hueco = negro). Aproximación: no dibuja las diagonales.
+            const int a0 = std::clamp<int>(int(mf->component_a) - 1, 0, 3);
+            const int b0 = std::clamp<int>(int(mf->component_b) - 1, 0, 3);
+            const double p0 = std::clamp(mf->mix_b_percent, 0, 100) / 100.;
+            DS::Filament base{ a0, { 0.f, 0.f, 0.f }, 0.f };
+            {
+                std::vector<DS::Block> ab;
+                for (int i = 0; i < 60; ++i) {
+                    const int k = (std::floor((i + 1) * p0) > std::floor(i * p0)) ? b0 : a0;
+                    if (!ab.empty() && ab.back().tool == k) ++ab.back().layers; else ab.push_back({ k, 1 });
+                }
+                const std::array<float, 3> solid_mix = model == 3 ? DS::predict_lupa(ab, { fil(a0), fil(b0) }, black, lh)
+                                                                  : DS::predict(ab, { fil(a0), fil(b0) }, black, lh);
+                for (int c = 0; c < 3; ++c) base.rgb[c] = slin(dens * lin(solid_mix[c]));
+            }
+            std::vector<DS::Filament> all_colours;
+            for (int t = 0; t < std::min<int>(int(num_physical), 4); ++t)
+                all_colours.push_back(fil(t));
+
+            char bbuf[96];
+            std::snprintf(bbuf, sizeof(bbuf), "|h%.3f|i%.3f|m%d|s%.3f|b%.4f,%.4f,%.4f", lh, dens, model, smear,
+                          base.rgb[0], base.rgb[1], base.rgb[2]);
+            const std::string base_key = cache_key + bbuf;
+
+            std::vector<MixedDepthSummary> summary;
+            auto solve_cached = [&](unsigned int id, bool is_painted, const std::string& what, const std::array<float, 3>& target,
+                                    const std::vector<DS::Filament>& colours) -> const MixedDepthCacheEntry& {
+                const float mx = max_for(id);
+                char kbuf[96];
+                std::snprintf(kbuf, sizeof(kbuf), "|t%.4f,%.4f,%.4f|n%zu|x%.2f", target[0], target[1], target[2], colours.size(), mx);
+                const std::string key = base_key + kbuf;
+                auto it = m_mixed_filament_depth_cache.find(key);
+                if (it == m_mixed_filament_depth_cache.end()) {
+                    DS::Options o;
+                    o.layer_mm     = lh;
+                    o.max_depth_mm = mx;
+                    o.fixed_order  = false;   // como el sticker: gana el color
+                    o.lupa         = (model == 3);
+                    const DS::Result r = DS::solve(target, colours, base, o);
+                    MixedDepthCacheEntry e;
+                    for (const DS::Block& bl : r.blocks) e.blocks.push_back({ bl.tool, float(bl.layers) * lh });
+                    e.delta_e = r.delta_e;
+                    e.target  = target;
+                    std::ostringstream os;
+                    for (const DS::Block& bl : r.blocks) os << " T" << bl.tool << "x" << bl.layers;
+                    NEOTKO_LOG(PROFILE, "MF_DEPTH_SOLVE obj='" << mo->name << "' " << what << " model=" << model
+                        << " max=" << mx << " target=" << target[0] << "," << target[1] << "," << target[2]
+                        << " base=" << base.rgb[0] << "," << base.rgb[1] << "," << base.rgb[2] << " dE=" << r.delta_e
+                        << " mm=" << r.depth_mm << (r.warning.empty() ? "" : " WARN=" + r.warning) << " blocks(abajo->arriba):" << os.str());
+                    it = m_mixed_filament_depth_cache.emplace(key, std::move(e)).first;
+                }
+                MixedDepthSummary s;
+                s.id = id; s.painted = is_painted; s.label = what; s.blocks = it->second.blocks;
+                s.delta_e = it->second.delta_e; s.target = it->second.target; s.max_mm = mx;
+                summary.push_back(std::move(s));
+                return it->second;
+            };
+
+            // El MF del objeto.
+            m_mixed_filament_depth_blocks[object] = solve_cached(unsigned(extruder_id), false,
+                "MF" + std::to_string(extruder_id) + "(T" + std::to_string(a0) + "+T" + std::to_string(b0) + ")",
+                wall_target(a0, b0, p0, mf->display_color), all_colours).blocks;
+
+            // Lo PINTADO (autocontenido: no depende del «Per color Depth» del painter, que solo está en FS).
+            // Claves = filamentos pintados de verdad (MF incluidos) + regiones físicas que no son el objeto.
+            std::set<unsigned int> used;
+            for (size_t r = 0; r < object->num_printing_regions(); ++r)
+                for (FlowRole fr : { frSolidInfill, frTopSolidInfill, frPerimeter })
+                    used.insert(object->printing_region(r).extruder(fr));
+            std::set<unsigned int> keys;
+            for (const ModelVolume* mv : mo->volumes)
+                if (mv && mv->is_model_part()) {
+                    const std::vector<bool>& us = mv->mmu_segmentation_facets.get_data().used_states;
+                    for (size_t k = 1; k < us.size(); ++k) if (us[k]) keys.insert(unsigned(k));
+                }
+            for (unsigned int e : used) if (e >= 1 && e <= num_physical) keys.insert(e);
+            std::map<unsigned int, std::vector<ColorStitchDepthBlock>> painted;
+            // 12-nov-2026 — 2_50: lo PINTADO no lleva receta todavía (un MF pintado inalcanzable, p.ej. C+M bajo el
+            // relleno, salía vacío y el trazo plano). Vuelve con la investigación de CMY casi negro + inner perimeters.
+            constexpr bool k_painted_depth = false;
+            if (!k_painted_depth) keys.clear();
+            for (unsigned int ext : keys) {
+                if (ext < 1 || ext == unsigned(extruder_id))
+                    continue;
+                if (ext <= num_physical) {
+                    const int t = int(ext) - 1;
+                    if (t > 3) continue;
+                    painted[ext] = solve_cached(ext, true, "T" + std::to_string(t), solid_seen(t), { fil(t) }).blocks;
+                } else if (const MixedFilament* pm = m_mixed_filament_mgr.mixed_filament_from_id(ext, num_physical)) {
+                    const int pa = std::clamp<int>(int(pm->component_a) - 1, 0, 3);
+                    const int pb = std::clamp<int>(int(pm->component_b) - 1, 0, 3);
+                    const double pp = std::clamp(pm->mix_b_percent, 0, 100) / 100.;
+                    painted[ext] = solve_cached(ext, true, "MF" + std::to_string(ext) + "(T" + std::to_string(pa) + "+T" + std::to_string(pb) + ")",
+                                                wall_target(pa, pb, pp, pm->display_color), all_colours).blocks;
+                }
+            }
+            {
+                // Resumen en CADA laminado (con caché o sin ella).
+                std::ostringstream os;
+                for (const MixedDepthSummary& s : summary) {
+                    os << " [" << s.label << " dE=" << s.delta_e << ":";
+                    for (const ColorStitchDepthBlock& bl : s.blocks) os << " T" << bl.tool << "/" << bl.mm << "mm";
+                    os << "]";
+                }
+                NEOTKO_LOG(PROFILE, "MF_DEPTH_USE obj='" << mo->name << "' model=" << model << " smear=" << smear << os.str());
+            }
+            m_mixed_filament_depth_painted[object] = std::move(painted);
+            m_mixed_filament_depth_summary[object] = std::move(summary);
+        }
 
         // NEOTKO_TD_RECALC_DEBUG_TAG — bug #3: did this object's recipe reuse a cached
         // profile (built from a possibly-stale TD) or recompute fresh?

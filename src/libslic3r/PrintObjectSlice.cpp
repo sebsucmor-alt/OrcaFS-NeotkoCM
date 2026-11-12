@@ -23,6 +23,8 @@
 #include "ShortestPath.hpp"
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
 #include "libslic3r/Feature/Gravity/GravityFloor.hpp" // NEOTKO_GRAVITY_TAG s226 Fase 5 — elephant foot
+#include "NeoDebug.hpp" // sondas de muros por color (12-nov-2026)
+#include <deque>
 #include "libslic3r/Feature/HeightAdaptive/HeightCurve.hpp" // NEOTKO_HAE_EXPANSION_TAG s247 — per-layer XY compensation
 #include "libslic3r/Feature/SupportZones/SupportZoneProbe.hpp" // NEOTKO_SUPPORTZONES_TAG s299 — el default del ángulo
 
@@ -4290,6 +4292,11 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
 
             std::vector<ByExtruder> by_extruder;
             std::vector<ByRegion>   by_region;
+            // NEOTKO 12-nov-2026 — Walls per colour on mixes: a mix that has its own painted regions (mix_state != 0,
+            // see PrintApply.cpp) keeps its area apart from plain paint of the same filament, one bucket per
+            // (state, physical filament). A deque, so references to a bucket survive adding the next one.
+            std::deque<ByExtruder>                            by_mix;
+            std::vector<std::pair<unsigned int, unsigned int>> by_mix_key;   // (state, physical filament)
             for (size_t layer_id = range.begin(); layer_id < range.end(); ++layer_id) {
                 throw_on_cancel();
                 Layer &layer = *print_object.get_layer(int(layer_id));
@@ -4299,6 +4306,33 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                 assert(segmentation[layer_id].size() == num_channels);
                 by_extruder.assign(num_extruders, ByExtruder());
                 by_region.assign(layer.region_count(), ByRegion());
+                by_mix.clear();
+                by_mix_key.clear();
+                auto neotko_bucket = [&](unsigned int state, unsigned int phys, size_t effective_idx) -> ByExtruder & {
+                    // Local-Z (and gradient rows) do not collapse the mix: its area stays as the virtual state and the
+                    // G-code clips each region's paths into the Local-Z passes by MASK, choosing the filament per pass.
+                    // So which of the mix's regions holds the area does not decide the colour, only the walls: use
+                    // the first one (lowest filament).
+                    if (state > num_physical && (phys < 1 || phys > num_physical)) {
+                        unsigned int first = 0;
+                        for (const auto &pr : layer_range.painted_regions)
+                            if (pr.mix_state == state && (first == 0 || pr.extruder_id < first))
+                                first = pr.extruder_id;
+                        if (first != 0)
+                            phys = first;
+                    }
+                    if (state > num_physical && phys >= 1 && phys <= num_physical &&
+                        std::any_of(layer_range.painted_regions.begin(), layer_range.painted_regions.end(),
+                                    [state, phys](const auto &pr) { return pr.mix_state == state && pr.extruder_id == phys; })) {
+                        for (size_t k = 0; k < by_mix_key.size(); ++k)
+                            if (by_mix_key[k].first == state && by_mix_key[k].second == phys)
+                                return by_mix[k];
+                        by_mix_key.emplace_back(state, phys);
+                        by_mix.emplace_back();
+                        return by_mix.back();
+                    }
+                    return by_extruder[effective_idx];
+                };
                 bool layer_split = false;
                 size_t missing_target_regions = 0;
                 std::vector<int> missing_target_extruders;
@@ -4352,7 +4386,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                                 effective_filament_id >= 1 && effective_filament_id <= num_extruders ?
                                     size_t(effective_filament_id - 1) :
                                     size_t(channel_idx - 1);
-                            ByExtruder &region = by_extruder[effective_idx];
+                            ByExtruder &region = neotko_bucket(channel_id, effective_filament_id, effective_idx);
                             region.expolygons.emplace_back(std::move(state_masks[component_idx]));
                             region.bbox = get_extents(region.expolygons);
                             layer_split = true;
@@ -4385,7 +4419,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                             effective_filament_id >= 1 && effective_filament_id <= num_extruders ?
                                 size_t(effective_filament_id - 1) :
                                 size_t(channel_idx - 1);
-                        ByExtruder &region = by_extruder[effective_idx];
+                        ByExtruder &region = neotko_bucket(channel_id, effective_filament_id, effective_idx);
                         append(region.expolygons, std::move(state_masks));
                         if (! region.expolygons.empty()) {
                             region.bbox = get_extents(region.expolygons);
@@ -4413,6 +4447,10 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                     if (!default_segmentation.empty())
                         append(layer_geometry_mask, default_segmentation);
                     for (const ByExtruder &segmented : by_extruder) {
+                        if (!segmented.expolygons.empty())
+                            append(layer_geometry_mask, segmented.expolygons);
+                    }
+                    for (const ByExtruder &segmented : by_mix) {
                         if (!segmented.expolygons.empty())
                             append(layer_geometry_mask, segmented.expolygons);
                     }
@@ -4465,6 +4503,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
 
                     // Update the beginning PaintedRegion iterator for the next iteration.
                     it_painted_region_begin = it_first_painted_region;
+                    const auto it_parent_painted_begin = it_first_painted_region;   // NEOTKO: mix buckets search from here
 
                     const BoundingBox parent_layer_region_bbox = get_extents(parent_layer_region.slices.surfaces);
                     const bool        clamp_parent_to_geometry =
@@ -4493,7 +4532,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                         // Find the matching target region for this parent and extruder ID.
                         auto it_target_region = std::find_if(it_painted_region_begin, layer_range.painted_regions.cend(), [&layer_range, &parent_print_region, extruder_id](const auto &painted_region) {
                             return layer_range.volume_regions[painted_region.parent].region == &parent_print_region &&
-                                   int(painted_region.extruder_id) == extruder_id;
+                                   int(painted_region.extruder_id) == extruder_id && painted_region.mix_state == 0;
                         });
 
                         if (it_target_region == layer_range.painted_regions.cend()) {
@@ -4542,9 +4581,51 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                         }
                     }
 
+                    // NEOTKO 12-nov-2026 — the mixes with their own walls: steal their area into their own regions.
+                    std::vector<bool> assigned_mix(by_mix.size(), false);
+                    for (size_t k = 0; k < by_mix.size(); ++k) {
+                        const ByExtruder &segmented = by_mix[k];
+                        if (!segmented.bbox.defined || !parent_layer_region_bbox.overlap(segmented.bbox))
+                            continue;
+                        const unsigned int state = by_mix_key[k].first, phys = by_mix_key[k].second;
+                        auto it_mix = std::find_if(it_parent_painted_begin, layer_range.painted_regions.cend(), [&](const auto &pr) {
+                            return layer_range.volume_regions[pr.parent].region == &parent_print_region &&
+                                   pr.extruder_id == phys && pr.mix_state == state;
+                        });
+                        if (it_mix == layer_range.painted_regions.cend() || it_mix->region == &parent_print_region) {
+                            ++missing_target_regions;
+                            missing_target_extruders.emplace_back(int(state));
+                            continue;
+                        }
+                        assigned_mix[k] = true;
+                        ExPolygons stolen = intersection_ex(parent_layer_region.slices.surfaces, segmented.expolygons);
+                        if (!stolen.empty()) {
+                            ByRegion &dst = by_region[it_mix->region->print_object_region_id()];
+                            SurfaceCollection stolen_surfaces = intersect_surfaces_preserve_types(parent_layer_region.slices, stolen);
+                            if (layer_id % 25 == 0) {   // sonda SIEMPRE activa (gravity.log)
+                                double a = 0.;
+                                for (const ExPolygon &e : stolen) a += e.area();
+                                std::ostringstream os;
+                                os << "MIX_WALLS_SPLIT layer=" << layer_id << " state=" << state << " F" << phys
+                                   << " region=" << it_mix->region->print_object_region_id()
+                                   << " area_mm2=" << a * SCALING_FACTOR * SCALING_FACTOR;
+                                NeoDebug::write(NeoDebug::GRAVITY, os.str());
+                            }
+                            if (!stolen_surfaces.empty()) {
+                                if (dst.surfaces.empty()) {
+                                    dst.surfaces = std::move(stolen_surfaces);
+                                } else {
+                                    dst.surfaces.append(std::move(stolen_surfaces));
+                                    dst.needs_merge = true;
+                                }
+                            }
+                        }
+                    }
+
                     const bool has_foreign_assigned_region =
                         std::any_of(assigned_extruder.begin(), assigned_extruder.end(),
-                                    [](bool assigned) { return assigned; });
+                                    [](bool assigned) { return assigned; }) ||
+                        std::any_of(assigned_mix.begin(), assigned_mix.end(), [](bool assigned) { return assigned; });
                     if (!has_foreign_assigned_region) {
                         preserve_parent_region();
                         continue;
@@ -4560,12 +4641,20 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                         const ByExtruder &segmented = by_extruder[extruder_idx];
                         if (!assigned_extruder[extruder_idx])
                             continue;
-                        if (int(extruder_idx + 1) != self_extruder_id && segmented.bbox.defined && parent_layer_region_bbox.overlap(segmented.bbox)) {
+                        // NEOTKO 12-nov-2026: assigned_extruder is only set when the painted target is a DIFFERENT
+                        // PrintRegion than the parent (see "Steal from this region" above). That happens with the
+                        // parent's own filament too when the paint adds Extra walls, and the parent must give that
+                        // area up, or it keeps its full silhouette and both print walls in the same spot (the s201
+                        // duplicate walls). So subtract every assigned target, whatever its filament number.
+                        if (segmented.bbox.defined && parent_layer_region_bbox.overlap(segmented.bbox)) {
                             mine = diff(mine, segmented.expolygons);
                             if (mine.empty())
                                 break;
                         }
                     }
+                    for (size_t k = 0; k < by_mix.size() && !mine.empty(); ++k)
+                        if (assigned_mix[k] && by_mix[k].bbox.defined && parent_layer_region_bbox.overlap(by_mix[k].bbox))
+                            mine = diff(mine, by_mix[k].expolygons);
 
                     if (!explicit_self_expolygons.empty())
                         explicit_self_expolygons = union_ex(explicit_self_expolygons);
@@ -4641,6 +4730,12 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
                         if (i > 0)
                             missing_ids += ",";
                         missing_ids += std::to_string(missing_target_extruders[i]);
+                    }
+                    if (layer_id % 25 == 0) {   // sonda SIEMPRE activa (gravity.log), 12-nov-2026: muros por color en mezclas
+                        std::ostringstream os;
+                        os << "WALLS_MISSING_TARGET layer=" << layer_id << " extruders=[" << missing_ids << "] local_z=" << local_z_mode
+                           << " painted_regions=" << layer_range.painted_regions.size();
+                        NeoDebug::write(NeoDebug::GRAVITY, os.str());
                     }
                     BOOST_LOG_TRIVIAL(warning) << "MM segmentation missing painted target regions"
                                                << " object=" << (print_object.model_object() ? print_object.model_object()->name : std::string("<unknown>"))
@@ -5323,6 +5418,17 @@ void PrintObject::slice_volumes()
                                                                                                        &m_painted_depth_solid_mask);
         apply_mixed_surface_indentation(*this, mm_segmentation);
         apply_mixed_component_surface_offsets(*this, mm_segmentation);
+        // 6-nov-2026 — Depth recipe: guardar la huella de cada MixedFilament pintado (estado > nº de físicos)
+        // antes de que se parta en sus físicos; si no, dos MF que comparten filamento son indistinguibles.
+        m_mixed_paint_masks.clear();
+        if (m_config.mixed_filament_depth_mode.value) {
+            const size_t n_phys = print->config().filament_colour.values.size();
+            m_mixed_paint_masks.assign(mm_segmentation.size(), {});
+            for (size_t li = 0; li < mm_segmentation.size(); ++li)
+                for (size_t st = n_phys + 1; st < mm_segmentation[li].size(); ++st)
+                    if (!mm_segmentation[li][st].empty())
+                        m_mixed_paint_masks[li][unsigned(st)] = mm_segmentation[li][st];
+        }
         std::vector<std::vector<ExPolygons>> local_z_segmentation =
             local_z_whole_objects_enabled
                 ? local_z_planner_segmentation_with_whole_object_mixed_wall(*this, mm_segmentation)

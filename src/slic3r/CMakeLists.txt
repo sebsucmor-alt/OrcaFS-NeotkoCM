@@ -158,6 +158,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoNeoStroke.hpp
     GUI/Gizmos/GLGizmoPrintOrder.cpp
     GUI/Gizmos/GLGizmoPrintOrder.hpp
+    GUI/Gizmos/GLGizmoPrimitiveGenerator.cpp
+    GUI/Gizmos/GLGizmoPrimitiveGenerator.hpp
+    GUI/NeotkoScad.cpp
+    GUI/NeotkoScad.hpp
     GUI/Gizmos/GLGizmoPrecisionALH.hpp
     GUI/Gizmos/GLGizmoHeightAdaptiveEffects.cpp
     GUI/Gizmos/GLGizmoHeightAdaptiveEffects.hpp
@@ -755,6 +759,11 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GeneratedConfig.hpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/GeneratedConfig.hpp
                @ONLY)
 
+# NEOTKO 11-nov-2026 — extras privados del GUI (Lupa de RealColor), como los de libslic3r.
+if (NEOTKO_PRIVATE_GUI_ENABLED)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/GUI/neotko_private/sources.cmake)
+    list(APPEND SLIC3R_GUI_SOURCES ${NEOTKO_PRIVATE_GUI_SOURCES})
+endif()
 add_library(libslic3r_gui STATIC ${SLIC3R_GUI_SOURCES})
 target_include_directories(libslic3r_gui PRIVATE Utils ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(libslic3r_gui paho-mqttpp3-static)

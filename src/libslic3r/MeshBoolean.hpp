@@ -87,6 +87,12 @@ TriangleMesh mcut_to_triangle_mesh(const McutMesh &mcutmesh);
 // do boolean and save result to srcMesh
 // return true if sucessful
 bool do_boolean_single(McutMesh& srcMesh, const McutMesh& cutMesh, const std::string& boolean_opts);
+// NEOTKO_CLAY_TAG: srcMesh minus cutMesh with CGAL (exact predicates) on the doubles, for when mcut fails.
+bool cgal_minus_doubles(McutMesh& srcMesh, const McutMesh& cutMesh);
+McutMeshPtr clone(const McutMesh& mesh);
+// Signed volume in doubles, about the bounding box centre (TriangleMesh::volume() sums in float: off by
+// hundreds of mm3 on a 800k-triangle part, 30-oct).
+double volume(const McutMesh& mesh);
 // do boolean of mesh with multiple volumes and save result to srcMesh
 // Both srcMesh and cutMesh may have multiple volumes.
 void do_boolean(McutMesh &srcMesh, const McutMesh &cutMesh, const std::string &boolean_opts);

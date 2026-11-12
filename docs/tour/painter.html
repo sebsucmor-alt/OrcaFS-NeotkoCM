@@ -292,6 +292,7 @@
       recipes as profiles, then flood-fill them onto individual faces. Every step of a staircase
       can carry a different one, and the weave is drawn on the model while you work.
     </p>
+    <p><a class="btn" href="reel-painter.html">▶ Watch the 2.4.9 Painter reel (30 s)</a></p>
 
     <ul class="badges">
       <li class="badge badge--free">no gate</li>
@@ -732,6 +733,29 @@
       preview of the passes that will print.
     </p>
 
+    <h3 id="mfdepth">Depth recipe and Chamfer <span class="badge badge--wip" style="font-size:.62rem;vertical-align:middle">experimental · 2.5.0</span></h3>
+
+    <p>
+      A MixedFilament wall gets its colour from the side, but its top and bottom only show the last few layers
+      over the sparse infill, so they often look darker than the walls. <b>Depth recipe</b>, under MixedFilament
+      Object in the <b>Object &amp; TD</b> panel, builds the top from whole layers of your filaments, the same
+      way the sticker Depth recipe does: the target is the wall colour as you see it from the side, the base is
+      what is really under the top (the infill at your density), and it uses only the layers it needs, up to
+      5 mm (0.2 to 10 mm). Those layers turn solid, each with the filament of the recipe.
+    </p>
+    <ul>
+      <li><b>Chamfer</b>: the coloured zone shrinks inwards at 45° as it goes down instead of going straight
+        down, and inside it the inner perimeters give way to the recipe. The outer perimeter always stays, so
+        the wall colour from the mix is untouched. From above, this removes the darker frame the inner
+        perimeters leave.</li>
+      <li>The colour maths is RealView's, with the TD per colour channel, so what RealView shows is what the
+        recipe aims at. The panel lists the recipe, its depth and how close it gets (ΔE).</li>
+      <li><b>For now, only the object's own MixedFilament.</b> What you paint on top, another filament or
+        another MixedFilament, prints as before. Painted recipes come back in a later build.</li>
+      <li>Checked in RealView, not yet in many real prints. Low TD filaments (around 1.5) may not reach the
+        wall colour, and there are more tool changes, so a bigger wipe tower.</li>
+    </ul>
+
     <!-- ================================================================= -->
     <h2 id="profiles" data-short="Profiles &amp; the 3MF">Profiles and the 3MF</h2>
 
@@ -949,6 +973,12 @@
       an SVG. A saved shape keeps its points: <b>Edit</b> it, then <b>Edit points</b> to move them again.
       In Brush mode, <b>Show decals</b> keeps them on screen as a reference while you paint by hand.
     </p>
+
+    <div class="note note--key">
+      <p class="note__t">New in 2.5.0</p>
+      <p>Draw free hand with the <b>Vector Brush</b>, add brush effects, and give any decal real volume with
+        <b>Clay</b>. All of it is on its own page: <a href="draw.html">Draw &amp; sculpt</a>.</p>
+    </div>
 
     <h3 id="vector-mirrorbrush">Mirror brush</h3>
     <p>

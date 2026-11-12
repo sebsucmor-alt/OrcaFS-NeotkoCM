@@ -15,6 +15,10 @@
 #include <float.h>
 #include <set>
 #include <unordered_set>
+#include <future>                // NEOTKO_REALCOLOR_TAG 7-nov-2026 — Lupa en segundo plano
+#if NEOTKO_PRIVATE_GUI
+#include "neotko_private/RealColorLupa.hpp"     // NEOTKO_REALCOLOR_TAG 7-nov-2026 (privado)
+#endif
 
 namespace Slic3r {
 
@@ -1006,6 +1010,10 @@ public:
         // una vuelta en s251b con `finish`.
         std::array<float, 3> light_key_dir  = { -0.4574957f, 0.4574957f, 0.7624929f }; // (-0.6, 0.6, 1)/1.31
         std::array<float, 3> light_fill_dir = {  0.6985074f, 0.1397015f, 0.6985074f }; // ( 1, 0.2, 1)/1.43
+        // 7-nov-2026 (docs/WIP/REALCOLOR_MODEL_REVIEW_7NOV.md §1): medio por CANAL de dos flujos (Kubelka-Munk), el
+        // mismo que casó la Lupa con la foto de SKULL-AKIRA. false = el «TD con color» + `esparce` de antes (A/B).
+        bool km_medium = true;
+        float km_force = 1.f;    // cuánto apaga el color (×K/S). 10-nov-2026: 1,0 con S al canal más claro
 
         // NEOTKO_REALCOLOR_TAG s251d: AISLADOR DE TÉRMINOS, herramienta de diagnóstico. 0 = imagen
         // normal. Los 7 modos y qué prueba cada uno están documentados en 140/realcolor_peel.fs
@@ -1209,8 +1217,10 @@ public:
         // F3 (eje de la luz) y F4 (acabado por superficie) SÍ se hicieron, y quitaron el look
         // artificial en su origen. Aplanar encima ya sólo restaba vida a la imagen. Un
         // apaño-para-no-arreglar deja de tener sentido cuando arreglas la causa.
-        float grade_contrast   = 1.08f;
-        float grade_saturation = 0.87f; // s249: un pelo desaturado, el contraste 1.07 se mantiene
+        // 7-nov-2026 — con el medio KM por canal: contraste 1,05 y saturación 1,00 (Neotko, a ojo; a 1,00 de
+        // contraste «se ve empastado»). Antes 1,08 / 0,87, que compensaban el modelo viejo.
+        float grade_contrast   = 1.05f;
+        float grade_saturation = 1.00f;
 
         // NEOTKO_REALCOLOR_TAG s243 (F6, "silueta opaca"): sella los huecos INTERIORES de la pieza
         // (los que quedan tras F1 y que son huecos reales, no aliasing) sin tocar el contorno, que
@@ -1519,6 +1529,10 @@ private:
     // perspective/spot light later.
     Matrix4d m_shadow_light_proj_view{ Matrix4d::Identity() };
     float m_shadow_texel_world_mm{ 0.0f };
+    // NEOTKO_SHADOWCACHE_TAG 4-nov — huella de lo que hay en el mapa de sombra (luz, piezas,
+    // posiciones, FBO). Si el siguiente fotograma da la misma, el mapa ya está bien y no se
+    // vuelve a dibujar: girar la cámara no cambia la sombra.
+    size_t m_shadow_cache_key{ 0 };
     // NEOTKO_PHOTOMODE_TAG s242: did render_shadow_map() succeed for the CURRENT frame? Needed
     // because the Photo Mode cyclorama is drawn later in the frame, from GLCanvas3D, and has to
     // know whether the map it is about to sample was actually filled. A stale `true` would make
@@ -1758,6 +1772,35 @@ private:
     // app_config pero SÍ entra al slicer vía neotko_td_mirror y por eso su editor llama a
     // schedule_background_process(). Aquí eso sería un reslice gratis por mover un slider de brillo.
     void render_realcolor_materials_panel();
+#if NEOTKO_PRIVATE_GUI   // 11-nov-2026 — Lupa y extras de RealColor (carpeta privada)
+    // NEOTKO_REALCOLOR_TAG 7-nov-2026 — LUPA: botón arriba al centro; pinta el cuadro del centro con luz
+    // «de verdad» en el procesador (RealColorLupa.cpp) y lo pone encima hasta que se mueve la cámara.
+    void render_realcolor_lupa();
+    void start_realcolor_lupa();
+    std::future<GUI::Lupa::Output> m_lupa_job;
+    bool         m_lupa_busy    = false;
+    std::shared_ptr<std::atomic<bool>> m_lupa_cancel;   // 7-nov-2026: Stop
+    std::shared_ptr<GUI::Lupa::Progress> m_lupa_progress;  // 7-nov-2026: imagen viva entre pasadas
+    int          m_lupa_pass = 0, m_lupa_passes = 0;
+    float        m_lupa_light_scale = 1.f;   // 7-nov-2026: Light × (exposición de la Lupa)
+    bool         m_lupa_show    = false;
+    unsigned int m_lupa_tex     = 0;
+    Transform3d  m_lupa_view    = Transform3d::Identity();
+    double       m_lupa_seconds = 0.;
+    std::string  m_lupa_message;
+    float        m_lupa_side    = 220.f;   // medio lado del cuadro del centro, en puntos de pantalla
+    // 7-nov-2026 — escenas de luz, zona marcada a mano y pausa de RealColor (petición de Neotko).
+    bool         m_lupa_pigment = true;    // 10-nov-2026: el pigmento absorbe por canal (Input::pigment)
+    float        m_lupa_td_scale = 0.33f;  // 7-nov-2026: TD × para la Lupa (0,33 = ÷3: el amarillo 9,5 casó con la foto así)
+    int          m_lupa_light   = 0;       // 0 U1 right · 1 U1 left · 2 U1 both · 3 Studio · 4 Lightbox · 5 Daylight · 6 Backlight
+    bool         m_lupa_marking = false;   // arrastrando para marcar la zona
+    bool         m_lupa_drag    = false;
+    ImVec2       m_lupa_a { 0.f, 0.f }, m_lupa_b { 0.f, 0.f };   // esquinas mientras se arrastra
+    bool         m_lupa_has_rect = false;  // zona marcada (si no, el cuadro del centro)
+    ImVec2       m_lupa_r0 { 0.f, 0.f }, m_lupa_r1 { 0.f, 0.f };  // zona de la última imagen
+    bool         m_realcolor_paused = false;   // no rehacer RealColor por cambios de material
+    int          m_realcolor_u1_light = 0;     // 7-nov-2026: RealColor con la luz U1: 0 no · 1 derecha · 2 izquierda · 3 los dos lados
+#endif
     bool m_realcolor_materials_panel_open = false;
 
     // NEOTKO_PHOTOMODE_TAG s253: panel del MODO FOTO dentro del visor de gcode. De usuario, no de

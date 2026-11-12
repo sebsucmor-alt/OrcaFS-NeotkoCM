@@ -337,6 +337,12 @@ public:
         int              parent { -1 };
         // Pointer to PrintObjectRegions::all_regions.
         PrintRegion     *region { nullptr };
+        // NEOTKO 12-nov-2026 — Walls per colour on mixes. 0 = an ordinary painted region (the filament
+        // extruder_id). Otherwise the MixedFilament state this region belongs to: the mix prints with
+        // extruder_id on this layer, but with its OWN extra walls, apart from plain extruder_id paint.
+        unsigned int     mix_state { 0 };
+        // Extra walls added on top of the parent's wall_loops (kept so verify_update can rebuild the config).
+        int              extra_walls { 0 };
     };
 
     struct LayerRangeRegions;
@@ -449,15 +455,20 @@ struct MultiPassSubLayer {
 };
 // NEOTKO_MULTIPASS_TAG_END
 
-// 22-oct-2026 — enchufe de una extensión opcional del build: máscara de sólido extra por capa (índice = capa
-// del objeto) que prepare_infill() aplica como el «Surface depth». Sin la extensión, vacía.
+// 22-oct-2026 — Depth recipe (StickerDepth.cpp): máscara de sólido extra por capa (índice = capa
+// del objeto) que prepare_infill() aplica como el «Surface depth». Vacía si nada usa profundidad.
 std::vector<ExPolygons> optional_extra_solid_mask(const PrintObject& po);
 // …y su pareja en el relleno: herramienta (0-based) de la receta de un color del sticker en una capa, o -1;
-// y el paso que mueve el relleno sólido de cada capa a subcapas de su herramienta. Sin la extensión: -1 y nada.
+// y el paso que mueve el relleno sólido de cada capa a subcapas de su herramienta.
 struct ColorStitchSticker;
 int  optional_depth_tool_at(const PrintObject& po, const ColorStitchSticker& st, int color_idx,
                             double layer_print_z, double layer_height);
 void optional_extra_sublayers(Layer& layer);
+// 4-nov-2026 — MixedFilament depth recipe (StickerDepth.cpp): rellena mixed_depth_zones() y devuelve la máscara
+// de sólido extra por capa; y la herramienta que toca a un trozo de una capa (-1 = ninguna).
+std::vector<ExPolygons> mixed_depth_prepare(PrintObject& po);
+void mixed_depth_eat_perimeters(PrintObject& po);
+int  mixed_depth_tool_for(const PrintObject& po, size_t layer_idx, const ExPolygon& piece);
 
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {
@@ -508,6 +519,15 @@ public:
     // source consumed by NeoTower + the GCode dispatcher). Indexed by layer_idx.
     const std::vector<std::vector<MultiPassSubLayer>>& multipass_sublayers() const { return m_multipass_sublayers; }
     std::vector<std::vector<MultiPassSubLayer>>&       multipass_sublayers()       { return m_multipass_sublayers; }
+    // 4-nov-2026 — MixedFilament depth recipe: por capa del objeto, cada zona con la herramienta (0-based) que le
+    // toca por su distancia al top (o al bottom) más cercano. La rellena prepare_infill() (StickerDepth.cpp) y la
+    // lee el relleno. Vacía si el objeto no usa la receta por profundidad.
+    struct MixedDepthZone { int tool = -1; ExPolygons area; bool painted = false; };
+    const std::vector<std::vector<MixedDepthZone>>& mixed_depth_zones() const { return m_mixed_depth_zones; }
+    std::vector<std::vector<MixedDepthZone>>&       mixed_depth_zones()       { return m_mixed_depth_zones; }
+    // 6-nov-2026 — ver m_mixed_paint_masks: Depth recipe distingue dos MF pintados que comparten filamento.
+    const std::vector<std::map<unsigned int, ExPolygons>>& mixed_paint_masks() const { return m_mixed_paint_masks; }
+    std::vector<std::map<unsigned int, ExPolygons>>&       mixed_paint_masks()       { return m_mixed_paint_masks; }
     // NEOTKO_MULTIPASS_MINLAYER_TAG — s276: painter slot tags whose Sandwich recipe had to
     // be collapsed on this layer because a band fell below the minimum printable height.
     // Indexed by layer_idx exactly like m_multipass_sublayers, so each fill thread only ever
@@ -823,6 +843,8 @@ private:
     // Populated by the Sandwich engine; empty until that lands (NeoTower then
     // sees no sublayer events and uses the plain real-layer path).
     std::vector<std::vector<MultiPassSubLayer>> m_multipass_sublayers;
+    // 4-nov-2026 — see mixed_depth_zones() accessors above.
+    std::vector<std::vector<MixedDepthZone>>    m_mixed_depth_zones;
     // NEOTKO_MULTIPASS_MINLAYER_TAG — see minlayer_collapsed_slots() accessors above.
     std::vector<std::vector<int>>               m_minlayer_collapsed_slots;
     // NEOTKO_TEXTUREBUMP_TAG — see texture_bump_tables() accessors above.
@@ -848,6 +870,8 @@ private:
     // projected up to mmu_segmented_region_surface_depth layers into the object. Filled during
     // MMU segmentation (posSlice), consumed by apply_painted_surface_depth() (posPrepareInfill).
     std::vector<ExPolygons>                 m_painted_depth_solid_mask;
+    // 6-nov-2026 — huella por capa de cada MixedFilament PINTADO (id 1-based), ANTES de partirse en físicos.
+    std::vector<std::map<unsigned int, ExPolygons>> m_mixed_paint_masks;
 
     // BBS: per object skirt
     ExtrusionEntityCollection               m_skirt;
@@ -1213,6 +1237,37 @@ public:
         auto it = m_mixed_filament_sandwich_profile_id.find(po);
         return it == m_mixed_filament_sandwich_profile_id.end() ? 0 : it->second;
     }
+    // 4-nov-2026 — receta por PROFUNDIDAD del MixedFilament Object (mixed_filament_depth_mode): bloques de capas
+    // enteras de ABAJO a ARRIBA, el último toca la cara. Se resuelve en el mismo sitio que el perfil de arriba.
+    // nullptr = el objeto no la usa (o no hay receta) y sigue con la receta plana.
+    const std::vector<ColorStitchDepthBlock>* mixed_filament_depth_blocks(const PrintObject* po) const {
+        auto it = m_mixed_filament_depth_blocks.find(po);
+        return (it == m_mixed_filament_depth_blocks.end() || it->second.empty()) ? nullptr : &it->second;
+    }
+    // 6-nov-2026 — resumen de la Depth recipe por objeto, para la lista de MixedFilaments del panel Object & TD.
+    struct MixedDepthSummary {
+        unsigned int                        id = 0;          // 1-based (físico o MF)
+        bool                                painted = false; // false = el MF del propio objeto
+        std::string                         label;
+        std::vector<ColorStitchDepthBlock>  blocks;          // abajo → arriba
+        float                               delta_e = 0.f;
+        float                               max_mm = 0.f;
+        std::array<float, 3>                target { 0.f, 0.f, 0.f };   // sRGB 0..1
+    };
+    struct MixedDepthCacheEntry {
+        std::vector<ColorStitchDepthBlock>  blocks;
+        float                               delta_e = 0.f;
+        std::array<float, 3>                target { 0.f, 0.f, 0.f };
+    };
+    const std::vector<MixedDepthSummary>* mixed_filament_depth_summary(const PrintObject* po) const {
+        auto it = m_mixed_filament_depth_summary.find(po);
+        return it == m_mixed_filament_depth_summary.end() ? nullptr : &it->second;
+    }
+    // 6-nov-2026 — profundidad por TD de lo PINTADO, por filamento (clave = id 1-based de region().extruder()).
+    const std::map<unsigned int, std::vector<ColorStitchDepthBlock>>* mixed_filament_depth_painted(const PrintObject* po) const {
+        auto it = m_mixed_filament_depth_painted.find(po);
+        return it == m_mixed_filament_depth_painted.end() ? nullptr : &it->second;
+    }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
     // NEOTKO — "Remove Slice Cache": force every object (and this Print) to re-slice from scratch.
     // Print is a friend of PrintObject, so it can reach the otherwise-private per-object
@@ -1362,6 +1417,11 @@ private:
     // unchanged MixedFilament doesn't spawn a fresh SurfaceEffectProfile on every
     // apply() call. Persists across apply() calls (unlike the map above).
     std::unordered_map<std::string, int> m_mixed_filament_sandwich_profile_cache;
+    // 4-nov-2026 — see mixed_filament_depth_blocks() above; the cache keys by content like the profile cache.
+    std::unordered_map<const PrintObject*, std::vector<ColorStitchDepthBlock>> m_mixed_filament_depth_blocks;
+    std::unordered_map<std::string, MixedDepthCacheEntry>                      m_mixed_filament_depth_cache;
+    std::unordered_map<const PrintObject*, std::vector<MixedDepthSummary>>     m_mixed_filament_depth_summary;
+    std::unordered_map<const PrintObject*, std::map<unsigned int, std::vector<ColorStitchDepthBlock>>> m_mixed_filament_depth_painted;
     PrintObjectPtrs                         m_objects;
     PrintRegionPtrs                         m_print_regions;
     

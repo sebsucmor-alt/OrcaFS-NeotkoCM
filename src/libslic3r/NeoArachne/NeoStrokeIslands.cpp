@@ -1,5 +1,6 @@
 // NEOTKO_NEOSTROKE_TAG s342 — ajustes por isla: lector y escritor del texto. Ver NeoStrokeIslands.hpp.
 #include "NeoStrokeIslands.hpp"
+#include "../LocalesUtils.hpp" // NEOTKO audit 1-nov: numbers in any UI language
 
 #include <algorithm>
 #include <cstdio>
@@ -68,9 +69,9 @@ static bool to_double(const std::string& s, double& out)
     const std::string t = trim(s);
     if (t.empty())
         return false;
-    char* end = nullptr;
-    out = std::strtod(t.c_str(), &end);
-    return end && *end == '\0';
+    size_t used = 0;
+    out = Slic3r::neo_to_double(t, 0., &used);
+    return used > 0 && used == t.size();
 }
 
 static std::vector<std::string> split(const std::string& s, char sep)

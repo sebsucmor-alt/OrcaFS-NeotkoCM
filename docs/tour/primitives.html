@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Primitive Generator — Neotko for Snapmaker Orca</title>
+<meta name="description" content="Twelve parametric shapes by their real sizes, editable after you place them, and your own OpenSCAD scripts with their Customizer numbers as sliders and multi colour pieces.">
+<link rel="stylesheet" href="assets/tour.css">
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar__in">
+    <a class="brand" href="index.html"><span class="brand__mark"></span>Neotko<span class="brand__sub">tour</span></a>
+    <nav class="topnav" aria-label="Sections">
+      <a href="../index.html" class="topnav__home">Home</a>
+      <a href="index.html#colour">Colour</a>
+      <a href="index.html#output">Output</a>
+      <a href="index.html#build" aria-current="page">Build &amp; fix</a>
+      <a href="index.html#placing">Placing</a>
+      <a href="index.html#structure">Structure</a>
+      <a href="play.html">Playground</a>
+      <a href="map.html">Everything</a>
+    </nav>
+    <button class="iconbtn" data-theme-toggle type="button" aria-label="Change theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.6v2M12 19.4v2M2.6 12h2M19.4 12h2M5.4 5.4l1.4 1.4M17.2 17.2l1.4 1.4M18.6 5.4l-1.4 1.4M6.8 17.2l-1.4 1.4"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+<div class="page">
+
+  <nav class="rail" data-toc aria-label="On this page">
+    <p class="rail__title">On this page</p>
+  </nav>
+
+  <main class="article" id="main">
+
+    <p class="eyebrow">Build &amp; fix</p>
+    <h1>Primitive Generator: shapes by their sizes, and OpenSCAD</h1>
+    <p class="lede">
+      A ring 18 mm inside, a box with rounded corners 40 by 30, a spring with six turns. Pick the shape,
+      type or drag the numbers that matter, and it lands on the bed. Change it later and it changes on the
+      bed. And when the twelve shapes are not enough, your own OpenSCAD scripts come in with their numbers
+      as sliders.
+    </p>
+
+    <ul class="badges">
+      <li class="badge badge--free">no gate</li>
+      <li class="badge badge--ver badge--plain">2.5.0</li>
+    </ul>
+
+    <p class="where">Toolbar › last icon (a cube, a ring and a plus) · the <b>&lt;/&gt;</b> tile for scripts</p>
+
+    <figure>
+      <img src="../images/Primitive-Generator.gif" width="960" height="651" loading="lazy"
+           alt="The Primitive Generator panel next to a ring on the plate: as the inside diameter, band width, height, comfort dome and fillet sliders move, the ring on the bed and the small preview in the panel change with them">
+      <figcaption>A ring made here. Each slider moves the ring on the bed and the preview in the panel.</figcaption>
+    </figure>
+
+    <!-- ================================================================= -->
+    <h2 id="why" data-short="Without it">What you had to do without it</h2>
+    <p>
+      Orca's own shapes are a cube, a cylinder, a sphere and a cone at a fixed size, and you scale them by
+      eye. For anything with a real measurement, a ring for a finger, a box for a part, you opened a CAD
+      program, exported an STL, imported it, and did it again for every change.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="shapes" data-short="The shapes">Twelve shapes with real sizes</h2>
+    <ul>
+      <li><b>Ring</b>, <b>tube</b>, <b>rounded box</b>, <b>capsule</b>, <b>cone and pyramid</b>, <b>wedge</b>,
+        the five <b>platonic solids</b>, <b>geodesic ball</b>, <b>antiprism</b>, <b>star with twist</b>,
+        <b>spring</b> and <b>superformula</b>. All closed meshes, sitting on the bed.</li>
+      <li><b>The ring is a real ring.</b> Comfort fit (the inside is domed like a wedding band) or flat, its
+        own outside and inside fillet, and the inside diameter measured where the finger goes.</li>
+      <li><b>A live preview</b> in the panel. Drag it to turn it. Size, triangles and grams update as you
+        move a slider.</li>
+      <li><b>Add as</b> object, part, negative part or modifier. New objects land on a free spot of the bed.</li>
+      <li><b>Change it later.</b> Select a shape made here and the sliders edit it on the bed, one undo step
+        per drag. The numbers are saved in the 3mf.</li>
+      <li><b>Vary</b> tries random numbers around yours. <b>My presets</b> keeps the ones you like.</li>
+    </ul>
+
+    <!-- ================================================================= -->
+    <h2 id="openscad" data-short="★ OpenSCAD">Your OpenSCAD scripts, with sliders</h2>
+
+    <figure>
+      <img src="../images/Primitive-Generator-OpenSCAD.gif" width="960" height="717" loading="lazy"
+           alt="A two colour name tag made from an OpenSCAD script: the panel shows the script's numbers as sliders and its two pieces, Tag and Letters, each with its colour and the filament it went to; changing the text and sizes rebuilds the tag on the plate">
+      <figcaption>A two colour name tag from a script. Text and sizes are sliders; Tag and Letters are two
+        pieces, each on its own filament.</figcaption>
+    </figure>
+
+    <ul>
+      <li><b>The Customizer numbers become sliders</b>: ranges and steps, check boxes, drop downs, text and
+        <code>/* [Groups] */</code>, read the same way OpenSCAD's Customizer reads them.</li>
+      <li><b>Four examples</b> to start: a box with lid, a knurled knob, a honeycomb coaster and a two colour
+        name tag.</li>
+      <li><b>Import .scad</b>, <b>Folder</b> and <b>Edit</b>. Edit opens the script in OpenSCAD, and when you
+        save it there the shape here updates by itself.</li>
+      <li><b>Multi colour pieces.</b> A script with a <code>part</code> choice
+        (<code>part = "all"; // [all, tag, letters]</code>) is drawn piece by piece. Each piece becomes a part
+        of the object, on the loaded filament closest to the colour the script gives it. Change it later in the
+        object list, mixed filaments included.</li>
+      <li><b>The 3mf carries its own script.</b> Open a project made with a script you don't have and the shape
+        can still be changed. A script that comes inside someone else's project waits for <b>Trust and run</b>
+        before it runs.</li>
+    </ul>
+
+    <p>
+      OpenSCAD itself is free, from openscad.org. The panel finds it in the usual places or lets you point to
+      it. It runs in the background, with the Manifold engine when your OpenSCAD has it, so the panel does not
+      freeze while a script builds.
+    </p>
+
+    <!-- ================================================================= -->
+    <h2 id="catch" data-short="The catch">The catch</h2>
+    <ul>
+      <li>OpenSCAD has to be installed for now. A later build ships it inside the app.</li>
+      <li>Scripts that use libraries (BOSL2 and similar) need them installed in OpenSCAD, and the libraries do
+        not travel inside the 3mf.</li>
+      <li>Without a <code>part</code> choice a script comes out as one piece, even if it uses
+        <code>color()</code>.</li>
+      <li>Changing a shape repaints nothing: painting on a generated shape is lost when you change its numbers.</li>
+      <li>The panel has the Neotko look, its own colours and layout, not Orca's classic gizmo style.</li>
+    </ul>
+
+    <nav class="pager">
+      <a href="draw.html"><small>Previous</small><b>← Draw &amp; sculpt</b></a>
+      <a class="is-next" href="realcolor.html"><small>Next</small><b>RealColor →</b></a>
+    </nav>
+
+    <p class="small muted">Covers the Primitive Generator and its OpenSCAD scripts, release 2.5.0
+      (<code>NEOTKOCM_RELEASE_2_50.md</code>).</p>
+  </main>
+</div>
+</div>
+
+<script src="assets/optics.js"></script>
+<script src="assets/stitch.js"></script>
+<script src="assets/tour.js"></script>
+</body>
+</html>

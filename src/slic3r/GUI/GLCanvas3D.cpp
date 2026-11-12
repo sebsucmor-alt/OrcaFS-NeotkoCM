@@ -2416,6 +2416,7 @@ void GLCanvas3D::render(bool only_init)
         m_dirty = true;
         return;
     }
+    const auto fp_start = std::chrono::steady_clock::now(); // NEOTKO_FRAMEPROBE_TAG — ver final de render()
 
     m_in_render = true;
     Slic3r::ScopeGuard in_render_guard([this]() { m_in_render = false; });
@@ -2567,7 +2568,10 @@ void GLCanvas3D::render(bool only_init)
         // shells_lit, so the shadow map never touches it) — see the s229 note above. The cyclorama
         // has no such limitation: photo_stage.fs samples the shadow map directly, so running this
         // too would lay a second, flatter silhouette over the real one and double-darken it.
-        if (wxGetApp().app_config->get_bool("neotko_libre_mode") && !photo_mode_hides_bed()) {
+        // NEOTKO_LITRENDER_TAG — and not while a painter gizmo is open (audit 4-nov): there the
+        // objects are drawn by the gizmo in the plain look, so this pass drew the whole mesh a second
+        // time every frame (an 800k-triangle skull) for a shadow that does not match what is shown.
+        if (lit_render_on() && !photo_mode_hides_bed() && dynamic_cast<GLGizmoPainterBase*>(m_gizmos.get_current()) == nullptr) {
             m_gcode_viewer.render_volumes_shadow(m_volumes, GLVolumeCollection::ERenderType::Opaque,
                 cnv_size.get_width(), cnv_size.get_height(), camera,
                 [this](const GLVolume& volume) { return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0); },
@@ -2762,10 +2766,59 @@ void GLCanvas3D::render(bool only_init)
     // antes daría el estado del frame ANTERIOR y mandaría a investigar el sitio equivocado.
     _log_imgui_input_state();
 
+    // NEOTKO_FRAMEPROBE_TAG 4-nov — contador visible: sube 1 por fotograma generado. Grabado con
+    // el móvil, si salta de N en N entre imágenes distintas, se generan fotogramas que no se ven.
+    if (NeoDebug::enabled(NeoDebug::FRAMEPROBE) && m_canvas_type == ECanvasType::CanvasView3D) {
+        static unsigned fp_counter = 0;
+        char fp_txt[64];
+        snprintf(fp_txt, sizeof fp_txt, "%u %s", ++fp_counter, lit_render_on() ? "SOL" : "simple");
+        ImGui::GetForegroundDrawList()->AddRectFilled(ImVec2(20, 70), ImVec2(330, 140), IM_COL32(0, 0, 0, 255));
+        ImGui::GetForegroundDrawList()->AddText(nullptr, 60.f, ImVec2(30, 75), IM_COL32(255, 255, 0, 255), fp_txt);
+    }
+
     wxGetApp().imgui()->render();
 
+    // NEOTKO_FRAMEPROBE_TAG 4-nov — sonda de tiempos por fotograma (canal FRAMEPROBE).
+    // cpu = desde la entrada a render() hasta antes del swap (trabajo del procesador + envío a GPU);
+    // swap = lo que bloquea SwapBuffers (espera a la GPU / vsync);
+    // gap = tiempo entre el final del fotograma anterior y el inicio de éste (eventos, picking, etc.).
+    const auto fp_pre_swap = std::chrono::steady_clock::now();
+#ifdef __APPLE__
+    // NEOTKO_PRESENT_TAG 4-nov — presentación del 3D en Mac (ver MacDarkMode.hpp).
+    // Sin esperar al refresco (swap interval 0, lo de serie) macOS se saltaba la mayoría de
+    // fotogramas: grabado en cámara lenta, de cada 5-6 generados llegaba 1 a la pantalla, así que
+    // el 3D se sentía a 2-5 fps aunque se generasen 20-60. Con swap interval 1 cada fotograma se
+    // enseña. Activado por defecto:
+    //  ORCA_NO_VSYNC=1  → vuelve al comportamiento de serie (para comparar).
+    //  ORCA_CA_FLUSH=1  → además publica la capa con [CATransaction flush] tras cada swap (prueba).
+    static const bool present_vsync = std::getenv("ORCA_NO_VSYNC") == nullptr;
+    static const bool present_flush = std::getenv("ORCA_CA_FLUSH") != nullptr;
+    if (present_vsync) {
+        static void* vsync_ctx = nullptr;   // una vez por contexto
+        if (vsync_ctx != (void*)m_context) { mac_gl_set_swap_interval(1); vsync_ctx = (void*)m_context; }
+    }
+#endif
     m_canvas->SwapBuffers();
+#ifdef __APPLE__
+    if (present_flush)
+        mac_ca_transaction_flush();
+#endif
     m_render_stats.increment_fps_counter();
+    if (NeoDebug::enabled(NeoDebug::FRAMEPROBE) && m_canvas_type == ECanvasType::CanvasView3D) {
+        static std::chrono::steady_clock::time_point fp_prev_end;
+        const auto fp_end = std::chrono::steady_clock::now();
+        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        // cam = huella de la cámara: si se repite entre fotogramas, ese fotograma no trajo giro nuevo.
+        const Vec3d fp_cam = wxGetApp().plater()->get_camera().get_position();
+        char buf[260];
+        snprintf(buf, sizeof buf, "FRAMEPROBE cpu=%.1f swap=%.1f gap=%.1f total=%.1f lit=%d gizmo=%d cam=%.3f,%.3f,%.3f",
+            ms(fp_start, fp_pre_swap), ms(fp_pre_swap, fp_end),
+            fp_prev_end.time_since_epoch().count() ? ms(fp_prev_end, fp_start) : 0.0,
+            fp_prev_end.time_since_epoch().count() ? ms(fp_prev_end, fp_end) : 0.0,
+            (int)lit_render_on(), (int)m_gizmos.get_current_type(), fp_cam.x(), fp_cam.y(), fp_cam.z());
+        NeoDebug::write(NeoDebug::FRAMEPROBE, buf);
+        fp_prev_end = fp_end;
+    }
 }
 
 void GLCanvas3D::render_thumbnail(ThumbnailData &         thumbnail_data,
@@ -2908,7 +2961,9 @@ void GLCanvas3D::deselect_all()
     m_selection.remove_all();
     // BBS
     //wxGetApp().obj_manipul()->set_dirty();
-    m_gizmos.reset_all_states();
+    // NEOTKO_PRIMGEN_TAG — the Primitive Generator works with nothing selected: clicking empty space keeps it open.
+    if (m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator)
+        m_gizmos.reset_all_states();
     m_gizmos.update_data();
     post_event(SimpleEvent(EVT_GLCANVAS_OBJECT_SELECT));
 }
@@ -3563,7 +3618,9 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
 
     refresh_camera_scene_box();
 
-    if (m_selection.is_empty()) {
+    // NEOTKO_PRIMGEN_TAG — adding a shape reloads the scene BEFORE the new object gets selected; that
+    // empty moment closed the Primitive Generator after every add. It has nothing to hide, so it stays.
+    if (m_selection.is_empty() && m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator) {
         // If no object is selected, deactivate the active gizmo, if any
         // Otherwise it may be shown after cleaning the scene (if it was active while the objects were deleted)
         m_gizmos.reset_all_states();
@@ -3968,6 +4025,10 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
         case WXK_CONTROL_Z:
 #endif /* __APPLE__ */
             // only support redu/undo in CanvasView3D
+            if (current_gizmo_painter != nullptr && current_gizmo_painter->local_undo()) {
+                m_dirty = true;
+                break;
+            }   // NEOTKO_VECTORBRUSH_TAG: the unsaved stroke goes back, not the saved decal
             if (m_canvas_type == CanvasView3D || m_canvas_type == CanvasAssembleView) {
                 post_event(SimpleEvent(EVT_GLCANVAS_UNDO));
             }
@@ -5572,10 +5633,40 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         // NEOTKO_PRINTORDER_TAG 2_49 — same for Print order: you number by clicking, with nothing selected.
         if (m_selection.is_empty() &&
             m_gizmos.get_current_type() != GLGizmosManager::AlignStack &&
-            m_gizmos.get_current_type() != GLGizmosManager::PrintOrder)
+            m_gizmos.get_current_type() != GLGizmosManager::PrintOrder &&
+            m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator) // NEOTKO_PRIMGEN_TAG: works with nothing selected
             m_gizmos.reset_all_states();
 
-        m_dirty = true;
+        // NEOTKO_HOVERREPAINT_TAG 4-nov — antes: m_dirty = true en CADA movimiento, o sea la escena
+        // entera repintada aunque no cambiase nada (con el SKULL y el sol, ~47 ms por movimiento).
+        // El resaltado bajo el cursor sale de _picking_pass(), que es un rayo por CPU: se lanza
+        // aquí y solo se repinta si cambia lo que hay debajo (pieza, placa o icono de placa).
+        // Con una herramienta abierta, edición de capas o ImGui con el ratón, se repinta como antes.
+        // ORCA_HOVER_ALWAYS_REPAINT=1 vuelve al comportamiento de siempre.
+        static const bool always_repaint = std::getenv("ORCA_HOVER_ALWAYS_REPAINT") != nullptr;
+        const bool can_skip = !always_repaint && m_picking_enabled && m_gizmos.get_current() == nullptr &&
+                              !is_layers_editing_enabled() && !m_rectangle_selection.is_dragging() &&
+                              !wxGetApp().imgui()->want_mouse() && m_canvas_type == ECanvasType::CanvasView3D;
+        if (can_skip) {
+            const std::vector<int> prev_volumes = m_hover_volume_idxs;
+            const std::vector<int> prev_plates  = m_hover_plate_idxs;
+            _picking_pass();
+            // El hover de una pieza no cambia su color (solo HS_Select/HS_Deselect, del rectángulo,
+            // ya excluido). Lo único visible es el contorno de una pieza HUNDIDA en la cama, así
+            // que un cambio de pieza solo repinta si alguna de las implicadas está hundida.
+            bool volume_change_visible = false;
+            if (m_hover_volume_idxs != prev_volumes) {
+                auto sinking = [this](int idx) {
+                    return idx >= 0 && idx < (int)m_volumes.volumes.size() && m_volumes.volumes[idx]->is_sinking();
+                };
+                for (int idx : prev_volumes)        volume_change_visible |= sinking(idx);
+                for (int idx : m_hover_volume_idxs) volume_change_visible |= sinking(idx);
+            }
+            if (volume_change_visible || m_hover_plate_idxs != prev_plates)
+                m_dirty = true;
+        }
+        else
+            m_dirty = true;
     }
     else
         evt.Skip();
@@ -8681,7 +8772,7 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                     // normal solid-object depth/occlusion behavior is unchanged; falls back to the
                     // plain "gouraud" draw below on any missing shader/FBO.
                     bool rendered_lit = false;
-                    const bool libre_mode_on = wxGetApp().app_config->get_bool("neotko_libre_mode");
+                    const bool libre_mode_on = lit_render_on();   // NEOTKO_LITRENDER_TAG — LibreMode + the lit switch
                     // NEOTKO_LIBREMODE_TAG s228: previously skipped this whole pipeline while
                     // anything was selected, because GLVolume::render_with_outline() (3DScene.cpp,
                     // the selected-volume silhouette pass) and the environment-map path both rebind
@@ -8701,8 +8792,28 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                         shader->start_using();
                     }
                     if (!rendered_lit) {
-                        m_volumes.render(type, m_picking_enabled, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, volume_filter,
+                        // NEOTKO_SHAREDVERTS_TAG 4-nov — modo simple (sin sol):
+                        //  · vértices compartidos + normal plana calculada en el píxel (GLModel::s_prefer_shared);
+                        //  · caras traseras descartadas, salvo que se vea el interior: pieza hundida en la
+                        //    cama o plano de corte activo. Antes se dibujaban SIEMPRE las dos caras aquí
+                        //    (disable_cullface = m_picking_enabled); el modo iluminado ya las descartaba.
+                        //  ORCA_NO_SHAREDVERTS=1 vuelve al camino de antes para comparar.
+                        static const bool shared_off = std::getenv("ORCA_NO_SHAREDVERTS") != nullptr;
+                        bool need_backfaces = m_camera_clipping_plane.is_active();
+                        for (const GLVolume* v : m_volumes.volumes)
+                            if (!need_backfaces && v != nullptr && v->is_active && !v->is_modifier && v->is_sinking())
+                                need_backfaces = true;
+                        const bool disable_cull = shared_off ? m_picking_enabled : (m_picking_enabled && need_backfaces);
+                        if (!shared_off) {
+                            GLModel::s_prefer_shared = true;
+                            shader->set_uniform("u_derived_normal", true);
+                        }
+                        m_volumes.render(type, disable_cull, camera.get_view_matrix(), camera.get_projection_matrix(), cvn_size, volume_filter,
                             partly_inside_enable);
+                        if (!shared_off) {
+                            GLModel::s_prefer_shared = false;
+                            shader->set_uniform("u_derived_normal", false);
+                        }
                     }
                     // s348 — stickers Sandwich visibles fuera del gizmo, bajo el MISMO interruptor
                     // que la pintura ColorStitch ("Keep paint visible outside this gizmo").
@@ -10442,12 +10553,41 @@ void GLCanvas3D::_render_photo_stage(const Camera& camera, bool shadow_catcher)
 // NEOTKO_PHOTOMODE_TAG s253: photo_light_ball() se mudó a PhotoMode.cpp para que el modo foto
 // del visor de gcode use LA MISMA bola y no una copia. Declarada en PhotoMode.hpp.
 
+// A foldable block that toggles once per click. ImGui's CollapsingHeader counts a click on its arrow
+// AND on the bar, so a press on the arrow toggled twice and did nothing (3-nov).
+static bool neo_fold(const char* label)
+{
+    ImGuiStorage* st   = ImGui::GetStateStorage();
+    const ImGuiID id   = ImGui::GetID(label);
+    bool          open = st->GetInt(id, 0) != 0;
+    const float   fh   = ImGui::GetFrameHeight();
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImGui::GetStyleColorVec4(ImGuiCol_Header));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.f, 0.5f));
+    if (ImGui::Button((std::string("      ") + label + "###fold_" + std::to_string(id)).c_str(), ImVec2(-FLT_MIN, fh))) {
+        open = !open;
+        st->SetInt(id, open ? 1 : 0);
+    }
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+    const ImVec2 mn = ImGui::GetItemRectMin();
+    const float  r  = fh * 0.22f;
+    const ImVec2 c(mn.x + fh * 0.7f, mn.y + fh * 0.5f);
+    const ImU32  col = ImGui::GetColorU32(ImGuiCol_Text);
+    if (open)
+        ImGui::GetWindowDrawList()->AddTriangleFilled(ImVec2(c.x - r, c.y - r * 0.6f), ImVec2(c.x + r, c.y - r * 0.6f), ImVec2(c.x, c.y + r * 0.8f), col);
+    else
+        ImGui::GetWindowDrawList()->AddTriangleFilled(ImVec2(c.x - r * 0.6f, c.y - r), ImVec2(c.x - r * 0.6f, c.y + r), ImVec2(c.x + r * 0.8f, c.y), col);
+    return open;
+}
+
 // One collapsible block per light. Returns true if anything changed this frame.
 static bool photo_light_controls(const char* label, PhotoLight& light, bool is_key)
 {
     bool changed = false;
     ImGui::PushID(label);
-    if (ImGui::CollapsingHeader(label)) {
+    if (neo_fold(label)) {
         changed |= ImGui::Checkbox("Enabled", &light.enabled);
 
         ImGui::BeginGroup();
@@ -11130,7 +11270,7 @@ void GLCanvas3D::_render_photo_mode_panel()
     photo_light_controls("Fill light", pm.fill, false);
     photo_light_controls("Rim light",  pm.rim,  false);
 
-    if (ImGui::CollapsingHeader("Ambient & sheen")) {
+    if (neo_fold("Ambient & sheen")) {
         ImGui::PushItemWidth(160.0f);
         ImGui::SliderFloat("ambient ground", &pm.ambient_ground,   0.0f,  1.0f, "%.3f");
         ImGui::SliderFloat("ambient sky",    &pm.ambient_sky,      0.0f,  1.0f, "%.3f");
@@ -11143,7 +11283,7 @@ void GLCanvas3D::_render_photo_mode_panel()
     // One row per filament slot, each showing the slot's REAL colour, because "slot 3" means
     // nothing to someone who thinks in "the pink one".
     ImGui::Separator();
-    if (ImGui::CollapsingHeader("Materials")) {
+    if (neo_fold("Materials")) {
         const std::vector<ColorRGBA> slot_colors = ::get_extruders_colors();
         const int n_slots = std::max((int)slot_colors.size(), 1);
         for (int s = 0; s < n_slots; ++s) {
@@ -11188,7 +11328,7 @@ void GLCanvas3D::_render_photo_mode_panel()
 
     // --- environment (F5) --------------------------------------------------------------------
     ImGui::Separator();
-    if (ImGui::CollapsingHeader("Environment")) {
+    if (neo_fold("Environment")) {
         ImGui::Checkbox("Enabled", &pm.env_enabled);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("A virtual room built from your three lights, for the objects to\n"
@@ -11357,7 +11497,7 @@ void GLCanvas3D::_render_photo_mode_panel()
     // photographer's preference, so it should follow the person across every project rather than
     // ride along inside a model file that gets shared and printed.
     ImGui::Separator();
-    if (ImGui::CollapsingHeader("My presets")) {
+    if (neo_fold("My presets")) {
         static char s_name[64] = "";
         ImGui::PushItemWidth(170.0f);
         ImGui::InputText("##pname", s_name, IM_ARRAYSIZE(s_name));
@@ -13166,7 +13306,7 @@ void GLCanvas3D::_update_selection_from_hover()
             m_selection.remove(i);
     }
 
-    if (m_selection.is_empty())
+    if (m_selection.is_empty() && m_gizmos.get_current_type() != GLGizmosManager::PrimitiveGenerator) // NEOTKO_PRIMGEN_TAG
         m_gizmos.reset_all_states();
     else
         m_gizmos.refresh_on_off_state();

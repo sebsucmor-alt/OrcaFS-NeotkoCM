@@ -9,10 +9,17 @@
 
 in vec3 v_view_normal;
 in float v_eye_z;
+in vec3 v_view_pos;
+uniform bool u_derived_normal;   // NEOTKO_SHAREDVERTS_TAG 4-nov
 
 out vec4 out_gbuffer;
 
 void main()
 {
-    out_gbuffer = vec4(normalize(v_view_normal) * 0.5 + 0.5, v_eye_z);
+    vec3 nk_n = normalize(v_view_normal);
+    if (u_derived_normal) {
+        nk_n = normalize(cross(dFdx(v_view_pos), dFdy(v_view_pos)));
+        if (dot(nk_n, -v_view_pos) < 0.0) nk_n = -nk_n;
+    }
+    out_gbuffer = vec4(nk_n * 0.5 + 0.5, v_eye_z);
 }

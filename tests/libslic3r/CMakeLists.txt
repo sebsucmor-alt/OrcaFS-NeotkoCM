@@ -14,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
 	test_neostroke_islands.cpp   # NEOTKO_NEOSTROKE_TAG s342
 	test_surface_extrude.cpp     # NEOTKO_CONSTRUCT_TAG s363
 	test_paint_transfer.cpp      # NEOTKO_PAINTCARRY_TAG s366
+	test_paint_clay.cpp          # NEOTKO_CLAY_TAG 2_50
 	test_colormix_virtual_remap.cpp
 	test_realcolor_blend.cpp
 	test_color_height_envelope.cpp

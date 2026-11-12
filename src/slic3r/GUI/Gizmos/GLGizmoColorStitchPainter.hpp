@@ -428,6 +428,13 @@ private:
     int     m_sticker_overlay_built_for = -1;   // idx para el que se construyó
     void ensure_sticker_overlay_built(const ColorStitchSticker& sticker);
     void render_sticker_edit_overlay();
+    // 11-nov-2026 — Select area: con el sticker en edición, clic en una cara = cubo (vecinos con menos de
+    // m_area_angle grados entre sí); Shift+clic suma. El área se guarda en ColorStitchSticker::area_tris.
+    bool   m_area_picking = false;
+    float  m_area_angle   = 30.f;
+    GLModel m_area_model;
+    size_t  m_area_model_key = 0;   // hash de area_tris con el que se construyó m_area_model
+    void   render_sticker_area_overlay(const ModelObject& mo, const ColorStitchSticker& st);
     // s348 — overlay MULTICOLOR: un relleno por color (índice en sticker.colors), del color de su receta.
     std::vector<GLModel> m_sticker_overlay_color_fills;
     std::vector<int>     m_sticker_overlay_color_idx;

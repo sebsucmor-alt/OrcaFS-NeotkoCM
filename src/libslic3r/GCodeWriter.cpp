@@ -1,5 +1,6 @@
 #include "GCodeWriter.hpp"
 #include "CustomGCode.hpp"
+#include "Exception.hpp" // NEOTKO 12-nov-2026: SlicingError en toolchange()
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
@@ -471,7 +472,11 @@ std::string GCodeWriter::toolchange(unsigned int extruder_id)
 {
     // set the new extruder
 	auto it_extruder = Slic3r::lower_bound_by_predicate(m_extruders.begin(), m_extruders.end(), [extruder_id](const Extruder &e) { return e.id() < extruder_id; });
-    assert(it_extruder != m_extruders.end() && it_extruder->id() == extruder_id);
+    // NEOTKO 12-nov-2026 — en Release el assert no existe y un id que no está dejaba m_extruder apuntando a end():
+    // cierre de la app más tarde, lejos de aquí. Mejor un error de laminado que lo diga.
+    if (it_extruder == m_extruders.end() || it_extruder->id() != extruder_id)
+        throw Slic3r::SlicingError("Internal error: tool T" + std::to_string(extruder_id) +
+                                   " is used but was not set up for this print. Please report it with the 3mf.");
     m_extruder = &*it_extruder;
 
     // return the toolchange command

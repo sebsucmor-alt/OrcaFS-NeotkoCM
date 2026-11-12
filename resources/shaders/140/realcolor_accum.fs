@@ -23,6 +23,12 @@ uniform float u_flat_alpha;          // only used when u_beer_lambert == false
 uniform vec3  u_material_rgb[16];
 uniform float u_diffusion;
 uniform bool  u_last_pass;
+// 7-nov-2026 (docs/WIP/REALCOLOR_MODEL_REVIEW_7NOV.md §1): medio de dos flujos (Kubelka-Munk) por CANAL. Por filamento:
+// u_km_ks = K/S por canal, u_km_s = S (1/mm), u_km_rinf = lo que devuelve un bloque grueso. Lo calcula el C++.
+uniform bool  u_km_on;
+uniform vec3  u_km_ks[16];
+uniform float u_km_s[16];
+uniform vec3  u_km_rinf[16];
 
 in vec2 uv;
 layout(location = 0) out vec4 out_accum_color;
@@ -70,6 +76,28 @@ void main()
         float esparce = 1.0 - exp(-thickness * D * 5.0);
         vec3 aporta = esparce + (1.0 - esparce) * (1.0 - t);
         vec3 deja = (1.0 - esparce) * t;
+        // 7-nov-2026 — medio KM por canal: reflexión R y transmisión T de una capa de grosor `thickness`.
+        // `aporta` = R normalizado al bloque grueso (el color iluminado ya viene en layer_lin); la luz que
+        // sigue baja Y vuelve a subir por esta capa: T².
+        if (u_km_on && td > 1e-6) {
+            vec3 ks = u_km_ks[td_idx];
+            vec3 ri = u_km_rinf[td_idx];
+            float u = u_km_s[td_idx] * thickness;
+            vec3 a = vec3(1.0) + ks;
+            vec3 b = sqrt(max(a * a - vec3(1.0), vec3(0.0)));
+            vec3 bu = min(b * u, vec3(20.0));
+            vec3 ep = exp(bu), em = exp(-bu);
+            vec3 sh = 0.5 * (ep - em), ch = 0.5 * (ep + em);
+            vec3 den = a * sh + b * ch;
+            vec3 R = sh / max(den, vec3(1e-6));
+            vec3 Tt = b / max(den, vec3(1e-6));
+            // canal casi blanco (b ≈ 0): límite R = u/(1+u), T = 1/(1+u)
+            if (b.r < 1e-4) { R.r = u / (1.0 + u); Tt.r = 1.0 / (1.0 + u); }
+            if (b.g < 1e-4) { R.g = u / (1.0 + u); Tt.g = 1.0 / (1.0 + u); }
+            if (b.b < 1e-4) { R.b = u / (1.0 + u); Tt.b = 1.0 / (1.0 + u); }
+            aporta = clamp(R / max(ri, vec3(1e-3)), 0.0, 1.0);
+            deja = Tt * Tt;
+        }
         // §7.4.2: en la última pasada del presupuesto, si aún tocamos plástico, lo que sigue pasando
         // no puede ver el fondo: se lo lleva este cordón (sin esto la pieza gruesa se transparenta).
         if (u_last_pass) { aporta += deja; deja = vec3(0.0); }

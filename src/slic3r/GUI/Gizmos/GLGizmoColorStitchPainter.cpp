@@ -1,5 +1,6 @@
 // NEOTKO_PROFILE_TAG_START
 #include <chrono>
+#include "libslic3r/LocalesUtils.hpp" // NEOTKO audit 1-nov: numbers in any UI language
 #include "GLGizmoColorStitchPainter.hpp"
 #include "GizmoNeotkoStyle.hpp"   // s318 — el lenguaje de panel compartido (Zonas de Soporte, s287)
 
@@ -49,9 +50,7 @@
 #include <sstream>   // NEOTKO_STICKER_TAG — ostringstream slurp
 #include <boost/nowide/convert.hpp>
 #include <boost/filesystem/path.hpp> // NEOTKO_STICKER_TAG — stem() for the sticker's display name
-#ifdef NEOTKO_PRIVATE_TOWER
-#include "libslic3r/neotko_private/StickerExt.hpp"
-#endif
+#include "libslic3r/ColorSci/DepthStack.hpp"
 
 namespace Slic3r::GUI {
 
@@ -372,6 +371,46 @@ bool GLGizmoColorStitchPainter::raycast_under_cursor(CursorHit& out)
     return true;
 }
 
+// 11-nov-2026 — Select area: cubo sobre la malla de UN volumen desde `seed`. Crece a los vecinos cuya
+// normal se separa menos de `angle_deg` de la del triángulo del que vienen (como el cubo del painter).
+// Devuelve los triángulos en el frame del OBJETO, 9 floats cada uno.
+static std::vector<float> cs_area_bucket(const ModelVolume& mv, int seed, float angle_deg)
+{
+    std::vector<float> out;
+    const indexed_triangle_set& its = mv.mesh().its;
+    if (seed < 0 || seed >= int(its.indices.size())) return out;
+    const Transform3d m = mv.get_matrix();
+    auto vtx = [&](int f, int k) { return Vec3d(m * its.vertices[its.indices[f][k]].cast<double>()); };
+    auto nrm = [&](int f) {
+        const Vec3d a = vtx(f, 0), b = vtx(f, 1), c = vtx(f, 2);
+        const Vec3d n = (b - a).cross(c - a);
+        const double l = n.norm();
+        return l > 1e-12 ? Vec3d(n / l) : Vec3d(Vec3d::Zero());
+    };
+    const double cos_lim = std::cos(double(std::clamp(angle_deg, 0.f, 89.f)) * M_PI / 180.0);
+    const std::vector<Vec3i32> nb = its_face_neighbors(its);
+    std::vector<char> seen(its.indices.size(), 0);
+    std::vector<int>  todo{ seed };
+    seen[seed] = 1;
+    while (!todo.empty()) {
+        const int f = todo.back();
+        todo.pop_back();
+        for (int k = 0; k < 3; ++k) {
+            const Vec3d p = vtx(f, k);
+            out.push_back(float(p.x())); out.push_back(float(p.y())); out.push_back(float(p.z()));
+        }
+        const Vec3d nf = nrm(f);
+        for (int k = 0; k < 3; ++k) {
+            const int g = nb[f][k];
+            if (g < 0 || seen[g]) continue;
+            if (nrm(g).dot(nf) < cos_lim) continue;
+            seen[g] = 1;
+            todo.push_back(g);
+        }
+    }
+    return out;
+}
+
 bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
 {
     // NEOTKO_COLORSTITCH_TAG — s118: el botón derecho es SOLO cámara aquí (no pinta,
@@ -428,6 +467,33 @@ bool GLGizmoColorStitchPainter::on_mouse(const wxMouseEvent& mouse_event)
     //      patrón de pre-activación en hover que el eyedropper, click coloca
     //      el SVG pendiente tangente al punto de impacto.
     if (m_sticker_mode) {
+        // 11-nov-2026 — Select area: clic = cubo desde esa cara (sustituye), Shift+clic = suma.
+        if (m_area_picking && m_editing_sticker_idx >= 0) {
+            if (mouse_event.LeftDown() && !mouse_event.Dragging()) {
+                ModelObject* mo_a = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+                CursorHit ch;
+                if (mo_a && m_editing_sticker_idx < (int)mo_a->colorstitch_stickers.size() && raycast_under_cursor(ch)
+                    && ch.mv != nullptr && ch.mv->get_object() == mo_a) {
+                    std::vector<float> tris = cs_area_bucket(*ch.mv, ch.facet, m_area_angle);
+                    if (!tris.empty()) {
+                        Plater::TakeSnapshot snap(wxGetApp().plater(), _u8L("Select sticker area"),
+                                                  UndoRedo::SnapshotType::GizmoAction);
+                        ColorStitchSticker& st = mo_a->colorstitch_stickers[m_editing_sticker_idx];
+                        if (!mouse_event.ShiftDown()) st.area_tris.clear();
+                        st.area_tris.insert(st.area_tris.end(), tris.begin(), tris.end());
+                        NEOTKO_LOG(PROFILE, "STICKER_AREA_PICK sticker='" << st.name << "' facet=" << ch.facet
+                            << " mesh_id=" << ch.mesh_id << " angle=" << m_area_angle << " tris=" << tris.size() / 9
+                            << " total=" << st.area_tris.size() / 9 << (mouse_event.ShiftDown() ? " (suma)" : ""));
+                        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+                        m_parent.set_as_dirty();
+                    }
+                }
+                return true;   // el clic es del selector: ni mover ni pintar
+            }
+            if (mouse_event.LeftUp() || (mouse_event.Dragging() && mouse_event.LeftIsDown()))
+                return true;
+            return false;      // cámara y hover, normales
+        }
         if (m_editing_sticker_idx >= 0) {
             // Solo consumimos los eventos del botón IZQUIERDO que arrancan/continúan
             // el arrastre — el resto (Moving suelto, drag con botón derecho/medio
@@ -3383,10 +3449,8 @@ using ColorStitchPaintPreview::pathblend_make_weave;
 // contar líneas es la separación (ancho − altura·(1−π/4)); ver weave_top_line_spacing().
 static double GLGizmoColorStitchPainter_top_line_width() { return ColorStitchPaintPreview::weave_top_line_spacing(); }
 static double GLGizmoColorStitchPainter_layer_height()   { return ColorStitchPaintPreview::weave_layer_height(); }
-#ifdef NEOTKO_PRIVATE_TOWER
 static void recompute_depth_recipes(ColorStitchSticker& st, const Slic3r::ColorSci::Material mats[4], int n_fil,
                                     const float bg[3], double layer_mm);
-#endif
 std::vector<TriangleSelectorPatch::WeaveParams>
 GLGizmoColorStitchPainter::build_ebt_weave_for_volume(const ModelVolume* mv,
                                                    const TriangleSelectorPatch* sel,
@@ -4474,7 +4538,7 @@ void GLGizmoColorStitchPainter::render_td_grid()
         float td = 1.f;
         if (ac) {
             const std::string v = ac->get("neotko_td_" + std::to_string(t + 1));
-            try { if (!v.empty()) td = std::stof(v); } catch (...) {}
+            if (!v.empty()) td = float(Slic3r::neo_to_double(v, td));
         }
         {
             const float  sq  = 1.45f * u;
@@ -4520,7 +4584,6 @@ void GLGizmoColorStitchPainter::render_td_grid()
         ImGui::PopID();
     }
 
-#ifdef NEOTKO_PRIVATE_TOWER
     // 23-oct-2026 — las recetas por profundidad se resuelven con los TD de ese momento y se guardan en el 3mf; al
     // cambiar un TD no se rehacen solas. Este botón las rehace todas con los TD de ahora.
     if (ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
@@ -4544,7 +4607,6 @@ void GLGizmoColorStitchPainter::render_td_grid()
                                          "with the TD and filament colours set now.\n"
                                          "Use it after changing a TD or a filament.").c_str());
     }
-#endif
 }
 
 // preview_argb (0xAARRGGBB) desde el rgb predicho de una receta.
@@ -5494,6 +5556,7 @@ void GLGizmoColorStitchPainter::exit_sticker_edit()
     m_editing_sticker_idx = -1;
     m_pro_from_sticker    = false;   // s364
     m_sticker_dragging    = false;
+    m_area_picking        = false;   // 11-nov-2026 — Select area
     m_parent.set_as_dirty();
 }
 
@@ -5578,6 +5641,7 @@ void GLGizmoColorStitchPainter::render_sticker_edit_overlay()
     ColorStitchStickerPreview::render_one(*mo, m_editing_sticker_idx, mi->get_transformation().get_matrix(),
                                           camera, st.is_multicolor() ? 0.8f : 0.55f,
                                           focus, focus >= 0 ? m_stkc_focus_b0 : -1, focus >= 0 ? m_stkc_focus_b1 : -1, pulse);
+    render_sticker_area_overlay(*mo, st);   // 11-nov-2026 — Select area
     if (!m_sticker_overlay_outline.is_initialized()) return;
 
     shader->start_using();
@@ -5594,6 +5658,46 @@ void GLGizmoColorStitchPainter::render_sticker_edit_overlay()
         m_sticker_overlay_outline.render();
     }
 
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glEnable(GL_CULL_FACE));
+    shader->stop_using();
+}
+
+// 11-nov-2026 — Select area: el área elegida en naranja translúcido (más fuerte mientras eliges), alzada
+// 0,03 mm en Z mundo como el resto del overlay. Se reconstruye sólo si cambian los triángulos.
+void GLGizmoColorStitchPainter::render_sticker_area_overlay(const ModelObject& mo, const ColorStitchSticker& st)
+{
+    if (!st.has_area() || mo.instances.empty()) return;
+    size_t key = st.area_tris.size();
+    for (float f : st.area_tris) key = key * 1000003u ^ std::hash<float>{}(f);
+    if (key != m_area_model_key || !m_area_model.is_initialized()) {
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        unsigned int n = 0;
+        for (size_t i = 0; i + 8 < st.area_tris.size(); i += 9) {
+            for (int k = 0; k < 3; ++k)
+                g.add_vertex(Vec3f(st.area_tris[i + 3 * k], st.area_tris[i + 3 * k + 1], st.area_tris[i + 3 * k + 2]));
+            g.add_triangle(n, n + 1, n + 2);
+            n += 3;
+        }
+        m_area_model.reset();
+        m_area_model.init_from(std::move(g));
+        m_area_model_key = key;
+    }
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (!shader) return;
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const Transform3d model_matrix = Geometry::translation_transform(Vec3d(0., 0., 0.03))
+                                   * mo.instances.front()->get_transformation().get_matrix();
+    shader->start_using();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix() * model_matrix);
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    m_area_model.set_color(ColorRGBA(1.f, 0.55f, 0.1f, m_area_picking ? 0.45f : 0.2f));
+    m_area_model.render();
     glsafe(::glDisable(GL_BLEND));
     glsafe(::glEnable(GL_CULL_FACE));
     shader->stop_using();
@@ -6308,6 +6412,55 @@ void GLGizmoColorStitchPainter::render_sticker_place_body(ModelObject* mo, Color
         ImGui::PopStyleColor();
     }
 
+    // ---- Área (11-nov-2026 — Select area) ----
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(_u8L("Area").c_str());
+        ImGui::SameLine(cs_label_col());
+        const bool picking = m_area_picking && idx == m_editing_sticker_idx;
+        if (neo_text_button((_u8L("Select area") + "##stk_area").c_str(), picking ? NeoBtn::Accent : NeoBtn::Ghost)) {
+            if (picking)
+                m_area_picking = false;
+            else {
+                if (idx != m_editing_sticker_idx) enter_sticker_edit(idx);
+                m_area_picking = (idx == m_editing_sticker_idx);
+            }
+            m_parent.set_as_dirty();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Click the face the sticker goes on.\n"
+                                         "It spreads like the bucket: lower Angle = stops sooner.\n"
+                                         "Shift+click adds another face.\n"
+                                         "The sticker only prints inside the orange area.").c_str());
+        if (st.has_area()) {
+            ImGui::SameLine();
+            if (neo_text_button((_u8L("Auto") + "##stk_area_auto").c_str(), NeoBtn::Ghost)) {
+                snapshot(_u8L("Sticker area auto"));
+                st.area_tris.clear();
+                reslice();
+                m_parent.set_as_dirty();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Forget the picked area.\n"
+                                             "The slicer guesses the face from the layers again.").c_str());
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, neo_col(NeoCol::TextDim));
+        if (st.has_area())
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), _u8L("Picked: %d triangles").c_str(), int(st.area_tris.size() / 9));
+            ImGui::TextUnformatted(buf);
+        }
+        else
+            ImGui::TextUnformatted(_u8L("Auto: guessed from the layers").c_str());
+        ImGui::PopStyleColor();
+        if (picking) {
+            neo_row_slider("##stk_area_ang", _u8L("Angle").c_str(), &m_area_angle, 1.f, 60.f, "%.0f°",
+                           _u8L("How much the bucket bends to keep spreading.\n"
+                                "Flat faces: low. Curved faces: higher.").c_str());
+        }
+    }
+
     // ---- Girar ----
     const std::string spin_fmt = std::string("%.0f") + I18N::translate_utf8("°", "deg");
     if (neo_row_slider("##stk_spin", _u8L("Rotate").c_str(), &m_editing_spin_deg, -180.f, 180.f,
@@ -6508,13 +6661,12 @@ void GLGizmoColorStitchPainter::render_sticker_editor()
         render_sticker_place_body(mo, st, m_stkc_idx);
 }
 
-#ifdef NEOTKO_PRIVATE_TOWER
-// 22-oct-2026 — recetas por profundidad de todos los colores del sticker (extensión opcional). Base = el
+// 22-oct-2026 — recetas por profundidad de todos los colores del sticker. Base = el
 // filamento cuyo color es el del objeto; los demás filamentos cargados son los de color.
 static void recompute_depth_recipes(ColorStitchSticker& st, const Slic3r::ColorSci::Material mats[4], int n_fil,
                                     const float bg[3], double layer_mm)
 {
-    namespace DR = Slic3r::StickerExt;
+    namespace DR = Slic3r::DepthStack;
     auto close = [](const std::array<float, 3>& a, const float b[3]) {
         return std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]) < 0.02f;
     };
@@ -6530,13 +6682,17 @@ static void recompute_depth_recipes(ColorStitchSticker& st, const Slic3r::ColorS
     o.layer_mm     = float(layer_mm);
     o.max_depth_mm = st.depth_max_mm;
     o.fixed_order  = false;   // la torre no preocupa (Sebas, 22-oct-2026): gana el color
-    auto solve_into = [&](uint32_t rgb, std::vector<ColorStitchDepthBlock>& out, float* de) {
+    auto solve_into = [&](uint32_t rgb, std::vector<ColorStitchDepthBlock>& out, float* de, int* pred = nullptr) {
         const std::array<float, 3> t { ((rgb >> 16) & 0xFF) / 255.f, ((rgb >> 8) & 0xFF) / 255.f, (rgb & 0xFF) / 255.f };
         const DR::Result r = DR::solve(t, colours, base, o);
         out.clear();
         for (const DR::Block& b : r.blocks)
             out.push_back({ b.tool, float(b.layers) * o.layer_mm });
         if (de) *de = r.delta_e;
+        if (pred) {   // 11-nov-2026 — el color que saldrá, para la vista previa
+            auto b8 = [](float v) { return int(std::lround(std::clamp(v, 0.f, 1.f) * 255.f)); };
+            *pred = (b8(r.rgb[0]) << 16) | (b8(r.rgb[1]) << 8) | b8(r.rgb[2]);
+        }
         std::ostringstream os;
         for (const DR::Block& b : r.blocks) os << " T" << b.tool << "x" << b.layers;
         NEOTKO_LOG(PROFILE, "DEPTH_RECIPE sticker='" << st.name << "' rgb=" << std::hex << rgb << std::dec
@@ -6547,9 +6703,8 @@ static void recompute_depth_recipes(ColorStitchSticker& st, const Slic3r::ColorS
     if (st.colors.empty())
         st.depth_blocks.clear();   // sticker de 1 color: sin RGB guardado, de momento sin receta
     for (ColorStitchStickerColor& c : st.colors)
-        solve_into(c.rgb, c.depth_blocks, &c.depth_de);
+        solve_into(c.rgb, c.depth_blocks, &c.depth_de, &c.depth_rgb);
 }
-#endif
 
 void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& st)
 {
@@ -7087,8 +7242,7 @@ void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& 
         changed = true;
     }
 
-#ifdef NEOTKO_PRIVATE_TOWER
-    // 22-oct-2026 — modo profundidad (extensión opcional del build): capas enteras bajo la cara vista.
+    // 22-oct-2026 — modo profundidad: capas enteras bajo la cara vista.
     {
         bool dm = st.depth_mode;
         auto recompute = [&]() {
@@ -7132,6 +7286,26 @@ void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& 
                                              "Never deeper than the material behind the sticker.").c_str());
         }
         if (st.depth_mode && !st.colors.empty()) {
+            // 11-nov-2026 — qué enseña la vista: lo que saldrá o lo que se busca.
+            namespace CSPv = Slic3r::GUI::ColorStitchStickerPreview;
+            const bool tgt = CSPv::depth_show_target();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(_u8L("Show").c_str());
+            ImGui::SameLine();
+            for (int k = 0; k < 2; ++k) {
+                if (k) ImGui::SameLine();
+                const std::string lbl = k ? _u8L("Target") + "##stk_dshow1" : _u8L("Result") + "##stk_dshow0";
+                if (neo_text_button(lbl.c_str(), (k == 1) == tgt ? NeoBtn::Accent : NeoBtn::Ghost) && (k == 1) != tgt) {
+                    CSPv::set_depth_show_target(k == 1);
+                    m_parent.set_as_dirty();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", k ? _u8L("The colours of the SVG: what the recipe aims for.").c_str()
+                                              : _u8L("The colours the recipe should print\n"
+                                                     "(predicted from your filaments).").c_str());
+            }
+        }
+        if (st.depth_mode && !st.colors.empty()) {
             // Por color: mm usados y ΔE predicho (modelo RealView Ray sin difusión).
             std::ostringstream os;
             os.setf(std::ios::fixed);
@@ -7146,7 +7320,6 @@ void GLGizmoColorStitchPainter::render_sticker_colours_body(ColorStitchSticker& 
             ImGui::PopTextWrapPos();
         }
     }
-#endif
 
     if (changed) sticker_colours_changed(st);
 }
@@ -8277,6 +8450,128 @@ void GLGizmoColorStitchPainter::render_object_department()
                    "object.").c_str()
             : _u8L("Assign a MixedFilament to this object's extruder first.").c_str());
 
+    // 4-nov-2026 — receta por PROFUNDIDAD (el Depth recipe de los stickers) para el MixedFilament Object.
+    // Apagada por defecto, para probar. Solo cuenta con el modo encendido.
+    if (mo && mf_has_mixed_filament) {
+        bool dm = false;
+        float dmax = 5.f;
+        if (const auto* o = dynamic_cast<const ConfigOptionBool*>(mo->config.option("mixed_filament_depth_mode")))
+            dm = o->value;
+        if (const auto* o = dynamic_cast<const ConfigOptionFloat*>(mo->config.option("mixed_filament_depth_max")))
+            dmax = float(o->value);
+        m_imgui->disabled_begin(!mf_mode_on);
+        if (ImGui::Checkbox((_u8L("Depth recipe") + "##mf_depth").c_str(), &dm)) {
+            wxGetApp().plater()->take_snapshot("MixedFilament depth recipe");
+            mo->config.set_key_value("mixed_filament_depth_mode", new ConfigOptionBool(dm));
+            m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", _u8L("Build the top colour from whole layers under the surface,\n"
+                                         "as deep as it needs (up to Max depth), so it matches the walls.\n"
+                                         "The infill under the top turns solid to that depth,\n"
+                                         "and above the bottom too.").c_str());
+        if (dm) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(6.f * neo_u());
+            float mx = dmax;
+            if (ImGui::InputFloat("##mf_depth_max", &mx, 0.2f, 1.f, "%.1f mm")) {
+                mx = std::clamp(mx, 0.2f, 10.f);
+                if (mx != dmax) {
+                    wxGetApp().plater()->take_snapshot("MixedFilament max depth");
+                    mo->config.set_key_value("mixed_filament_depth_max", new ConfigOptionFloat(mx));
+                    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+                }
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Max depth: the deepest the recipe may go.\n"
+                                             "Never deeper than the material under the top.").c_str());
+            bool ch = false;
+            if (const auto* o = dynamic_cast<const ConfigOptionBool*>(mo->config.option("mixed_filament_depth_chamfer")))
+                ch = o->value;
+            if (ImGui::Checkbox((_u8L("Chamfer") + "##mf_depth_chamfer").c_str(), &ch)) {
+                wxGetApp().plater()->take_snapshot("MixedFilament depth chamfer");
+                mo->config.set_key_value("mixed_filament_depth_chamfer", new ConfigOptionBool(ch));
+                m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", _u8L("Off: the recipe goes straight down under the whole top.\n"
+                                             "On: it shrinks inwards as it goes deeper (45°),\n"
+                                             "like painted surfaces. Less solid inside.").c_str());
+            // 12-nov-2026 — 2_50: el objetivo es siempre RealView (Colour model y Nozzle smear fuera del panel; el
+            // código del selector está en el historial del 6/7-nov). Lo pintado no lleva receta en esta versión.
+            // Lista: cada MixedFilament (o filamento pintado) con su receta, ΔE y su propio Max.
+            std::map<unsigned int, float> per;
+            std::string per_str;
+            if (const auto* o = dynamic_cast<const ConfigOptionString*>(mo->config.option("mixed_filament_depth_max_per_mf")))
+                per_str = o->value;
+            {
+                std::istringstream is(per_str);
+                std::string tok;
+                while (std::getline(is, tok, ',')) {
+                    const size_t c = tok.find(':');
+                    if (c == std::string::npos) continue;
+                    try { per[unsigned(std::stoul(tok.substr(0, c)))] = std::stof(tok.substr(c + 1)); } catch (...) {}
+                }
+            }
+            const Print& dprint = wxGetApp().plater()->fff_print();
+            const std::vector<Print::MixedDepthSummary>* sum = nullptr;
+            for (const PrintObject* po : dprint.objects())
+                if (po->model_object()->id() == mo->id()) { sum = dprint.mixed_filament_depth_summary(po); break; }   // el Print tiene SU copia del modelo: comparar por id, no por puntero
+            if (!sum || sum->empty()) {
+                ImGui::TextDisabled("%s", _u8L("Slice to see each recipe.").c_str());
+            } else {
+                for (const Print::MixedDepthSummary& s : *sum) {
+                    ImGui::PushID(int(s.id));
+                    ImGui::ColorButton("##sw", ImVec4(s.target[0], s.target[1], s.target[2], 1.f),
+                                       ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder, ImVec2(neo_u(), neo_u()));
+                    ImGui::SameLine();
+                    std::string line = s.label + (s.painted ? "  painted" : "  object");
+                    float mm = 0.f;
+                    for (const ColorStitchDepthBlock& bl : s.blocks) mm += bl.mm;
+                    char buf[48];
+                    std::snprintf(buf, sizeof(buf), "  %.1f mm  dE %.1f", mm, s.delta_e);
+                    line += buf;
+                    if (s.delta_e > 2.f) {
+                        ImGui::TextColored(ImVec4(1.f, 0.7f, 0.2f, 1.f), "%s  !", line.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", _u8L("Can't reach this colour with these filaments and TDs\n"
+                                                         "(dE over 2). It uses the closest thin recipe.").c_str());
+                    } else
+                        ImGui::TextUnformatted(line.c_str());
+                    // Bloques, de arriba (la cara) hacia abajo.
+                    std::string bl_txt = "   ";
+                    for (auto it = s.blocks.rbegin(); it != s.blocks.rend(); ++it) {
+                        std::snprintf(buf, sizeof(buf), "T%d %.1f  ", it->tool + 1, it->mm);
+                        bl_txt += buf;
+                    }
+                    if (s.blocks.empty()) bl_txt += _u8L("no extra layers");
+                    ImGui::TextDisabled("%s", bl_txt.c_str());
+                    ImGui::SameLine();
+                    float v = per.count(s.id) ? per[s.id] : 0.f;
+                    const float v0 = v;
+                    ImGui::SetNextItemWidth(5.f * neo_u());
+                    if (ImGui::InputFloat("##mx", &v, 0.2f, 1.f, v > 0.f ? "%.1f mm" : "auto")) {
+                        v = v <= 0.05f ? 0.f : std::clamp(v, 0.2f, 10.f);
+                        if (std::abs(v - v0) > 1e-4f) {
+                            if (v > 0.f) per[s.id] = v; else per.erase(s.id);
+                            std::ostringstream os;
+                            bool first = true;
+                            for (const auto& [id, mmv] : per) { os << (first ? "" : ",") << id << ":" << mmv; first = false; }
+                            wxGetApp().plater()->take_snapshot("MixedFilament depth max per filament");
+                            mo->config.set_key_value("mixed_filament_depth_max_per_mf", new ConfigOptionString(os.str()));
+                            m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+                        }
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", _u8L("Max depth for this one only.\n"
+                                                     "auto = the Depth recipe max above.").c_str());
+                    ImGui::PopID();
+                }
+            }
+        }
+        m_imgui->disabled_end();
+    }
+
     if (mf_has_mixed_filament) {
         // s318 — el swatch va en su propia línea: la fila del interruptor llega hasta el borde.
         // Swatch: resolved profile from the last apply (best-effort — may be one
@@ -8285,7 +8580,7 @@ void GLGizmoColorStitchPainter::render_object_department()
         if (mo) {
             const Print& print = wxGetApp().plater()->fff_print();
             for (const PrintObject* po : print.objects()) {
-                if (po->model_object() != mo) continue;
+                if (po->model_object()->id() != mo->id()) continue;   // 12-nov-2026: el Print tiene SU copia, comparar por id
                 if (const int pid = print.mixed_filament_sandwich_profile_id(po); pid)
                     if (const auto* p = SurfaceEffectProfileManager::get().find(pid))
                         mf_argb = p->preview_argb;
@@ -8325,7 +8620,7 @@ void GLGizmoColorStitchPainter::render_object_department()
     {
         const Print& print = wxGetApp().plater()->fff_print();
         for (const PrintObject* po : print.objects()) {
-            if (po->model_object() != mo) continue;
+            if (po->model_object()->id() != mo->id()) continue;   // 12-nov-2026: comparar por id (era «No recipe resolved yet» siempre)
             pid = print.mixed_filament_sandwich_profile_id(po);
             break;
         }

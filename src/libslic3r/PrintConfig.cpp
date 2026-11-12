@@ -7067,6 +7067,59 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // 4-nov-2026 — MixedFilament Object con receta por PROFUNDIDAD (el Depth recipe de los stickers):
+    // capas enteras bajo cada top y sobre cada bottom, hasta `mixed_filament_depth_max` mm, para que la
+    // cara iguale el color de la pared. Solo cuenta con mixed_filament_sandwich_mode encendido. Lo
+    // escribe el gizmo (Object & TD), sin widget en Tab.cpp.
+    def = this->add("mixed_filament_depth_mode", coBool);
+    def->label = L("MixedFilament depth recipe");
+    def->tooltip = L("Build the top and bottom colour from whole layers under the surface, "
+                     "as deep as needed (up to the max depth), so it matches the walls.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("mixed_filament_depth_max", coFloat);
+    def->label = L("MixedFilament max depth");
+    def->tooltip = L("The deepest the MixedFilament depth recipe may go.");
+    def->sidetext = L("mm");
+    def->min = 0.2;
+    def->max = 10.;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(5.));
+
+    // 5-nov-2026 — zona de la receta por profundidad en CHAFLÁN (a 45°, encoge hacia dentro al bajar, como la
+    // pintura de Orca) en vez de recta. Opción para comparar en RealView.
+    def = this->add("mixed_filament_depth_chamfer", coBool);
+    def->label = L("MixedFilament depth chamfer");
+    def->tooltip = L("Shrink the depth zone inwards as it goes deeper (45°), like painted surfaces, instead of a straight column.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // 6-nov-2026 — a qué color apunta la receta (objetivo = la pared del MF): 0 Light mix (franjas promediadas
+    // en lineal), 1 Panel swatch (la muestra del panel), 2 RealView (franjas con el Nozzle smear de RealView).
+    def = this->add("mixed_filament_depth_model", coInt);
+    def->label = L("MixedFilament depth colour model");
+    def->tooltip = L("Which colour the depth recipe aims at: 0 light mix, 1 panel swatch, 2 RealView (nozzle smear), 3 Lupa (light inside the layers).");
+    def->min = 0;
+    def->max = 3;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def = this->add("mixed_filament_depth_smear", coFloat);
+    def->label = L("MixedFilament depth nozzle smear");
+    def->tooltip = L("Nozzle smear for the RealView colour model, same as RealView's Fused lines.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 1;   // min/max son int en ConfigOptionDef: 0.3 se quedaba en 0 y la app no arrancaba; el código ya recorta a 0,3
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    // "id:mm,id:mm" — máx. de profundidad por MixedFilament (o filamento pintado); vacío = el del objeto.
+    def = this->add("mixed_filament_depth_max_per_mf", coString);
+    def->label = L("MixedFilament depth max per filament");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
     // NEOTKO_HAE_TAG s247 — Height Adaptive Effects curves (docs/FUTURE/HEIGHT_ADAPTIVE_EFFECTS_PLAN.md).
     // Hidden blob keys, same contract as the Sandwich pass stacks and the ALH recolor plan: written
     // per-object by the Height Adaptive Effects gizmo, never shown in any optgroup. Format

@@ -568,6 +568,20 @@ void GLModel::init_from(const indexed_triangle_set& its)
     data.reserve_vertices(3 * its.indices.size());
     data.reserve_indices(3 * its.indices.size());
 
+    // NEOTKO_SHAREDVERTS_TAG 4-nov — copia compartida para mallas grandes (ver GLModel.hpp).
+    if (its.indices.size() >= SharedMinTriangles) {
+        m_shared.positions.resize(3 * its.vertices.size());
+        for (size_t i = 0; i < its.vertices.size(); ++i) {
+            m_shared.positions[3 * i + 0] = its.vertices[i].x();
+            m_shared.positions[3 * i + 1] = its.vertices[i].y();
+            m_shared.positions[3 * i + 2] = its.vertices[i].z();
+        }
+        m_shared.indices.resize(3 * its.indices.size());
+        for (size_t i = 0; i < its.indices.size(); ++i)
+            for (size_t j = 0; j < 3; ++j)
+                m_shared.indices[3 * i + j] = (unsigned int)its.indices[i][j];
+    }
+
     // vertices + indices
     unsigned int vertices_counter = 0;
     for (uint32_t i = 0; i < its.indices.size(); ++i) {
@@ -706,6 +720,13 @@ void GLModel::reset()
         m_render_data.vbo_id = 0;
     }
 
+    // NEOTKO_SHAREDVERTS_TAG 4-nov
+    if (m_shared.ibo_id > 0)
+        glsafe(::glDeleteBuffers(1, &m_shared.ibo_id));
+    if (m_shared.vbo_id > 0)
+        glsafe(::glDeleteBuffers(1, &m_shared.vbo_id));
+    m_shared = SharedData();
+
     m_render_data.vertices_count = 0;
     m_render_data.indices_count  = 0;
     m_render_data.geometry.vertices = std::vector<float>();
@@ -742,7 +763,67 @@ static GLenum get_index_type(const GLModel::Geometry& data)
 
 void GLModel::render()
 {
+    // NEOTKO_SHAREDVERTS_TAG 4-nov — solo el dibujo COMPLETO usa la copia compartida; un rango
+    // parcial (tverts_range) se refiere a la geometría repetida y sigue por el camino de siempre.
+    if (s_prefer_shared && has_shared() && !m_render_disabled && render_shared())
+        return;
     render(std::make_pair<size_t, size_t>(0, indices_count()));
+}
+
+bool GLModel::s_prefer_shared = false;
+
+bool GLModel::render_shared()
+{
+    GLShaderProgram* shader = wxGetApp().get_current_shader();
+    // Vale si el shader sabe sacar la normal en el píxel (u_derived_normal) o si ni siquiera la
+    // lee (pases de profundidad: shadow_depth, shells_shadow).
+    if (shader == nullptr ||
+        (shader->get_uniform_location("u_derived_normal") == -1 && shader->get_attrib_location("v_normal") != -1))
+        return false;
+
+    if (m_shared.vbo_id == 0 || m_shared.ibo_id == 0) {
+        if (m_shared.positions.empty() || m_shared.indices.empty())
+            return false;
+        glsafe(::glGenBuffers(1, &m_shared.vbo_id));
+        glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_shared.vbo_id));
+        glsafe(::glBufferData(GL_ARRAY_BUFFER, m_shared.positions.size() * sizeof(float), m_shared.positions.data(), GL_STATIC_DRAW));
+        glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
+        glsafe(::glGenBuffers(1, &m_shared.ibo_id));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_shared.ibo_id));
+        glsafe(::glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_shared.indices.size() * sizeof(unsigned int), m_shared.indices.data(), GL_STATIC_DRAW));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+        m_shared.indices_count = m_shared.indices.size();
+        m_shared.positions = std::vector<float>();
+        m_shared.indices   = std::vector<unsigned int>();
+    }
+
+    const int position_id = shader->get_attrib_location("v_position");
+    if (position_id == -1)
+        return false;
+    const int normal_id = shader->get_attrib_location("v_normal");
+
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_shared.vbo_id));
+    glsafe(::glVertexAttribPointer(position_id, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (const void*)0));
+    glsafe(::glEnableVertexAttribArray(position_id));
+    // Sin normales en el buffer. NO se deja el atributo sin array: en el perfil Legacy de Mac,
+    // si al atributo 0 le falta array no se dibuja NADA (4-nov: las mallas grandes desaparecían).
+    // Se apunta al buffer de posiciones; con u_derived_normal el shader no lo usa.
+    if (normal_id != -1) {
+        glsafe(::glVertexAttribPointer(normal_id, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (const void*)0));
+        glsafe(::glEnableVertexAttribArray(normal_id));
+    }
+
+    shader->set_uniform("uniform_color", m_render_data.geometry.color);
+
+    glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_shared.ibo_id));
+    glsafe(::glDrawElements(GL_TRIANGLES, (GLsizei)m_shared.indices_count, GL_UNSIGNED_INT, (const void*)0));
+    glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+
+    if (normal_id != -1)
+        glsafe(::glDisableVertexAttribArray(normal_id));
+    glsafe(::glDisableVertexAttribArray(position_id));
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
+    return true;
 }
 
 void GLModel::render(const std::pair<size_t, size_t>& range)

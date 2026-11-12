@@ -3,6 +3,7 @@
 // cuadre, el roto es esto. Los comentarios 🚨 marcan las trampas de la §6 de la fase P, que son
 // las que costaron sesiones; no tocarlas sin releerlas.
 #include "NeoStroke.hpp"
+#include "../LocalesUtils.hpp" // NEOTKO audit 1-nov: numbers in any UI language
 #include "NeoStrokeSkeleton.hpp"
 #include "NeoStrokeField.hpp"   // s338 — el planificador por campo
 #include "NeoStrokeLink.hpp"
@@ -2543,10 +2544,11 @@ static NsParams make_params(PerimeterGenerator& g, const Config& cfg, const Prin
 static bool apply_island_override(Config& c, const std::string& key, const std::string& val)
 {
     // Lo escribe el gizmo con `serialize()` de la opción: un % sale como «15%» y un sí/no como «1»/«0».
-    char* end = nullptr;
-    const double v = std::strtod(val.c_str(), &end);
-    if (end == val.c_str())
+    size_t       used = 0;
+    const double v    = Slic3r::neo_to_double(val, 0., &used);
+    if (used == 0)
         return false;
+    const char* end = val.c_str() + used;
     while (end && (*end == '%' || *end == ' '))
         ++end;
     if (!end || *end != '\0')

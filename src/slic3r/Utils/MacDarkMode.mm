@@ -438,3 +438,25 @@ void initGestures(void * view,  wxEvtHandler * handler)
 
 }
 }
+
+// NEOTKO_PRESENT_TAG 4-nov — ver MacDarkMode.hpp. Grabado en cámara lenta, de cada 5-6
+// fotogramas que genera el 3D solo llega 1 a la pantalla. Dos pruebas, cada una con su env var
+// en GLCanvas3D::render(): esperar al refresco en cada swap, o publicar la capa en cada swap.
+#import <OpenGL/OpenGL.h>
+#import <QuartzCore/QuartzCore.h>
+namespace Slic3r {
+namespace GUI {
+void mac_gl_set_swap_interval(int interval)
+{
+    CGLContextObj ctx = CGLGetCurrentContext();
+    if (ctx != nullptr) {
+        GLint v = interval;
+        CGLSetParameter(ctx, kCGLCPSwapInterval, &v);
+    }
+}
+void mac_ca_transaction_flush()
+{
+    [CATransaction flush];
+}
+}
+}

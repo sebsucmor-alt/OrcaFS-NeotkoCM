@@ -6,6 +6,8 @@
 #include "Geometry/VoronoiVisualUtils.hpp"
 #include "Geometry/VoronoiUtils.hpp"
 #include "MutablePolygon.hpp"
+#include <chrono>
+#include <sstream>
 #include "NeoDebug.hpp" // NEOTKO_PAINTERPRO_TAG (Idea A) — surface-depth debug channel
 #include "format.hpp"
 
@@ -1180,6 +1182,25 @@ static bool is_volume_sinking(const indexed_triangle_set &its, const Transform3d
 //#define MMU_SEGMENTATION_DEBUG_TOP_BOTTOM
 
 // Returns segmentation of top and bottom layers based on painting in segmentation gizmos.
+// NEOTKO 12-nov-2026 — caso Jay: una malla muy densa (2M triángulos) recién cortada deja una tapa plana con miles
+// de puntos; el opening_ex de abajo se quedaba en Clipper (FixupIntersectionOrder, cuadrático) minutos con un solo
+// hilo. Simplificar a 0,01 mm (por debajo de lo que imprime la máquina) SOLO si hay muchos puntos.
+static ExPolygons neotko_tame_dense(ExPolygons ex, size_t layer_idx, size_t color_idx, const char *side)
+{
+    const size_t before = count_points(ex);
+    if (before <= 5000)
+        return ex;
+    const auto t0 = std::chrono::steady_clock::now();
+    ex = expolygons_simplify(ex, scale_(0.01));
+    if (NeoDebug::enabled(NeoDebug::GRAVITY)) {
+        std::ostringstream os;
+        os << "SEG_DENSE " << side << " layer=" << layer_idx << " color=" << color_idx << " puntos=" << before << "->"
+           << count_points(ex) << " ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        NeoDebug::write(NeoDebug::GRAVITY, os.str());
+    }
+    return ex;
+}
+
 static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_layers(const PrintObject                                               &print_object,
                                                                                       const std::vector<ExPolygons>                                   &input_expolygons,
                                                                                       const std::function<ModelVolumeFacetsInfo(const ModelVolume &)> &extract_facets_info,
@@ -1433,6 +1454,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                 const int effective_bottom_shells = color_depth > 0 ? std::max(stat.bottom_shell_layers, color_depth + 1) : stat.bottom_shell_layers;
                 if (std::vector<Polygons> &top = top_raw[color_idx]; ! top.empty() && ! top[layer_idx].empty())
                     if (ExPolygons top_ex = union_ex(top[layer_idx]); ! top_ex.empty()) {
+                        top_ex = neotko_tame_dense(std::move(top_ex), layer_idx, color_idx, "top");   // 12-nov-2026
                         // Clean up thin projections. They are not printable anyways.
                         top_ex = opening_ex(top_ex, stat.small_region_threshold);
                         if (! top_ex.empty()) {
@@ -1464,6 +1486,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                     }
                 if (std::vector<Polygons> &bottom = bottom_raw[color_idx]; ! bottom.empty() && ! bottom[layer_idx].empty())
                     if (ExPolygons bottom_ex = union_ex(bottom[layer_idx]); ! bottom_ex.empty()) {
+                        bottom_ex = neotko_tame_dense(std::move(bottom_ex), layer_idx, color_idx, "bottom");   // 12-nov-2026
                         // Clean up thin projections. They are not printable anyways.
                         bottom_ex = opening_ex(bottom_ex, stat.small_region_threshold);
                         if (! bottom_ex.empty()) {

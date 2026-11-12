@@ -1,6 +1,7 @@
 #include "../libslic3r.h"
 #include "../Exception.hpp"
 #include "../Model.hpp"
+#include "../PaintClay.hpp"         // NEOTKO_CLAY_TAG: decal names unique on load
 #include "../SurfaceEffectProfile.hpp" // NEOTKO_PROFILE_TAG
 #include "../NeotkoImportCarry.hpp"    // NEOTKO_IMPORT_TAG — s362
 #include "../ColorStitch.hpp"      // NEOTKO_PROFILE_TAG — NEOTKO_LOG + NeoDebug::PROFILE
@@ -367,6 +368,7 @@ static inline std::string serialize_colorstitch_stickers(const std::vector<Slic3
                 if (col.zone >= 0) jc["z"] = col.zone;                          // s350: zona del SVG
                 if (!col.depth_blocks.empty()) jc["d"] = depth_blocks_to_json(col.depth_blocks);   // receta por profundidad
                 if (col.depth_de >= 0.f) jc["de"] = col.depth_de;
+                if (col.depth_rgb >= 0) jc["dr"] = col.depth_rgb;   // 11-nov-2026 — color predicho (vista previa)
                 c.push_back(std::move(jc));
             }
             j["c"]  = std::move(c);
@@ -379,6 +381,7 @@ static inline std::string serialize_colorstitch_stickers(const std::vector<Slic3
             j["dx"] = st.depth_max_mm;
         }
         if (!st.depth_blocks.empty()) j["d"] = depth_blocks_to_json(st.depth_blocks);
+        if (st.has_area()) j["ar"] = st.area_tris;   // 11-nov-2026 — Select area (omitido si no hay)
         arr.push_back(std::move(j));
     }
     return colorstitch_profiles_b64_encode(arr.dump());
@@ -401,6 +404,7 @@ static inline std::string serialize_paint_decals(const std::vector<Slic3r::Paint
         j["l"] = { d.lin[0], d.lin[1], d.lin[2], d.lin[3] };
         j["o"] = { d.off[0], d.off[1] };
         if (d.through) j["t"] = 1;
+        if (d.through_depth > 0.) j["td"] = d.through_depth;
         if (d.warp != Slic3r::PaintDecal().warp)
             j["w"] = { d.warp[0], d.warp[1], d.warp[2], d.warp[3], d.warp[4], d.warp[5], d.warp[6], d.warp[7], d.warp[8] };
         if (d.mirror != 0) j["m"] = d.mirror;
@@ -423,6 +427,21 @@ static inline std::string serialize_paint_decals(const std::vector<Slic3r::Paint
         }
         if (d.hidden) j["h"] = 1;
         if (d.locked) j["k"] = 1;
+        if (d.clay != Slic3r::PaintDecalClay()) // NEOTKO_CLAY_TAG
+            j["cl"] = { { "on", d.clay.on ? 1 : 0 }, { "h", d.clay.height }, { "pf", d.clay.profile },
+                        { "f", d.clay.falloff }, { "pu", d.clay.paint_under ? 1 : 0 }, { "an", d.clay.anchor ? 1 : 0 }, { "sg", d.clay.straight ? 1 : 0 }, { "ss", d.clay.smooth_surface }, { "fs", d.clay.follow_surface }, { "st", d.clay.stretch }, { "sk", d.clay.stretch_slope }, { "mt", d.clay.min_thick }, { "sm", d.clay.smooth },
+                        { "gh", d.clay.group_height }, { "gm", d.clay.group_mode }, { "fz", d.clay.frozen ? 1 : 0 }, { "fl", d.clay.frozen_was_locked ? 1 : 0 } };
+        if (!d.surface.clicks.empty()) {   // NEOTKO_SURFACE_TAG
+            nlohmann::json cs = nlohmann::json::array();
+            for (const Slic3r::PaintSurfaceClick& k : d.surface.clicks)
+                cs.push_back({ k.p[0], k.p[1], k.p[2], k.n[0], k.n[1], k.n[2], k.out[0], k.out[1], k.out[2], k.in[0], k.in[1], k.in[2] });
+            j["sf"] = { { "k", std::move(cs) }, { "c", d.surface.closed ? 1 : 0 }, { "w", d.surface.width } };
+            if (d.surface.wrap) {
+                const Slic3r::stroke::Params& b = d.surface.brush;
+                j["sf"]["wr"] = 1;
+                j["sf"]["bp"] = { int(b.engine), b.size, b.stream, int(b.curve), b.tin, b.tout, b.minw, b.speed, b.step, b.simplify, int(b.width), b.inertia, b.drops };
+            }
+        }
         arr.push_back(std::move(j));
     }
     return colorstitch_profiles_b64_encode(arr.dump());
@@ -452,6 +471,7 @@ static inline void parse_paint_decals(const std::string& b64, std::vector<Slic3r
             read(j, "l", d.lin.data(), 4);
             read(j, "o", d.off.data(), 2);
             d.through = j.value("t", 0) != 0;
+            d.through_depth = std::clamp(j.value("td", 0.0), 0.0, 1000.0);
             read(j, "w", d.warp.data(), 9);
             d.mirror = j.value("m", 0) & 7;
             d.mirror_readable = j.value("mr", 0) != 0;
@@ -475,6 +495,60 @@ static inline void parse_paint_decals(const std::string& b64, std::vector<Slic3r
                 }
             d.hidden = j.value("h", 0) != 0;
             d.locked = j.value("k", 0) != 0;
+            if (j.contains("cl") && j["cl"].is_object()) { // NEOTKO_CLAY_TAG
+                const nlohmann::json& c = j["cl"];
+                d.clay.on          = c.value("on", 0) != 0;
+                d.clay.height      = c.value("h", 0.4);
+                d.clay.profile     = std::clamp(c.value("pf", 2), 0, 3);
+                d.clay.falloff     = c.value("f", 0.6);
+                d.clay.paint_under = c.value("pu", 0) != 0;
+                d.clay.anchor      = c.value("an", 1) != 0;
+                d.clay.straight    = c.value("sg", 1) != 0;
+                d.clay.smooth_surface = std::clamp(c.value("ss", 0.0), 0.0, 5.0);
+                d.clay.follow_surface = std::clamp(c.value("fs", 0.0), 0.0, 50.0);
+                d.clay.stretch        = std::clamp(c.value("st", 0.0), 0.0, 50.0);
+                d.clay.stretch_slope  = std::clamp(c.value("sk", 1.0), 0.1, 5.0);
+                d.clay.min_thick      = std::clamp(c.value("mt", 0.42), 0.0, 3.0);
+                d.clay.smooth      = std::clamp(c.value("sm", 20), 0, 30);
+                d.clay.frozen            = c.value("fz", 0) != 0;
+                d.clay.frozen_was_locked = c.value("fl", 0) != 0;
+                if (c.contains("gh") && c["gh"].is_array())
+                    for (const nlohmann::json& h : c["gh"])
+                        d.clay.group_height.push_back(h.is_number() ? h.get<double>() : 0.);
+                if (c.contains("gm") && c["gm"].is_array())
+                    for (const nlohmann::json& m : c["gm"])
+                        d.clay.group_mode.push_back(m.is_number_integer() ? m.get<int>() : 0);
+            }
+            if (j.contains("sf") && j["sf"].is_object()) {   // NEOTKO_SURFACE_TAG
+                const nlohmann::json& sf = j["sf"];
+                d.surface.closed = sf.value("c", 0) != 0;
+                d.surface.width  = std::clamp(sf.value("w", 2.0), 0.1, 50.0);
+                d.surface.wrap   = sf.value("wr", 0) != 0;
+                if (sf.contains("bp") && sf["bp"].is_array() && sf["bp"].size() >= 13) {
+                    const nlohmann::json& b = sf["bp"];
+                    Slic3r::stroke::Params& p = d.surface.brush;
+                    p.engine = Slic3r::stroke::Engine(std::clamp(b[0].get<int>(), 0, 1));
+                    p.size = b[1].get<double>(); p.stream = b[2].get<double>();
+                    p.curve = Slic3r::stroke::Curve(std::clamp(b[3].get<int>(), 0, 2));
+                    p.tin = b[4].get<double>(); p.tout = b[5].get<double>(); p.minw = b[6].get<double>(); p.speed = b[7].get<double>();
+                    p.step = b[8].get<double>(); p.simplify = b[9].get<double>();
+                    p.width = Slic3r::stroke::Width(std::clamp(b[10].get<int>(), 0, 2));
+                    p.inertia = b[11].get<double>(); p.drops = b[12].get<double>();
+                }
+                if (sf.contains("k") && sf["k"].is_array())
+                    for (const nlohmann::json& k : sf["k"]) {
+                        if (!k.is_array() || k.size() < 12)
+                            continue;
+                        Slic3r::PaintSurfaceClick c;
+                        for (int i = 0; i < 3; ++i) {
+                            c.p[i]   = k[i].get<double>();
+                            c.n[i]   = k[3 + i].get<double>();
+                            c.out[i] = k[6 + i].get<double>();
+                            c.in[i]  = k[9 + i].get<double>();
+                        }
+                        d.surface.clicks.push_back(c);
+                    }
+            }
             if (!d.svg_data.empty())
                 decals.push_back(std::move(d));
         }
@@ -513,6 +587,7 @@ static inline void parse_colorstitch_stickers(const std::string& b64, std::vecto
                     col.zone       = jc.value("z", -1);   // s350
                     if (jc.contains("d")) depth_blocks_from_json(jc["d"], col.depth_blocks);
                     col.depth_de   = jc.value("de", -1.f);
+                    col.depth_rgb  = jc.value("dr", -1);
                     st.colors.push_back(col);
                 }
             st.color_mode = j.value("cm", 0);
@@ -520,6 +595,10 @@ static inline void parse_colorstitch_stickers(const std::string& b64, std::vecto
             st.depth_mode   = j.value("dm", 0) != 0;
             st.depth_max_mm = j.value("dx", 5.f);
             if (j.contains("d")) depth_blocks_from_json(j["d"], st.depth_blocks);
+            if (j.contains("ar") && j["ar"].is_array()) {   // 11-nov-2026 — Select area
+                for (const auto& v : j["ar"]) st.area_tris.push_back(v.get<float>());
+                st.area_tris.resize(st.area_tris.size() / 9 * 9);
+            }
             if (!st.svg_data.empty())
                 stickers.push_back(std::move(st));
         }
@@ -537,6 +616,9 @@ static inline void parse_colorstitch_stickers(const std::string& b64, std::vecto
 static constexpr const char* TEXTURE_BUMP_PLANE_TRANSFORM_KEY = "texture_bump_plane_transform_b64";
 // NEOTKO_PRINTORDER_TAG 2_49 — ModelObject::neotko_print_rank, written only when > 0.
 static constexpr const char* NEOTKO_PRINT_RANK_KEY = "neotko_print_rank";
+// NEOTKO_PRIMGEN_TAG 5-nov-2026 — ModelVolume::neotko_primitive_recipe, written only when set.
+static constexpr const char* NEOTKO_PRIMITIVE_RECIPE_KEY = "neotko_primitive_recipe";
+static constexpr const char* NEOTKO_PRIMITIVE_SCRIPT_KEY = "neotko_primitive_script"; // base64 text
 
 static inline std::string serialize_texture_bump_plane_transform(const Slic3r::Transform3d& transform)
 {
@@ -2431,8 +2513,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         model_object->module_name = metadata.value;
                     else if (metadata.key == COLORSTITCH_STICKERS_KEY) // NEOTKO_STICKER_TAG
                         parse_colorstitch_stickers(metadata.value, model_object->colorstitch_stickers);
-                    else if (metadata.key == PAINT_DECALS_KEY) // NEOTKO_SVGDECAL_TAG — F3
+                    else if (metadata.key == PAINT_DECALS_KEY) { // NEOTKO_SVGDECAL_TAG — F3
                         parse_paint_decals(metadata.value, model_object->paint_decals);
+                        for (size_t di = 0; di < model_object->paint_decals.size(); ++di) // older files: repeated names
+                            paint_decal_unique_name(model_object->paint_decals, di);
+                    }
                     else if (metadata.key == PAINT_SYMMETRY_KEY) { // NEOTKO_SVGDECAL_TAG — F5
                         std::istringstream in(metadata.value);
                         Slic3r::PaintSymmetry sym;
@@ -5312,6 +5397,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     parse_colorstitch_slot_table(metadata.value, volume->texture_bump_slot_to_zone_id);
                 else if (metadata.key == NEOTKO_PRINT_RANK_KEY) // NEOTKO_PRINTORDER_TAG 2_49 — part number
                     volume->neotko_print_rank = std::max(0, std::atoi(metadata.value.c_str()));
+                else if (metadata.key == NEOTKO_PRIMITIVE_RECIPE_KEY) // NEOTKO_PRIMGEN_TAG
+                    volume->neotko_primitive_recipe = metadata.value;
+                else if (metadata.key == NEOTKO_PRIMITIVE_SCRIPT_KEY) // NEOTKO_PRIMGEN_TAG
+                    volume->neotko_primitive_script = colorstitch_profiles_b64_decode(metadata.value);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -5479,6 +5568,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     parse_colorstitch_slot_table(metadata.value, volume->texture_bump_slot_to_zone_id);
                 else if (metadata.key == NEOTKO_PRINT_RANK_KEY) // NEOTKO_PRINTORDER_TAG 2_49 — part number
                     volume->neotko_print_rank = std::max(0, std::atoi(metadata.value.c_str()));
+                else if (metadata.key == NEOTKO_PRIMITIVE_RECIPE_KEY) // NEOTKO_PRIMGEN_TAG
+                    volume->neotko_primitive_recipe = metadata.value;
+                else if (metadata.key == NEOTKO_PRIMITIVE_SCRIPT_KEY) // NEOTKO_PRIMGEN_TAG
+                    volume->neotko_primitive_script = colorstitch_profiles_b64_decode(metadata.value);
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -8191,6 +8284,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             if (volume->neotko_print_rank > 0)
                                 stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NEOTKO_PRINT_RANK_KEY
                                        << "\" " << VALUE_ATTR << "=\"" << volume->neotko_print_rank << "\"/>\n";
+                            // NEOTKO_PRIMGEN_TAG — recipe is [a-z0-9_;=.-] only, no escaping needed
+                            if (!volume->neotko_primitive_recipe.empty())
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NEOTKO_PRIMITIVE_RECIPE_KEY
+                                       << "\" " << VALUE_ATTR << "=\"" << xml_escape(volume->neotko_primitive_recipe) << "\"/>\n";
+                            if (!volume->neotko_primitive_script.empty())
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NEOTKO_PRIMITIVE_SCRIPT_KEY
+                                       << "\" " << VALUE_ATTR << "=\"" << colorstitch_profiles_b64_encode(volume->neotko_primitive_script) << "\"/>\n";
 
                             if (const std::optional<EmbossShape> &es = volume->emboss_shape;
                                 es.has_value())

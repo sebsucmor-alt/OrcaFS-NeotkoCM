@@ -98,6 +98,7 @@ public:
         SupportZones, // NEOTKO_SUPPORTZONES_TAG -- s286 F2.5, the aimed-corridor author, LibreMode-gated
         NeoStroke, // NEOTKO_NEOSTROKE_TAG -- s337, the NeoStroke preview (gated by the NeoStroke lock)
         PrintOrder, // NEOTKO_PRINTORDER_TAG -- 2_49, Print order (Experimental), LibreMode-gated
+        PrimitiveGenerator, // NEOTKO_PRIMGEN_TAG -- 5-nov-2026, NOT LibreMode-gated
         //SlaSupports,
         // BBS
         //FaceRecognition,

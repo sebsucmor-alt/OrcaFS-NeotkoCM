@@ -112,7 +112,7 @@ void stickers_into_multipart(const std::vector<ModelObject*>& sources, ModelObje
         for (const Transform3d& frame : frames)
             for (const ColorStitchSticker& st : o->colorstitch_stickers) {
                 ColorStitchSticker moved = st;
-                moved.transform = frame * st.transform;
+                moved.transform_frame(frame);   // 11-nov: con su área
                 const Vec3d a = moved.transform * Vec3d::Zero();
                 NEOTKO_LOG(PROFILE, "IMPORT_CARRY multipart sticker='" << st.name << "' from='" << o->name
                     << "' anchor=[" << a.x() << "," << a.y() << "," << a.z() << "]");
@@ -125,7 +125,7 @@ void shift_stickers(ModelObject& object, const Vec3d& shift)
 {
     if (object.colorstitch_stickers.empty() || shift.isZero()) return;
     for (ColorStitchSticker& st : object.colorstitch_stickers)
-        st.transform = Eigen::Translation3d(shift) * st.transform;
+        st.transform_frame(Transform3d(Eigen::Translation3d(shift)));   // 11-nov: con su área
     NEOTKO_LOG(PROFILE, "IMPORT_CARRY shift obj='" << object.name << "' stickers="
         << object.colorstitch_stickers.size()
         << " by=[" << shift.x() << "," << shift.y() << "," << shift.z() << "]");

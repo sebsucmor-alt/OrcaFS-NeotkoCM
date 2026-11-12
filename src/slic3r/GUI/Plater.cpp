@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+#include "Gizmos/GLGizmoPainterBase.hpp"   // NEOTKO_VECTORBRUSH_TAG: Ctrl+Z on unsaved strokes
 #include "MixedFilamentDialog.hpp"
 #include "NeotkoBedNozzleExtras.hpp"  // NEOTKO_TOOLSLEEP_TAG s294
 #include "MixedFilamentBatchDialog.hpp"
@@ -22732,7 +22733,17 @@ void Plater::single_snapshots_leave(SingleSnapshot *single)
 {
     p->single_snapshots_leave(single);
 }
-void Plater::undo() { p->undo(); }
+void Plater::undo()
+{
+    // NEOTKO_VECTORBRUSH_TAG (3-nov): menu, toolbar and Ctrl+Z all land here. With unsaved Vector Brush
+    // strokes, the last stroke goes back instead of the project's last step (the decal saved before).
+    if (auto *painter = dynamic_cast<GLGizmoPainterBase *>(get_view3D_canvas3D()->get_gizmos_manager().get_current()))
+        if (painter->local_undo()) {
+            get_view3D_canvas3D()->set_as_dirty();
+            return;
+        }
+    p->undo();
+}
 void Plater::redo() { p->redo(); }
 void Plater::undo_to(int selection)
 {
@@ -25175,6 +25186,13 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
     // it does NOT toggle Snap & Drag itself, because the panel now owns three preferences and a
     // button that both opens a panel and flips one of its checkboxes is a coin toss for the user.
     // Like the camera above: no take_snapshot(), nothing about the model changes.
+    // NEOTKO_LITRENDER_TAG (4-nov-2026): the sun button flips lighting & shadows. A view switch: no snapshot.
+    else if ((action == (int)PartPlate::LIT_RENDER_HOVER_ID) && (!right_click)) {
+        lit_render_toggle();
+        if (p->view3D != nullptr) { p->view3D->get_canvas3d()->set_as_dirty(); p->view3D->get_canvas3d()->request_extra_frame(); }
+        if (p->preview != nullptr) { p->preview->get_canvas3d()->set_as_dirty(); p->preview->get_canvas3d()->request_extra_frame(); }
+        ret = 0;
+    }
     else if ((action == (int)PartPlate::SNAP_DRAG_HOVER_ID) && (!right_click)) {
         GravitySnap::panel_open() = !GravitySnap::panel_open();
         if (p->view3D != nullptr) {

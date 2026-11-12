@@ -346,6 +346,11 @@ ImGuiWrapper::ImGuiWrapper()
     init_style();
 
     ImGui::GetIO().IniFilename = nullptr;
+    // NEOTKO_VECTORBRUSH_TAG (4-nov-2026) — ImGui 1.83 has 16-bit indices: past 65k vertices in one
+    // draw list they wrapped round and triangles joined vertices from anywhere (Hair brush on screen,
+    // its thumbnails in the panel). With this flag ImGui opens a new block every 64k (VtxOffset) and
+    // render() below points the vertex attributes at that block, which works on the Mac's GL 2.1 too.
+    ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
 }
 
 ImGuiWrapper::~ImGuiWrapper()
@@ -3080,6 +3085,15 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
 
                 // Apply scissor/clipping rectangle (Y is inverted in OpenGL)
                 glsafe(::glScissor((int)clip_min.x, (int)(fb_height - clip_max.y), (int)(clip_max.x - clip_min.x), (int)(clip_max.y - clip_min.y)));
+
+                // NEOTKO_VECTORBRUSH_TAG — the attributes start at this command's vertex block (VtxOffset)
+                const size_t vofs = size_t(pcmd->VtxOffset) * sizeof(ImDrawVert);
+                if (position_id != -1)
+                    glsafe(::glVertexAttribPointer(position_id, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (const void*)(vofs + IM_OFFSETOF(ImDrawVert, pos))));
+                if (uv_id != -1)
+                    glsafe(::glVertexAttribPointer(uv_id, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (const void*)(vofs + IM_OFFSETOF(ImDrawVert, uv))));
+                if (color_id != -1)
+                    glsafe(::glVertexAttribPointer(color_id, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(ImDrawVert), (const void*)(vofs + IM_OFFSETOF(ImDrawVert, col))));
 
                 // Bind texture, Draw
                 glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)pcmd->GetTexID()));

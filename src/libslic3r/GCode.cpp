@@ -2917,7 +2917,23 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.
-        this->set_extruders(tool_ordering.all_extruders());
+        {
+            // NEOTKO 12-nov-2026 — crash drwho_mezcla: un MixedFilament personalizado (1+4 al 20 %) metía T3 SOLO en los
+            // cambios Local-Z planificados de la torre; T3 no estaba en all_extruders(), el writer no tenía ese
+            // Extruder y toolchange(3) dejaba m_extruder apuntando fuera de la lista (unretract → EXC_BAD_ACCESS).
+            // El writer conoce TODA herramienta que la torre vaya a pedir.
+            std::vector<unsigned int> ex = tool_ordering.all_extruders();
+            auto add = [&ex](int t) { if (t >= 0 && std::find(ex.begin(), ex.end(), unsigned(t)) == ex.end()) ex.push_back(unsigned(t)); };
+            const auto& wtd = print.wipe_tower_data();
+            for (const auto& layer : wtd.tool_changes)
+                for (const WipeTower::ToolChangeResult& t : layer) { add(t.initial_tool); add(t.new_tool); }
+            for (const auto& layer : wtd.local_z_tool_changes)
+                for (const WipeTower::ToolChangeResult& t : layer) { add(t.initial_tool); add(t.new_tool); }
+            if (ex.size() != tool_ordering.all_extruders().size())
+                NEOTKO_LOG(WIPETOWER, "WRITER_EXTRUDERS +tower: ordering=" << tool_ordering.all_extruders().size()
+                    << " with_tower=" << ex.size());
+            this->set_extruders(ex);
+        }
         NeotkoPrintOrder::log_header(print); // NEOTKO_PRINTORDER_TAG 2_49 — unconditional
         print_object_instances_ordering =
             // NEOTKO_PRINTORDER_TAG 2_49 — «Print order (Experimental)»: numbered objects first, in

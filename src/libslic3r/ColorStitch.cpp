@@ -5,10 +5,12 @@
 // NEOTKO_COLORSTITCH_TAG_END
 
 #include "ColorStitch.hpp"
+#include "LocalesUtils.hpp" // NEOTKO audit 1-nov: numbers in any UI language
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "PrintConfig.hpp"
 #include "Print.hpp"                  // NEOTKO_PROFILE_TAG — PrintObject access
+#include "Layer.hpp"                  // 11-nov-2026 — lslices para la cara del sticker
 #include "Model.hpp"                  // NEOTKO_PROFILE_TAG — ModelObject/Volume access
 #include "ClipperUtils.hpp"           // NEOTKO_PROFILE_TAG — Fase 6c: union_ex for footprint mask
 #include "SurfaceEffectProfile.hpp"   // NEOTKO_PROFILE_TAG — painted-profile lookup
@@ -1890,11 +1892,81 @@ std::vector<ColorStitch::StickerColorMask> ColorStitch::sticker_color_masks_unca
     return out;
 }
 
+// 11-nov-2026 — la CARA del sticker. Antes la silueta del SVG valía como un prisma en planta: pintaba
+// cualquier top cercano bajo ella (la anilla y el canto de la nube) y, con Depth recipe, bajaba por el
+// borde del objeto. Ahora se recorta a la zona que está al aire en la capa de la cara (lo que esa capa
+// tiene y la de encima no; mirando abajo, la de debajo), como el selector de área del painter.
+// Capa de la cara = la de print_z (bottom_z si mira abajo) más cercana a face_z, a ±1 capa, con más
+// área común con la silueta. Sin capas o sin cara → silueta entera (como antes) y se avisa en el log.
+static ExPolygons cs_sticker_face_region(const ColorStitchSticker& st, const PrintObject* po, const ExPolygons& silhouette)
+{
+    const auto& layers = po->layers();
+    if (layers.empty() || silhouette.empty()) return {};
+    const bool   down   = ColorStitch::sticker_faces_down(st);
+    const double face_z = (po->trafo_centered() * st.transform * Vec3d(0., 0., 0.)).z();
+    int    best_i = -1;
+    double best_area = 0.;
+    ExPolygons best;
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const Layer* l = layers[i];
+        const double z  = down ? l->bottom_z() : l->print_z;
+        if (std::abs(z - face_z) > l->height + 0.02) continue;
+        const Layer* nb = down ? (i > 0 ? layers[i - 1] : nullptr) : (i + 1 < layers.size() ? layers[i + 1] : nullptr);
+        ExPolygons open = nb ? diff_ex(l->lslices, nb->lslices) : l->lslices;
+        if (open.empty()) continue;
+        // Se queda con las islas al aire que toca la silueta (enteras: la silueta se recorta luego).
+        ExPolygons touched;
+        double a = 0.;
+        for (ExPolygon& e : open) {
+            const double ai = area(intersection_ex(ExPolygons{ e }, silhouette));
+            if (ai > 0.) { a += ai; touched.emplace_back(std::move(e)); }
+        }
+        if (a > best_area) { best_area = a; best_i = int(i); best = std::move(touched); }
+    }
+    NEOTKO_LOG(PROFILE, "STICKER_FACE name='" << st.name << "' face_z=" << face_z
+        << (down ? " ABAJO" : "") << " layer=" << best_i
+        << " z=" << (best_i >= 0 ? (down ? layers[best_i]->bottom_z() : layers[best_i]->print_z) : -1.)
+        << " islas=" << best.size() << " area_mm2=" << best_area * SCALING_FACTOR * SCALING_FACTOR
+        << " silueta_mm2=" << area(silhouette) * SCALING_FACTOR * SCALING_FACTOR
+        << (best_i < 0 ? " SIN_CARA(silueta entera)" : ""));
+    return best;
+}
+
 std::vector<ColorStitch::StickerColorMask> ColorStitch::sticker_color_masks_slice_frame(const ColorStitchSticker& sticker,
                                                                                         const PrintObject* po)
 {
     if (!po) return {};
     std::vector<StickerColorMask> out = sticker_color_masks(sticker, po->trafo_centered() * sticker.transform);
+    {   // 11-nov-2026 — recorte a la cara (ver cs_sticker_face_region).
+        ExPolygons sil;
+        for (const StickerColorMask& m : out) expolygons_append(sil, m.mask);
+        sil = union_ex(sil);
+        ExPolygons face;
+        if (sticker.has_area()) {
+            // 11-nov-2026 — Select area: planta de los triángulos elegidos, en el frame de laminado.
+            // +0,02 mm para que las costuras entre triángulos no dejen rendijas.
+            const Transform3d tr = po->trafo_centered();
+            Polygons tris;
+            tris.reserve(sticker.area_tris.size() / 9);
+            for (size_t i = 0; i + 8 < sticker.area_tris.size(); i += 9) {
+                Polygon t;
+                for (int k = 0; k < 3; ++k) {
+                    const float* v = &sticker.area_tris[i + 3 * k];
+                    const Vec3d  p = tr * Vec3d(v[0], v[1], v[2]);
+                    t.points.emplace_back(scale_(p.x()), scale_(p.y()));
+                }
+                if (t.area() < 0) t.reverse();
+                tris.emplace_back(std::move(t));
+            }
+            face = offset_ex(union_ex(tris), float(scale_(0.02)));
+            NEOTKO_LOG(PROFILE, "STICKER_AREA name='" << sticker.name << "' tris=" << tris.size()
+                << " area_mm2=" << area(face) * SCALING_FACTOR * SCALING_FACTOR
+                << " silueta_mm2=" << area(sil) * SCALING_FACTOR * SCALING_FACTOR);
+        } else
+            face = cs_sticker_face_region(sticker, po, sil);
+        if (!face.empty())
+            for (StickerColorMask& m : out) m.mask = intersection_ex(m.mask, face);
+    }
     if (sticker.is_multicolor() && NeoDebug::enabled(NeoDebug::PROFILE)) {
         std::ostringstream os;
         os << "STICKER_COLOR name='" << sticker.name << "' colors=" << sticker.colors.size() << " masks=[";
@@ -2428,7 +2500,7 @@ std::vector<unsigned int> ColorStitch::painted_profile_tools_1based(
     auto get_dbl = [&](const char* base, double dflt) -> double {
         const std::string v = kv_get(prefix + base);
         if (v.empty()) return dflt;
-        try { return std::stod(v); } catch (...) { return dflt; }
+        return Slic3r::neo_to_double(v, dflt);
     };
     const double mm_a = get_dbl("band_mm_a", 0.0);
     const double mm_b = get_dbl("band_mm_b", 0.0);
@@ -2873,7 +2945,7 @@ int ColorStitch::assign_and_group_tools(
             auto get_dbl = [&](const char* base, double dflt) -> double {
                 auto it = kv.find(prefix + base);
                 if (it == kv.end()) return dflt;
-                try { return std::stod(it->second); } catch (...) { return dflt; }
+                return Slic3r::neo_to_double(it->second, dflt);
             };
             auto get_bool = [&](const char* base, bool dflt) -> bool {
                 auto it = kv.find(prefix + base);
@@ -4257,7 +4329,7 @@ PathBlendPassConfig ColorStitch::pathblend_from_profile_payload(
     };
     auto gf = [&](const char* k, double def) {
         auto it = payload.kv.find(k);
-        return (it == payload.kv.end()) ? def : std::atof(it->second.c_str());
+        return (it == payload.kv.end()) ? def : Slic3r::neo_to_double(it->second, 0.);
     };
     auto gb = [&](const char* k, bool def) {
         auto it = payload.kv.find(k);

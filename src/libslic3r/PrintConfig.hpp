@@ -1251,6 +1251,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     // perimeter_override forced on). Requires the object's extruder to resolve to
     // a MixedFilament (virtual filament id); no effect otherwise.
     ((ConfigOptionBool,     mixed_filament_sandwich_mode))
+    // 4-nov-2026 — receta por profundidad del MixedFilament Object (ver PrintConfig.cpp).
+    ((ConfigOptionBool,     mixed_filament_depth_mode))
+    ((ConfigOptionFloat,    mixed_filament_depth_max))
+    ((ConfigOptionBool,     mixed_filament_depth_chamfer))
+    ((ConfigOptionInt,      mixed_filament_depth_model))
+    ((ConfigOptionFloat,    mixed_filament_depth_smear))
+    ((ConfigOptionString,   mixed_filament_depth_max_per_mf))
     // NEOTKO_HAE_TAG s247 — Height Adaptive Effects: one serialized Z→value curve per effect
     // ("z:value[:tension]|…", see Feature/HeightAdaptive/HeightCurve.hpp). Hidden keys with no
     // widget in Tab.cpp: only the gizmo writes them. Empty = effect off, and an empty curve must
