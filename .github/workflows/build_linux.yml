@@ -1,0 +1,26 @@
+name: Build Linux (Ubuntu 24.04)
+
+# One platform per workflow, so a failing or slow platform never blocks the others.
+# The finished files stay attached to this run as artifacts; "Publish release" collects them.
+on:
+  workflow_dispatch:
+    inputs:
+      build-deps-only:
+        description: 'Only build dependencies (bypasses caching)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Linux (Ubuntu 24.04)
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: ubuntu-24.04
+      arch: ''
+      build-deps-only: ${{ inputs.build-deps-only || false }}
+      force-build: false
+    secrets: inherit

@@ -1,0 +1,165 @@
+name: Publish release
+
+# Publishes a GitHub Release from builds that ALREADY finished, without building anything.
+# For each ticked platform it takes the latest successful run of "Build Windows / macOS / Linux"
+# on this branch, or the run id you type in. Run it once all three are green, or publish what is
+# ready now and run it again later with the missing platform: its files are added to the same release.
+# A full (not pre-) release is what sends the "new release" notification to everyone watching releases.
+on:
+  workflow_dispatch:
+    inputs:
+      include-windows:
+        description: 'Include Windows'
+        type: boolean
+        default: true
+      include-macos:
+        description: 'Include macOS'
+        type: boolean
+        default: true
+      include-linux:
+        description: 'Include Linux'
+        type: boolean
+        default: true
+      windows-run-id:
+        description: 'Windows run id (empty = latest successful "Build Windows")'
+        type: string
+        default: ''
+      macos-run-id:
+        description: 'macOS run id (empty = latest successful "Build macOS")'
+        type: string
+        default: ''
+      linux-run-id:
+        description: 'Linux run id (empty = latest successful "Build Linux")'
+        type: string
+        default: ''
+      release-tag:
+        description: 'Release tag (e.g. v2.5.0). Empty = v + version.inc'
+        type: string
+        default: ''
+      release-title:
+        description: 'Release title. Empty = default title'
+        type: string
+        default: ''
+      release-notes-file:
+        description: 'Release notes file in the repo (e.g. NEOTKOCM_RELEASE_2_50.md), used verbatim'
+        type: string
+        default: ''
+      prerelease:
+        description: 'Mark as pre-release (no "latest" badge; watchers may not be notified)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Find the builds
+      id: runs
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+      run: |
+        pick() {   # $1 = workflow file, $2 = typed run id
+          if [[ -n "$2" ]]; then echo "$2"; return; fi
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow "$1" --branch "$GITHUB_REF_NAME" \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty'
+        }
+        ok=0
+        for p in windows macos linux; do
+          case $p in
+            windows) inc="${{ inputs.include-windows }}"; id=$(pick build_windows.yml "${{ inputs.windows-run-id }}");;
+            macos)   inc="${{ inputs.include-macos }}";   id=$(pick build_macos.yml   "${{ inputs.macos-run-id }}");;
+            linux)   inc="${{ inputs.include-linux }}";   id=$(pick build_linux.yml   "${{ inputs.linux-run-id }}");;
+          esac
+          if [[ "$inc" != "true" ]]; then echo "$p: skipped"; continue; fi
+          if [[ -z "$id" ]]; then
+            echo "::error::$p is ticked but there is no successful run of its build on $GITHUB_REF_NAME (type a run id or untick it)"
+            exit 1
+          fi
+          echo "$p: run $id  https://github.com/$GITHUB_REPOSITORY/actions/runs/$id"
+          echo "$p=$id" >> "$GITHUB_OUTPUT"
+          ok=1
+        done
+        [[ $ok == 1 ]] || { echo "::error::No platform ticked"; exit 1; }
+
+    - name: Download Windows files
+      if: steps.runs.outputs.windows != ''
+      uses: actions/download-artifact@v4
+      with:
+        run-id: ${{ steps.runs.outputs.windows }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        path: release-assets/windows
+
+    - name: Download macOS files
+      if: steps.runs.outputs.macos != ''
+      uses: actions/download-artifact@v4
+      with:
+        run-id: ${{ steps.runs.outputs.macos }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        path: release-assets/macos
+
+    - name: Download Linux files
+      if: steps.runs.outputs.linux != ''
+      uses: actions/download-artifact@v4
+      with:
+        run-id: ${{ steps.runs.outputs.linux }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        path: release-assets/linux
+
+    - name: Compute release metadata
+      id: release_meta
+      shell: bash
+      run: |
+        version=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
+        tag="${{ inputs.release-tag }}";   [[ -n "$tag" ]]   || tag="v${version}"
+        title="${{ inputs.release-title }}"; [[ -n "$title" ]] || title="Neotko for Snapmaker Orca v${version}"
+        notes_path="${{ inputs.release-notes-file }}"
+        if [[ -n "$notes_path" ]]; then
+          [ -f "$notes_path" ] || { echo "::error::release-notes-file '$notes_path' not found (path from the repo root)"; exit 1; }
+          cp "$notes_path" "$RUNNER_TEMP/release-notes.md"
+        else
+          printf '%s\n' "Automated build for ${GITHUB_REPOSITORY} (V${version})." \
+            "macOS files from this fork are unsigned and not notarized." > "$RUNNER_TEMP/release-notes.md"
+        fi
+        { echo "tag=$tag"; echo "title=$title"; } >> "$GITHUB_OUTPUT"
+
+    - name: Collect release files
+      id: collect_files
+      shell: bash
+      run: |
+        mkdir -p release-upload
+        find release-assets -type f \
+          \( -name '*.dmg' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.zip' -o -name 'Snapmaker_Orca_profile_validator' \) \
+          -print -exec cp -f {} release-upload/ \;
+        count=$(find release-upload -maxdepth 1 -type f | wc -l | tr -d ' ')
+        echo "count=$count" >> "$GITHUB_OUTPUT"
+        [ "$count" -gt 0 ] || { echo "::error::No release files found in the chosen runs (artifacts expire after 90 days)"; exit 1; }
+
+    - name: Create or update the release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+      run: |
+        tag="${{ steps.release_meta.outputs.tag }}"
+        title="${{ steps.release_meta.outputs.title }}"
+        notes="$RUNNER_TEMP/release-notes.md"
+        pre=(); [[ "${{ inputs.prerelease }}" == "true" ]] && pre=(--prerelease) || pre=(--latest)
+        if gh release view "$tag" >/dev/null 2>&1; then
+          # Second run for a missing platform: keep the files already there, replace only same-name ones.
+          gh release edit "$tag" --title "$title" --notes-file "$notes" "${pre[@]}"
+        else
+          gh release create "$tag" --title "$title" --notes-file "$notes" --target "$GITHUB_SHA" "${pre[@]}"
+        fi
+        mapfile -t files < <(find release-upload -maxdepth 1 -type f | sort)
+        gh release upload "$tag" "${files[@]}" --clobber
+        echo "Published: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"

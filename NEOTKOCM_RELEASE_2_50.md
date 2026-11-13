@@ -5,7 +5,7 @@ By Neotko — inventor of Ironing/Neosanding (Ultimaker Cura, PrusaSlicer)
 
 ---
 
-# Neotko 2.5.0 — on Snapmaker Orca 2.4.0 — Release Notes (draft, in progress)
+# Neotko 2.5.0 — on Snapmaker Orca 2.4.0 — Release Notes
 
 > ⚠️ **Review your generated Gcode before long or production prints, especially if you
 > turn on any of the features below.**
@@ -89,6 +89,12 @@ saves the strokes as a vector decal, so it gets colours, mirror and Clay like an
 ### Clay Tool (Experimental)
 
 **Where**: the painter, **Clay** tab (key **K**).
+
+![An SVG crack loaded on a face is raised with Clay, then dragged across the cheek: the part follows the surface and rebuilds on the spot](docs/images/Clay-living-crack.gif)
+
+![The same crack set to Engrave, in the G-code preview: it sinks into the skin with its own colour](docs/images/Reel-250-crack-slice.webp)
+
+![The Akira skull with its decals raised as Clay parts, turning](docs/images/Clay-akira-skull.gif)
 
 Raise your decals off the surface as real parts, or carve them into the object. Each colour of the decal
 becomes its own part with that colour's filament, so it slices like any other part.
@@ -262,10 +268,16 @@ Tested with a 5.7 million triangle project (painted skull plus Clay parts) on an
   their own, and deleting one asks first.
 - **Cut to parts now works with connectors**: each piece becomes its own object with its connector, left
   where it was. Without connectors it works as before.
+
+  ![The object list after a cut with connectors: each piece shows its connector as a part](docs/images/Cut-250-connectors-listed.webp)
 - **Sandwich Stickers only print on the face you put them on.** Before, the sticker's outline could also
   colour nearby tops and, with Depth recipe, the edges of the object below. New **Select area** in the
   sticker's Place tab: click the face like a bucket (Angle for how far it spreads, Shift+click adds).
   Without a picked area the slicer guesses the face from the layers.
+
+  ![Select area in the sticker's Place tab: the picked face shows in orange](docs/images/Sticker-250-select-area.webp)
+
+  ![The rainbow cloud sticker printed with CMY + White and Snapmaker TD values](docs/images/Sticker-250-cloud-realprint.webp)
 - **Sticker preview with Depth recipe** shows the colours the recipe will print (**Show: Result**) or the
   ones in the SVG (**Target**), only on the picked area, and updates when you change the recipe.
 - **Painter, Per color** (Pro Mode): reopening a 3mf with Extra walls or Surface depth per colour showed the
@@ -302,6 +314,9 @@ Tested with a 5.7 million triangle project (painted skull plus Clay parts) on an
   support blocker there.
 - **Select area** (stickers): while you pick, the sticker is still drawn on top of the face. Move it aside to
   see the face you are picking. A later build hides it while picking.
+- **Sandwich Sticker + Clay on the same object**: once a Clay part is added, the sticker is no longer kept to
+  the face you picked and spreads over the rest of the top. Keep stickers and Clay on separate objects for
+  now; fixed in a later build.
 - **Heavy painted models**: a very dense mesh with paint can slice very slowly. Remesh it first, or lower
   its detail.
 
