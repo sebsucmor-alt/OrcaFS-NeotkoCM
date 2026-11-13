@@ -81,7 +81,7 @@ jobs:
             SEP=","
           fi
           if [[ "$BUILD_MAC" == "true" ]]; then
-            MATRIX+="${SEP}{\"os\":\"macos-14\",\"arch\":\"arm64\"}"
+            MATRIX+="${SEP}{\"os\":\"macos-15\",\"arch\":\"arm64\"}"
             SEP=","
           fi
           MATRIX+=']}'

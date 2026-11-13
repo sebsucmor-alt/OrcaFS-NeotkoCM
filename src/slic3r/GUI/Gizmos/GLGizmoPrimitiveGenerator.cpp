@@ -17,6 +17,8 @@
 
 #include <wx/filedlg.h>
 #include <wx/utils.h>
+// Windows: wx defines pid_t as a macro, which breaks boost::process (same fix as MediaPlayCtrl.cpp).
+#undef pid_t
 #include <boost/process.hpp>
 
 #include <imgui/imgui.h>

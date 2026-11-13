@@ -40,7 +40,7 @@ jobs:
         run: |
           if [ "${{ inputs.os }}" = "windows-2022" ]; then
             dep_folder="/OrcaSlicer_dep"
-          elif [ "${{ inputs.os }}" = "macos-14" ]; then
+          elif [ "${{ inputs.os }}" = "macos-15" ]; then
             dep_folder=""
           else
             dep_folder="/destdir"
