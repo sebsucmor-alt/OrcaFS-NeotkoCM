@@ -8,6 +8,8 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
+// Windows: wx defines pid_t as a macro, which breaks boost::process (same fix as MediaPlayCtrl.cpp).
+#undef pid_t
 #include <boost/process.hpp>
 #ifdef _WIN32
 #include <boost/nowide/convert.hpp>
